@@ -1,0 +1,23 @@
+[Unit]
+Description=Project Pi Vosk keyword spotting alert service
+After=sound.target network-online.target thermal-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=thesis
+Group=audio
+SupplementaryGroups=gpio i2c spi
+WorkingDirectory=/home/thesis/Project_Pi
+Environment=PYTHONUNBUFFERED=1
+Environment=VOSK_MODEL_PATH=/home/thesis/vosk-models/vosk-model-tl-ph-generic-0.6
+Environment=BACKEND_ALERT_URL=http://127.0.0.1:8765/api/alerts
+Environment=MIC_NAME_HINT=seeed
+Environment=VOSK_KEYWORD_CONFIDENCE=0.60
+Environment=KWS_COOLDOWN_SECONDS=1.5
+ExecStart=/home/thesis/kws-env/bin/python /home/thesis/Project_Pi/raspberry_pi/kws/kws_alert_vosk.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

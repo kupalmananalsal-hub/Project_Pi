@@ -14,7 +14,7 @@ References:
 - Seeed ReSpeaker 2-Mics Pi HAT v2.0 current Raspberry Pi OS setup: https://wiki.seeedstudio.com/respeaker_2_mics_pi_hat_raspberry_v2/
 - Legacy Seeed voicecard repo: https://github.com/respeaker/seeed-voicecard
 - Adafruit MLX90640 Raspberry Pi/CircuitPython guide: https://learn.adafruit.com/adafruit-mlx90640-ir-thermal-camera/python-circuitpython
-- Picovoice Porcupine Python quick start/API: https://picovoice.ai/docs/quick-start/porcupine-python/
+- Vosk offline speech recognition and model list: https://alphacephei.com/vosk/models
 
 ## Phase 1: First Boot and System Update
 
@@ -346,117 +346,60 @@ PY
 ~/thermal-env-sys/bin/python ~/thermal_cam_display.py
 ```
 
-## Phase 4: Keyword Spotting with Picovoice and Snowboy Fallback
+## Phase 4: Keyword Spotting with Vosk
 
-Create the Picovoice environment:
+Picovoice is not required. This project can use Vosk offline speech recognition instead, which does not require a company email, API key, or cloud account.
+
+Create the Vosk keyword-spotting environment:
 
 ```bash
 sudo apt update
 sudo apt install -y portaudio19-dev libasound2-dev python3-pyaudio ffmpeg curl
 
-python3 -m venv --system-site-packages ~/picovoice-env
-source ~/picovoice-env/bin/activate
+python3 -m venv --system-site-packages ~/kws-env
+source ~/kws-env/bin/activate
 python -m pip install --upgrade pip wheel setuptools
-python -m pip install pvporcupine pyaudio numpy requests
+python -m pip install vosk pyaudio numpy requests
 deactivate
 ```
 
-Create directories and config:
+If you already downloaded and unzipped the models, confirm the paths:
 
 ```bash
-mkdir -p ~/.config/project-pi ~/porcupine ~/snowboy/models ~/snowboy/samples
-
-cat > ~/.config/project-pi/kws.env <<'EOF'
-PICOVOICE_ACCESS_KEY=REPLACE_WITH_YOUR_PICOVOICE_ACCESS_KEY
-PICOVOICE_KEYWORD_PATH=/home/thesis/porcupine/tulong_raspberry-pi.ppn
-PICOVOICE_MODEL_PATH=
-PORCUPINE_SENSITIVITY=0.65
-SNOWBOY_MODEL_PATH=/home/thesis/snowboy/models/tulong.pmdl
-BACKEND_ALERT_URL=http://127.0.0.1:8765/api/alerts
-MIC_NAME_HINT=seeed
-MIC_CHANNELS=2
-MIC_CHANNEL_INDEX=0
-EOF
-
-chmod 600 ~/.config/project-pi/kws.env
+ls -lh ~/vosk-models
+ls -lh ~/vosk-models/vosk-model-tl-ph-generic-0.6
 ```
 
-Picovoice setup:
+If the model folder name is different, use that exact path in the service file later.
 
-1. Create or log in to a Picovoice Console account.
-2. Copy your AccessKey into `~/.config/project-pi/kws.env`.
-3. Create a custom keyword for `Tulong` or `Help`.
-4. Download the Raspberry Pi `.ppn` keyword file.
-5. Put it at `/home/thesis/porcupine/tulong_raspberry-pi.ppn`.
-6. If you create a non-English/Tagalog model file (`.pv`), set `PICOVOICE_MODEL_PATH` to that absolute path.
-
-Record Snowboy samples:
+Quick microphone sanity check:
 
 ```bash
-for i in 1 2 3 4 5 6; do
-  echo "Recording sample $i. Say: Tulong"
-  arecord -D respeaker -f S16_LE -r 16000 -c 1 -d 2 ~/snowboy/samples/tulong_${i}.wav
-  sleep 1
-done
+arecord -l
+arecord -D respeaker -f S16_LE -r 16000 -c 1 -d 5 ~/kws_test.wav
+aplay ~/kws_test.wav
 ```
 
-Optional Snowboy model training with Docker:
+Create `~/Project_Pi/raspberry_pi/kws/kws_alert_vosk.py` from the repository, or create the same script manually on the Pi:
 
 ```bash
-sudo apt install -y docker.io
-sudo usermod -aG docker thesis
-newgrp docker
-docker run --rm -p 8000:8000 rhasspy/snowboy-seasalt
-```
+mkdir -p ~/Project_Pi/raspberry_pi/kws
 
-In another terminal, generate the `.pmdl`:
-
-```bash
-curl -X POST \
-  -F modelName=tulong \
-  -F example1=@/home/thesis/snowboy/samples/tulong_1.wav \
-  -F example2=@/home/thesis/snowboy/samples/tulong_2.wav \
-  -F example3=@/home/thesis/snowboy/samples/tulong_3.wav \
-  --output /home/thesis/snowboy/models/tulong.pmdl \
-  http://127.0.0.1:8000/generate
-```
-
-Create `~/kws_alert.py`:
-
-```bash
-cat > ~/kws_alert.py <<'PY'
+cat > ~/Project_Pi/raspberry_pi/kws/kws_alert_vosk.py <<'PY'
 #!/usr/bin/env python3
-import array
 import json
 import os
 import signal
-import struct
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
-import numpy as np
 import pyaudio
 import requests
-
-try:
-    import pvporcupine
-except Exception:
-    pvporcupine = None
+from vosk import KaldiRecognizer, Model
 
 RUNNING = True
-
-
-def load_env_file(path):
-    if not os.path.exists(path):
-        return
-    with open(path, "r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip())
 
 
 def handle_signal(signum, frame):
@@ -472,8 +415,9 @@ def find_input_device(pa, hint):
         if int(info.get("maxInputChannels", 0)) <= 0:
             continue
         name = str(info.get("name", ""))
-        print(f"Input device {index}: {name}")
-        if hint in name.lower() or "seeed" in name.lower() or "respeaker" in name.lower():
+        print(f"Input device {index}: {name}", flush=True)
+        lowered = name.lower()
+        if hint in lowered or "seeed" in lowered or "respeaker" in lowered:
             return index
         if fallback is None:
             fallback = index
@@ -482,137 +426,106 @@ def find_input_device(pa, hint):
     return fallback
 
 
-def post_alert(keyword, confidence):
+def post_alert(keyword, confidence, backend_url):
     event = {
         "event": "keyword_detected",
         "keyword": keyword,
         "confidence": confidence,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    print("Alert: Help/Tulong detected!", json.dumps(event), flush=True)
-
-    url = os.getenv("BACKEND_ALERT_URL", "http://127.0.0.1:8765/api/alerts")
+    print(f"Alert: {keyword} detected! {json.dumps(event)}", flush=True)
     try:
-        requests.post(url, json=event, timeout=1.0)
+        requests.post(backend_url, json=event, timeout=1.0)
     except Exception as exc:
-        print(f"Backend alert post failed: {exc}", file=sys.stderr)
+        print(f"Backend alert post failed: {exc}", file=sys.stderr, flush=True)
         with open("/tmp/project_pi_alerts.jsonl", "a", encoding="utf-8") as handle:
             handle.write(json.dumps(event) + "\n")
 
 
-def run_porcupine():
-    if pvporcupine is None:
-        raise RuntimeError("pvporcupine is not installed")
+def main():
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
 
-    access_key = os.getenv("PICOVOICE_ACCESS_KEY", "")
-    keyword_path = os.getenv("PICOVOICE_KEYWORD_PATH", "")
-    model_path = os.getenv("PICOVOICE_MODEL_PATH", "")
-    sensitivity = float(os.getenv("PORCUPINE_SENSITIVITY", "0.65"))
+    model_path = Path(os.getenv("VOSK_MODEL_PATH", "/home/thesis/vosk-models/vosk-model-tl-ph-generic-0.6"))
+    backend_url = os.getenv("BACKEND_ALERT_URL", "http://127.0.0.1:8765/api/alerts")
+    mic_hint = os.getenv("MIC_NAME_HINT", "seeed")
+    confidence = float(os.getenv("VOSK_KEYWORD_CONFIDENCE", "0.60"))
+    cooldown_seconds = float(os.getenv("KWS_COOLDOWN_SECONDS", "1.5"))
 
-    if not access_key or access_key.startswith("REPLACE_"):
-        raise RuntimeError("Set PICOVOICE_ACCESS_KEY in ~/.config/project-pi/kws.env")
-    if not os.path.exists(keyword_path):
-        raise RuntimeError(f"Missing Porcupine .ppn keyword file: {keyword_path}")
+    if not model_path.exists():
+        raise RuntimeError(f"Vosk model path does not exist: {model_path}")
 
-    create_args = {
-        "access_key": access_key,
-        "keyword_paths": [keyword_path],
-        "sensitivities": [sensitivity],
-    }
-    if model_path:
-        create_args["model_path"] = model_path
+    model = Model(str(model_path))
+    recognizer = KaldiRecognizer(model, 16000, json.dumps(["tulong", "help", "[unk]"]))
+    recognizer.SetWords(True)
 
-    porcupine = pvporcupine.create(**create_args)
     pa = pyaudio.PyAudio()
     stream = None
-
-    channels = int(os.getenv("MIC_CHANNELS", "2"))
-    channel_index = int(os.getenv("MIC_CHANNEL_INDEX", "0"))
-    device_index = find_input_device(pa, os.getenv("MIC_NAME_HINT", "seeed"))
-    print(f"Using input device index {device_index}")
-    print(f"Porcupine sample_rate={porcupine.sample_rate}, frame_length={porcupine.frame_length}")
+    last_alert_at = 0.0
 
     try:
+        device_index = find_input_device(pa, mic_hint)
+        print(f"Using input device index {device_index}", flush=True)
         stream = pa.open(
-            rate=porcupine.sample_rate,
-            channels=channels,
+            rate=16000,
+            channels=1,
             format=pyaudio.paInt16,
             input=True,
             input_device_index=device_index,
-            frames_per_buffer=porcupine.frame_length,
+            frames_per_buffer=4000,
         )
 
+        print("Listening for: tulong / help", flush=True)
         while RUNNING:
-            data = stream.read(porcupine.frame_length, exception_on_overflow=False)
-            pcm = np.frombuffer(data, dtype=np.int16)
-            if channels > 1:
-                pcm = pcm[channel_index::channels]
-            pcm = pcm.astype(np.int16, copy=False)
-            result = porcupine.process(pcm.tolist())
-            if result >= 0:
-                post_alert("tulong", sensitivity)
-                time.sleep(1.0)
+            data = stream.read(4000, exception_on_overflow=False)
+            accepted = recognizer.AcceptWaveform(data)
+            result = json.loads(recognizer.Result() if accepted else recognizer.PartialResult())
+            text = (result.get("text") or result.get("partial") or "").lower().strip()
+            now = time.monotonic()
+            if now - last_alert_at < cooldown_seconds:
+                continue
+            if "tulong" in text:
+                post_alert("tulong", confidence, backend_url)
+                last_alert_at = now
+                recognizer.Reset()
+            elif "help" in text:
+                post_alert("help", confidence, backend_url)
+                last_alert_at = now
+                recognizer.Reset()
     finally:
         if stream is not None:
             stream.stop_stream()
             stream.close()
         pa.terminate()
-        porcupine.delete()
-
-
-def run_snowboy_fallback():
-    model_path = os.getenv("SNOWBOY_MODEL_PATH", "")
-    if not os.path.exists(model_path):
-        raise RuntimeError(f"Missing Snowboy model: {model_path}")
-    try:
-        import snowboydecoder
-    except Exception as exc:
-        raise RuntimeError(
-            "Snowboy Python bindings are not installed. Use the Snowboy Docker training path "
-            "to create the .pmdl, then install compatible snowboydecoder bindings if needed."
-        ) from exc
-
-    detector = snowboydecoder.HotwordDetector(model_path, sensitivity=0.55, audio_gain=1)
-    detector.start(
-        detected_callback=lambda: post_alert("tulong", 0.55),
-        interrupt_check=lambda: not RUNNING,
-        sleep_time=0.03,
-    )
-    detector.terminate()
-
-
-def main():
-    load_env_file("/home/thesis/.config/project-pi/kws.env")
-    signal.signal(signal.SIGTERM, handle_signal)
-    signal.signal(signal.SIGINT, handle_signal)
-    try:
-        run_porcupine()
-    except Exception as exc:
-        print(f"Porcupine unavailable: {exc}", file=sys.stderr)
-        print("Trying Snowboy fallback...", file=sys.stderr)
-        run_snowboy_fallback()
 
 
 if __name__ == "__main__":
     main()
 PY
 
-chmod +x ~/kws_alert.py
+chmod +x ~/Project_Pi/raspberry_pi/kws/kws_alert_vosk.py
 ```
 
-Test KWS manually:
+Test Vosk manually. Start the backend first if it is not running:
 
 ```bash
-source ~/picovoice-env/bin/activate
-python ~/kws_alert.py
+sudo systemctl start thermal-backend.service
+curl http://127.0.0.1:8765/api/status
+
+source ~/kws-env/bin/activate
+VOSK_MODEL_PATH=/home/thesis/vosk-models/vosk-model-tl-ph-generic-0.6 \
+BACKEND_ALERT_URL=http://127.0.0.1:8765/api/alerts \
+python ~/Project_Pi/raspberry_pi/kws/kws_alert_vosk.py
 ```
+
+Say `tulong` near the ReSpeaker. You should see an `Alert: tulong detected!` line.
 
 Create the systemd service:
 
 ```bash
 sudo tee /etc/systemd/system/kws-alert.service >/dev/null <<'EOF'
 [Unit]
-Description=Project Pi keyword spotting alert service
+Description=Project Pi Vosk keyword spotting alert service
 After=sound.target network-online.target thermal-backend.service
 Wants=network-online.target
 
@@ -621,9 +534,14 @@ Type=simple
 User=thesis
 Group=audio
 SupplementaryGroups=gpio i2c spi
-EnvironmentFile=/home/thesis/.config/project-pi/kws.env
-WorkingDirectory=/home/thesis
-ExecStart=/home/thesis/picovoice-env/bin/python /home/thesis/kws_alert.py
+WorkingDirectory=/home/thesis/Project_Pi
+Environment=PYTHONUNBUFFERED=1
+Environment=VOSK_MODEL_PATH=/home/thesis/vosk-models/vosk-model-tl-ph-generic-0.6
+Environment=BACKEND_ALERT_URL=http://127.0.0.1:8765/api/alerts
+Environment=MIC_NAME_HINT=seeed
+Environment=VOSK_KEYWORD_CONFIDENCE=0.60
+Environment=KWS_COOLDOWN_SECONDS=1.5
+ExecStart=/home/thesis/kws-env/bin/python /home/thesis/Project_Pi/raspberry_pi/kws/kws_alert_vosk.py
 Restart=always
 RestartSec=3
 
