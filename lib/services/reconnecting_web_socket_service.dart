@@ -14,11 +14,13 @@ class ReconnectingWebSocketService<T> {
     required this.uri,
     required this.parser,
     this.reconnectDelay = const Duration(seconds: 2),
+    this.maxReconnectDelay = const Duration(seconds: 30),
   });
 
   final Uri uri;
   final T Function(dynamic message) parser;
   final Duration reconnectDelay;
+  final Duration maxReconnectDelay;
 
   final _messages = StreamController<T>.broadcast();
   final _status = StreamController<SocketConnectionStatus>.broadcast();
@@ -28,6 +30,7 @@ class ReconnectingWebSocketService<T> {
   Timer? _reconnectTimer;
   bool _manualClose = false;
   bool _started = false;
+  int _reconnectAttempt = 0;
 
   Stream<T> get messages => _messages.stream;
 
@@ -71,6 +74,7 @@ class ReconnectingWebSocketService<T> {
       _channel = WebSocketChannel.connect(uri);
       _subscription = _channel!.stream.listen(
         (message) {
+          _reconnectAttempt = 0;
           if (!_status.isClosed) {
             _status.add(SocketConnectionStatus.connected);
           }
@@ -103,9 +107,22 @@ class ReconnectingWebSocketService<T> {
     _subscription?.cancel();
     _subscription = null;
     _channel = null;
-    _reconnectTimer = Timer(reconnectDelay, () {
+    final delay = _nextDelay();
+    _reconnectTimer = Timer(delay, () {
       _reconnectTimer = null;
       _open(SocketConnectionStatus.reconnecting);
     });
+  }
+
+  Duration _nextDelay() {
+    final multiplier = 1 << _reconnectAttempt.clamp(0, 6);
+    _reconnectAttempt++;
+    final milliseconds = reconnectDelay.inMilliseconds * multiplier;
+    return Duration(
+      milliseconds: milliseconds.clamp(
+        reconnectDelay.inMilliseconds,
+        maxReconnectDelay.inMilliseconds,
+      ),
+    );
   }
 }

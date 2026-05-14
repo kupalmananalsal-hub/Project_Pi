@@ -36,7 +36,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     return Stack(
       children: [
         Scaffold(
-          appBar: AppBar(title: const Text('Pi Thermal Monitor')),
+          appBar: AppBar(title: const Text('Project Pi')),
           body: _screens[_selectedIndex],
           bottomNavigationBar: NavigationBar(
             selectedIndex: _selectedIndex,

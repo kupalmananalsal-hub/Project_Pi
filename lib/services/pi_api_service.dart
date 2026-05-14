@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 
+import '../models/alert_event.dart';
 import '../models/button_event.dart';
 import '../models/system_status.dart';
 
@@ -40,6 +41,32 @@ class PiApiService {
         'b': b.clamp(0, 255),
       },
     );
+  }
+
+  Future<void> postAlert({
+    required String keyword,
+    double confidence = 0.95,
+  }) async {
+    await _dio.post<void>(
+      '/api/alerts',
+      data: {
+        'event': 'keyword_detected',
+        'keyword': keyword,
+        'confidence': confidence,
+      },
+    );
+  }
+
+  Future<List<AlertEvent>> fetchAlerts() async {
+    final response = await _dio.get<Map<String, dynamic>>('/api/alerts');
+    final history = response.data?['history'];
+    if (history is! List) {
+      return const [];
+    }
+    return history
+        .whereType<Map<String, dynamic>>()
+        .map(AlertEvent.fromMessage)
+        .toList(growable: false);
   }
 
   Future<ButtonEvent> fetchButton() async {

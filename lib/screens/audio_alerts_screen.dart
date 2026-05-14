@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/alerts_provider.dart';
 import '../providers/audio_provider.dart';
+import '../providers/connection_provider.dart';
+import '../services/pi_api_service.dart';
 import '../widgets/audio_meter.dart';
 import '../widgets/status_card.dart';
 
@@ -13,6 +15,7 @@ class AudioAlertsScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final audio = ref.watch(audioProvider);
     final alerts = ref.watch(alertsProvider);
+    final connection = ref.watch(connectionProvider);
     final latest = audio.latest;
 
     return ListView(
@@ -60,6 +63,31 @@ class AudioAlertsScreen extends ConsumerWidget {
           value: alerts.socketStatus.name,
           icon: Icons.notification_important_rounded,
           accentColor: Colors.redAccent,
+        ),
+        FilledButton.icon(
+          onPressed: connection.isConnected
+              ? () async {
+                  try {
+                    await PiApiService(
+                      host: connection.host,
+                      port: connection.port,
+                    ).postAlert(keyword: 'tulong');
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Test alert sent')),
+                      );
+                    }
+                  } catch (error) {
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Test alert failed: $error')),
+                      );
+                    }
+                  }
+                }
+              : null,
+          icon: const Icon(Icons.notification_add_rounded),
+          label: const Text('Send Test Alert'),
         ),
         const SizedBox(height: 10),
         Text('Keyword Log', style: Theme.of(context).textTheme.titleLarge),

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:audio_session/audio_session.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
@@ -34,6 +35,25 @@ class AlertRuntimeService {
 
     await _notifications.initialize(
       settings: const InitializationSettings(android: android, iOS: darwin),
+    );
+
+    final session = await AudioSession.instance;
+    await session.configure(
+      const AudioSessionConfiguration(
+        avAudioSessionCategory: AVAudioSessionCategory.playback,
+        avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.duckOthers,
+        avAudioSessionMode: AVAudioSessionMode.defaultMode,
+        avAudioSessionRouteSharingPolicy:
+            AVAudioSessionRouteSharingPolicy.defaultPolicy,
+        avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
+        androidAudioAttributes: AndroidAudioAttributes(
+          contentType: AndroidAudioContentType.sonification,
+          usage: AndroidAudioUsage.alarm,
+        ),
+        androidAudioFocusGainType:
+            AndroidAudioFocusGainType.gainTransientMayDuck,
+        androidWillPauseWhenDucked: false,
+      ),
     );
 
     final androidPlugin = _notifications
@@ -103,6 +123,8 @@ class AlertRuntimeService {
   }
 
   Future<void> _startAudio(AlertSound sound) async {
+    final session = await AudioSession.instance;
+    await session.setActive(true);
     final file = await _alarmFile(sound);
     await _player.setFilePath(file.path);
     await _player.setLoopMode(LoopMode.one);

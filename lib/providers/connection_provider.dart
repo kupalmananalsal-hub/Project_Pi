@@ -185,6 +185,7 @@ class ConnectionController extends Notifier<PiConnectionState> {
     final candidates = <String>[
       host,
       if (host != AppSettings.fallbackHost) AppSettings.fallbackHost,
+      if (host != AppSettings.mdnsFallbackHost) AppSettings.mdnsFallbackHost,
     ];
 
     Object? lastError;

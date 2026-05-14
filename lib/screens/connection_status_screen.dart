@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/app_settings.dart';
 import '../providers/connection_provider.dart';
 import '../providers/settings_provider.dart';
+import '../services/pi_api_service.dart';
 import '../widgets/connection_indicator.dart';
 import '../widgets/status_card.dart';
 
@@ -157,6 +158,14 @@ class _ConnectionStatusScreenState
           accentColor: Colors.lightBlueAccent,
         ),
         StatusCard(
+          title: 'Disk Usage',
+          value: status?.diskUsagePercent == null
+              ? 'Unavailable'
+              : '${status!.diskUsagePercent!.toStringAsFixed(1)}%',
+          icon: Icons.storage_rounded,
+          accentColor: Colors.amberAccent,
+        ),
+        StatusCard(
           title: 'Uptime',
           value: status?.uptime ?? 'Unavailable',
           icon: Icons.schedule_rounded,
@@ -173,8 +182,92 @@ class _ConnectionStatusScreenState
           icon: Icons.cable_rounded,
           accentColor: Colors.purpleAccent,
         ),
+        StatusCard(
+          title: 'Thermal Camera',
+          value: status?.thermalAddress == null
+              ? 'Unavailable'
+              : '${status!.thermalAddress}'
+                    '${status.thermalError == null ? ' ready' : ' error'}',
+          icon: Icons.thermostat_rounded,
+          accentColor: status?.thermalError == null
+              ? Colors.greenAccent
+              : Colors.redAccent,
+          subtitle: status?.thermalError,
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: connection.isConnected
+                    ? () => _confirmPowerAction(
+                        context,
+                        title: 'Reboot Pi?',
+                        message:
+                            'The app will disconnect while the Pi restarts.',
+                        action: () => PiApiService(
+                          host: connection.host,
+                          port: connection.port,
+                        ).reboot(),
+                      )
+                    : null,
+                icon: const Icon(Icons.restart_alt_rounded),
+                label: const Text('Reboot'),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: connection.isConnected
+                    ? () => _confirmPowerAction(
+                        context,
+                        title: 'Shutdown Pi?',
+                        message:
+                            'You will need physical access or power cycling to start it again.',
+                        action: () => PiApiService(
+                          host: connection.host,
+                          port: connection.port,
+                        ).shutdown(),
+                      )
+                    : null,
+                icon: const Icon(Icons.power_settings_new_rounded),
+                label: const Text('Shutdown'),
+              ),
+            ),
+          ],
+        ),
       ],
     );
+  }
+
+  Future<void> _confirmPowerAction(
+    BuildContext context, {
+    required String title,
+    required String message,
+    required Future<void> Function() action,
+  }) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text(title),
+          content: Text(message),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Confirm'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed == true) {
+      await action();
+    }
   }
 
   String _formatTime(DateTime value) {

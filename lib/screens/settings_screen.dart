@@ -108,7 +108,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           value: '${AppSettings.defaultHost}:${AppSettings.defaultPort}',
           icon: Icons.router_rounded,
           accentColor: Colors.lightBlueAccent,
-          subtitle: 'Fallback hostname: ${AppSettings.fallbackHost}',
+          subtitle:
+              'Fallbacks: ${AppSettings.fallbackHost}, ${AppSettings.mdnsFallbackHost}',
         ),
         const StatusCard(
           title: 'About',

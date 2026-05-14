@@ -3,19 +3,31 @@ class SystemStatus {
     required this.receivedAt,
     this.cpuTempC,
     this.ramUsagePercent,
+    this.diskUsagePercent,
     this.uptime = 'Unavailable',
     this.i2cDevices = const [],
+    this.thermalAddress,
+    this.thermalError,
   });
 
   final DateTime receivedAt;
   final double? cpuTempC;
   final double? ramUsagePercent;
+  final double? diskUsagePercent;
   final String uptime;
   final List<String> i2cDevices;
+  final String? thermalAddress;
+  final String? thermalError;
 
   factory SystemStatus.fromJson(Map<String, dynamic> json) {
     final ram = json['ram'] is Map<String, dynamic>
         ? json['ram'] as Map<String, dynamic>
+        : <String, dynamic>{};
+    final disk = json['disk'] is Map<String, dynamic>
+        ? json['disk'] as Map<String, dynamic>
+        : <String, dynamic>{};
+    final thermal = json['thermal'] is Map<String, dynamic>
+        ? json['thermal'] as Map<String, dynamic>
         : <String, dynamic>{};
 
     return SystemStatus(
@@ -34,10 +46,18 @@ class SystemStatus {
             ram['percent'] ??
             ram['usage_percent'],
       ),
+      diskUsagePercent: _asDouble(
+        json['disk_usage_percent'] ??
+            json['disk_percent'] ??
+            json['disk_usage'] ??
+            disk['percent'],
+      ),
       uptime: _formatUptime(json['uptime'] ?? json['uptime_seconds']),
       i2cDevices: _asStringList(
         json['i2c_devices'] ?? json['i2c'] ?? json['devices'],
       ),
+      thermalAddress: thermal['address']?.toString(),
+      thermalError: thermal['error']?.toString(),
     );
   }
 

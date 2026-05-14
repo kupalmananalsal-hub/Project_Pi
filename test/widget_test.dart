@@ -10,6 +10,6 @@ void main() {
     await tester.pump();
 
     expect(find.text('Connection'), findsOneWidget);
-    expect(find.text('192.168.1.34'), findsOneWidget);
+    expect(find.text('10.156.203.236'), findsOneWidget);
   });
 }

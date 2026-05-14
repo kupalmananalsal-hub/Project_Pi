@@ -1,4 +1,4 @@
-package com.example.thermal_audio_monitor
+package com.projectpi.thermalalert
 
 import io.flutter.embedding.android.FlutterActivity
 

@@ -19,7 +19,7 @@ class ThermalAudioMonitorApp extends ConsumerWidget {
 
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Pi Thermal Monitor',
+      title: 'Project Pi',
       themeMode: settings.darkMode ? ThemeMode.dark : ThemeMode.light,
       theme: _buildTheme(Brightness.light),
       darkTheme: _buildTheme(Brightness.dark),
