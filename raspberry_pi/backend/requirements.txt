@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+websockets
+psutil
+numpy
+pyaudio
+spidev
+gpiozero
+adafruit-blinka
+adafruit-circuitpython-mlx90640
