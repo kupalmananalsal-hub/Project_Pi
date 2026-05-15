@@ -106,13 +106,10 @@ class ThermalController extends Notifier<ThermalState> {
     _frameSubscription = _socket!.messages.listen(
       (frame) {
         _framesThisSecond++;
+        final detection = HumanDetector.fromThermalFrame(frame);
         state = state.copyWith(
           frame: frame,
-          humanDetection: HumanDetector.analyze(
-            frame.pixels,
-            frame.width,
-            frame.height,
-          ),
+          humanDetection: detection,
           error: null,
         );
       },

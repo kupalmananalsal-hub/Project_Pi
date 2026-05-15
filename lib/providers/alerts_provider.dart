@@ -101,7 +101,8 @@ class AlertsController extends Notifier<AlertsState> {
     state = state.copyWith(history: nextHistory, error: null);
 
     if (event.isEmergencyKeyword) {
-      final humanDetected = ref.read(thermalProvider).humanDetected;
+      final humanDetected =
+          event.humanDetected || ref.read(thermalProvider).humanDetected;
       state = state.copyWith(
         activeAlert: event,
         activeAlertHumanDetected: humanDetected,
@@ -110,7 +111,7 @@ class AlertsController extends Notifier<AlertsState> {
       unawaited(
         ref
             .read(alertRuntimeServiceProvider)
-            .startEmergency(event, sound, vibrate: humanDetected),
+            .startEmergency(event, sound, vibrate: event.shouldVibrate),
       );
     }
   }

@@ -81,9 +81,9 @@ class _AlertOverlayState extends State<AlertOverlay>
                   _AlertDirection(event: widget.event),
                   const SizedBox(height: 12),
                   Text(
-                    widget.humanDetected
-                        ? 'Thermal human detected - vibration enabled'
-                        : 'No thermal human visible - vibration skipped',
+                    widget.event.shouldVibrate
+                        ? 'Thermal confidence supports vibration'
+                        : 'Visual alert only - vibration skipped',
                     textAlign: TextAlign.center,
                     style: Theme.of(
                       context,
@@ -91,11 +91,32 @@ class _AlertOverlayState extends State<AlertOverlay>
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Confidence ${(widget.event.confidence * 100).round()}%',
+                    'Final confidence ${(widget.event.displayedConfidence * 100).round()}%',
                     style: Theme.of(
                       context,
                     ).textTheme.titleMedium?.copyWith(color: Colors.white),
                   ),
+                  const SizedBox(height: 10),
+                  Text(
+                    '${widget.event.detectedPartLabel} • '
+                    '${(widget.event.bodyCoverage * 100).toStringAsFixed(1)}% coverage • '
+                    'boost +${(widget.event.thermalConfidenceBoost * 100).round()}%',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodyLarge?.copyWith(color: Colors.white),
+                  ),
+                  if (widget.event.noiseLevelDb != null ||
+                      widget.event.snrDb != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      _noiseSummary(widget.event),
+                      textAlign: TextAlign.center,
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
+                    ),
+                  ],
                   const SizedBox(height: 36),
                   FilledButton.icon(
                     style: FilledButton.styleFrom(
@@ -114,6 +135,19 @@ class _AlertOverlayState extends State<AlertOverlay>
         ),
       ),
     );
+  }
+
+  String _noiseSummary(AlertEvent event) {
+    final noise = event.noiseLevelDb;
+    final snr = event.snrDb;
+    final parts = <String>[];
+    if (noise != null) {
+      parts.add('Noise ${noise.toStringAsFixed(1)} dB');
+    }
+    if (snr != null) {
+      parts.add('SNR ${snr.toStringAsFixed(1)} dB');
+    }
+    return parts.join(' • ');
   }
 }
 

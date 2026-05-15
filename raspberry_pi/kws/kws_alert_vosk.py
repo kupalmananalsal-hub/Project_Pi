@@ -70,8 +70,7 @@ def main():
         raise RuntimeError(f"Vosk model path does not exist: {model_path}")
 
     model = Model(str(model_path))
-    grammar = json.dumps(["tulong", "help", "[unk]"])
-    recognizer = KaldiRecognizer(model, 16000, grammar)
+    recognizer = KaldiRecognizer(model, 16000)
     recognizer.SetWords(True)
 
     pa = pyaudio.PyAudio()

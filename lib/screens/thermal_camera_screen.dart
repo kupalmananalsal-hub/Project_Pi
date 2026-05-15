@@ -178,10 +178,10 @@ class _ThermalCameraScreenState extends ConsumerState<ThermalCameraScreen> {
         StatusCard(
           title: 'Human Detection',
           value: thermal.humanDetection.detected
-              ? 'Blob ${thermal.humanDetection.blob?.width}x'
-                    '${thermal.humanDetection.blob?.height}, '
+              ? '${thermal.humanDetection.detectedPartLabel} • '
+                    '${(thermal.humanDetection.bodyCoverage * 100).toStringAsFixed(1)}% frame • '
                     'avg ${thermal.humanDetection.averageTemperature?.toStringAsFixed(1)} C'
-              : 'No 30-40 C human-shaped blob',
+              : 'No 30-40 C human signature',
           icon: Icons.accessibility_new_rounded,
           accentColor: thermal.humanDetected ? Colors.greenAccent : Colors.grey,
         ),

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import json
 import os
 import queue
@@ -14,18 +16,20 @@ import pyaudio
 import requests
 from vosk import KaldiRecognizer, Model
 
+from noise_suppressor import NoiseSuppressor
+
+
 RUNNING = True
 SAMPLE_RATE = 16000
 CHUNK_FRAMES = 1024
 ALERT_FLUSH_INTERVAL_SECONDS = 2.0
-INT16_MAX = 32768.0
 
 
-def _split_env(value):
+def _split_env(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def _env_bool(name, default=False):
+def _env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
         return default
@@ -33,20 +37,29 @@ def _env_bool(name, default=False):
 
 
 def handle_signal(signum, frame):
+    del signum, frame
     global RUNNING
     RUNNING = False
 
 
 class AlertPoster:
-    def __init__(self, backend_url, queue_path):
+    def __init__(self, backend_url: str, queue_path: Path):
         self.backend_url = backend_url
         self.queue_path = queue_path
         self.session = requests.Session()
         self.lock = threading.Lock()
         self.pending = self._load_pending()
 
-    def publish(self, keyword, confidence, source, direction="center"):
-        event = {
+    def publish(
+        self,
+        keyword: str,
+        confidence: float,
+        source: str,
+        *,
+        direction: str = "center",
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        event: dict[str, object] = {
             "event": "keyword_detected",
             "keyword": keyword,
             "confidence": confidence,
@@ -54,13 +67,15 @@ class AlertPoster:
             "direction": direction,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        if extra:
+            event.update(extra)
         print(f"Alert: {keyword} detected by {source}! {json.dumps(event)}", flush=True)
         with self.lock:
             self.pending.append(event)
             self._persist_pending_locked()
         self.flush()
 
-    def flush(self):
+    def flush(self) -> None:
         with self.lock:
             if not self.pending:
                 return
@@ -70,7 +85,7 @@ class AlertPoster:
                 try:
                     response = self.session.post(self.backend_url, json=event, timeout=1.0)
                     response.raise_for_status()
-                except Exception as exc:
+                except Exception as exc:  # pragma: no cover - network side effect
                     print(
                         f"Backend alert post failed; queued {len(self.pending)} alert(s): {exc}",
                         file=sys.stderr,
@@ -82,11 +97,11 @@ class AlertPoster:
                 self._persist_pending_locked()
                 print(f"Backend alert posted: {sent['keyword']}", flush=True)
 
-    def _load_pending(self):
+    def _load_pending(self) -> list[dict[str, object]]:
         if not self.queue_path.exists():
             return []
 
-        pending = []
+        pending: list[dict[str, object]] = []
         with self.queue_path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 try:
@@ -97,7 +112,7 @@ class AlertPoster:
                     pending.append(decoded)
         return pending
 
-    def _persist_pending_locked(self):
+    def _persist_pending_locked(self) -> None:
         if not self.pending:
             try:
                 self.queue_path.unlink()
@@ -111,12 +126,12 @@ class AlertPoster:
 
 
 class CooldownGate:
-    def __init__(self, seconds):
+    def __init__(self, seconds: float):
         self.seconds = seconds
         self.lock = threading.Lock()
-        self.last_seen = {}
+        self.last_seen: dict[str, float] = {}
 
-    def allow(self, keyword):
+    def allow(self, keyword: str) -> bool:
         now = time.monotonic()
         with self.lock:
             last = self.last_seen.get(keyword, 0.0)
@@ -127,15 +142,15 @@ class CooldownGate:
 
 
 class NoiseGate:
-    def __init__(self, threshold_rms=0.02, hold_ms=100, sample_rate=16000):
+    def __init__(self, threshold_rms: float = 0.02, hold_ms: int = 100, sample_rate: int = 16000):
         self.threshold = threshold_rms
         self.hold_samples = int(sample_rate * hold_ms / 1000)
         self.below_counter = 0
 
-    def should_process(self, mono_samples):
+    def should_process(self, mono_samples: np.ndarray) -> bool:
         if mono_samples.size == 0:
             return False
-        rms = float(np.sqrt(np.mean(np.square(mono_samples.astype(np.float32)))) / INT16_MAX)
+        rms = float(np.sqrt(np.mean(np.square(mono_samples.astype(np.float32)))) / 32768.0)
         if rms > self.threshold:
             self.below_counter = 0
             return True
@@ -144,40 +159,96 @@ class NoiseGate:
         return self.below_counter < self.hold_samples
 
 
+class AdaptiveSnowboySensitivity:
+    def __init__(
+        self,
+        quiet_value: float = 0.5,
+        moderate_value: float = 0.4,
+        noisy_value: float = 0.3,
+    ) -> None:
+        self.quiet_value = quiet_value
+        self.moderate_value = moderate_value
+        self.noisy_value = noisy_value
+        self._lock = threading.Lock()
+        self._current_value = moderate_value
+        self._last_logged: float | None = None
+
+    @property
+    def current_value(self) -> float:
+        with self._lock:
+            return self._current_value
+
+    def update_for_snr(self, snr_db: float) -> float:
+        if snr_db > 20.0:
+            next_value = self.quiet_value
+        elif snr_db >= 10.0:
+            next_value = self.moderate_value
+        else:
+            next_value = self.noisy_value
+
+        with self._lock:
+            if abs(self._current_value - next_value) > 1e-6:
+                self._current_value = next_value
+                print(
+                    f"Adaptive Snowboy sensitivity -> {next_value:.2f} (SNR {snr_db:.1f} dB)",
+                    flush=True,
+                )
+            return self._current_value
+
+    def sensitivity_list(self, model_count: int) -> list[str]:
+        value = f"{self.current_value:.2f}"
+        return [value] * model_count
+
+
 class DetectionDispatcher:
     def __init__(
         self,
-        poster,
-        cooldown,
-        help_confirm_seconds,
-        help_suppress_after_tulong_seconds,
-    ):
+        poster: AlertPoster,
+        cooldown: CooldownGate,
+        help_confirm_seconds: float,
+        help_suppress_after_tulong_seconds: float,
+    ) -> None:
         self.poster = poster
         self.cooldown = cooldown
         self.help_confirm_seconds = help_confirm_seconds
         self.help_suppress_after_tulong_seconds = help_suppress_after_tulong_seconds
         self.lock = threading.Lock()
-        self.pending_help_timer = None
+        self.pending_help_timer: threading.Timer | None = None
+        self.pending_help_payload: tuple[float, str, dict[str, object]] | None = None
         self.last_tulong_at = 0.0
 
-    def submit(self, keyword, confidence, source, direction="center"):
+    def submit(
+        self,
+        keyword: str,
+        confidence: float,
+        source: str,
+        context: dict[str, object] | None = None,
+    ) -> None:
+        context = context or {}
         if keyword == "tulong":
-            self._publish_tulong(confidence, source, direction)
+            self._publish_tulong(confidence, source, context)
             return
         if keyword == "help":
-            self._schedule_help(confidence, source, direction)
+            self._schedule_help(confidence, source, context)
 
-    def _publish_tulong(self, confidence, source, direction):
+    def _publish_tulong(self, confidence: float, source: str, context: dict[str, object]) -> None:
         with self.lock:
             self.last_tulong_at = time.monotonic()
             if self.pending_help_timer is not None:
                 self.pending_help_timer.cancel()
                 self.pending_help_timer = None
+                self.pending_help_payload = None
 
         if self.cooldown.allow("tulong"):
-            self.poster.publish("tulong", confidence, source, direction)
+            self.poster.publish(
+                "tulong",
+                confidence,
+                source,
+                direction=str(context.get("direction", "center")),
+                extra={k: v for k, v in context.items() if k != "direction"},
+            )
 
-    def _schedule_help(self, confidence, source, direction):
+    def _schedule_help(self, confidence: float, source: str, context: dict[str, object]) -> None:
         now = time.monotonic()
         with self.lock:
             if now - self.last_tulong_at < self.help_suppress_after_tulong_seconds:
@@ -186,16 +257,18 @@ class DetectionDispatcher:
             if self.pending_help_timer is not None:
                 return
 
+            self.pending_help_payload = (confidence, source, context)
             self.pending_help_timer = threading.Timer(
                 self.help_confirm_seconds,
                 self._publish_help,
-                args=(confidence, source, direction),
             )
             self.pending_help_timer.daemon = True
             self.pending_help_timer.start()
 
-    def _publish_help(self, confidence, source, direction):
+    def _publish_help(self) -> None:
         with self.lock:
+            payload = self.pending_help_payload
+            self.pending_help_payload = None
             self.pending_help_timer = None
             if (
                 time.monotonic() - self.last_tulong_at
@@ -204,11 +277,20 @@ class DetectionDispatcher:
                 print("Pending Snowboy help cancelled by tulong", flush=True)
                 return
 
+        if payload is None:
+            return
+        confidence, source, context = payload
         if self.cooldown.allow("help"):
-            self.poster.publish("help", confidence, source, direction)
+            self.poster.publish(
+                "help",
+                confidence,
+                source,
+                direction=str(context.get("direction", "center")),
+                extra={k: v for k, v in context.items() if k != "direction"},
+            )
 
 
-def find_input_device(pa, hint):
+def find_input_device(pa: pyaudio.PyAudio, hint: str) -> int:
     hint = hint.lower()
     fallback = None
     for index in range(pa.get_device_count()):
@@ -227,20 +309,20 @@ def find_input_device(pa, hint):
     return fallback
 
 
-def create_vosk_recognizer(model_path, sample_rate):
+def create_vosk_recognizer(model_path: Path, sample_rate: int) -> KaldiRecognizer:
     model = Model(str(model_path))
-    recognizer = KaldiRecognizer(model, sample_rate, json.dumps(["tulong", "[unk]"]))
+    recognizer = KaldiRecognizer(model, sample_rate)
     recognizer.SetWords(True)
     return recognizer
 
 
-def read_vosk_text(recognizer, data):
+def read_vosk_text(recognizer: KaldiRecognizer, data: bytes) -> str:
     accepted = recognizer.AcceptWaveform(data)
     result = json.loads(recognizer.Result() if accepted else recognizer.PartialResult())
     return (result.get("text") or result.get("partial") or "").lower().strip()
 
 
-def import_snowboydetect(swig_path, examples_path):
+def import_snowboydetect(swig_path: str, examples_path: str):
     for path in (swig_path, examples_path):
         if path and path not in sys.path:
             sys.path.insert(0, path)
@@ -249,7 +331,7 @@ def import_snowboydetect(swig_path, examples_path):
     return snowboydetect
 
 
-def put_latest(target_queue, data):
+def put_latest(target_queue: queue.Queue, data: dict[str, object]) -> None:
     try:
         target_queue.put_nowait(data)
     except queue.Full:
@@ -260,7 +342,7 @@ def put_latest(target_queue, data):
         target_queue.put_nowait(data)
 
 
-def split_audio_chunk(data, channels):
+def split_audio_chunk(data: bytes, channels: int) -> dict[str, object]:
     samples = np.frombuffer(data, dtype=np.int16)
     if channels >= 2:
         usable = samples[: samples.size - (samples.size % channels)]
@@ -276,13 +358,14 @@ def split_audio_chunk(data, channels):
     return {
         "mono_bytes": mono.tobytes(),
         "mono_samples": mono,
+        "raw_mono_samples": mono.copy(),
         "left": left,
         "right": right,
         "direction": estimate_direction(left, right),
     }
 
 
-def estimate_direction(left_chunk, right_chunk, sample_rate=SAMPLE_RATE):
+def estimate_direction(left_chunk: np.ndarray, right_chunk: np.ndarray, sample_rate: int = SAMPLE_RATE) -> str:
     left = np.asarray(left_chunk, dtype=np.float32)
     right = np.asarray(right_chunk, dtype=np.float32)
     if left.size < 2 or right.size < 2:
@@ -305,9 +388,13 @@ def estimate_direction(left_chunk, right_chunk, sample_rate=SAMPLE_RATE):
     return "center"
 
 
-def vosk_worker(audio_queue, dispatcher, config):
+def vosk_worker(
+    audio_queue: queue.Queue,
+    dispatcher: DetectionDispatcher,
+    config: dict[str, object],
+) -> None:
     recognizer = create_vosk_recognizer(config["model_path"], config["sample_rate"])
-    debug = config["debug"]
+    debug = bool(config["debug"])
     last_debug_text = ""
     print(f"Vosk ready for tulong: {config['model_path']}", flush=True)
 
@@ -325,21 +412,28 @@ def vosk_worker(audio_queue, dispatcher, config):
         if "tulong" in text:
             dispatcher.submit(
                 "tulong",
-                config["confidence"],
+                float(config["confidence"]),
                 "vosk",
-                data.get("direction", "center"),
+                context=_event_context(data),
             )
             recognizer.Reset()
 
 
-def snowboy_worker(audio_queue, dispatcher, config):
+def snowboy_worker(
+    audio_queue: queue.Queue,
+    dispatcher: DetectionDispatcher,
+    config: dict[str, object],
+    sensitivity_controller: AdaptiveSnowboySensitivity,
+) -> None:
     snowboydetect = import_snowboydetect(config["swig_path"], config["examples_path"])
     detector = snowboydetect.SnowboyDetect(
         str(config["resource_path"]).encode(),
         ",".join(str(path) for path in config["model_paths"]).encode(),
     )
-    detector.SetAudioGain(config["audio_gain"])
-    detector.SetSensitivity(",".join(config["sensitivities"]).encode())
+    detector.SetAudioGain(float(config["audio_gain"]))
+
+    current_sensitivities = ",".join(sensitivity_controller.sensitivity_list(len(config["model_paths"])))
+    detector.SetSensitivity(current_sensitivities.encode())
 
     detected_sample_rate = int(detector.SampleRate())
     if detected_sample_rate != config["sample_rate"]:
@@ -362,25 +456,50 @@ def snowboy_worker(audio_queue, dispatcher, config):
         except queue.Empty:
             continue
 
+        next_sensitivities = ",".join(
+            sensitivity_controller.sensitivity_list(len(config["model_paths"]))
+        )
+        if next_sensitivities != current_sensitivities:
+            detector.SetSensitivity(next_sensitivities.encode())
+            current_sensitivities = next_sensitivities
+
         result = detector.RunDetection(data["mono_bytes"])
         if result > 0:
             index = result - 1
-            if index < len(config["keywords"]):
-                spoken_keyword = config["keywords"][index]
-            else:
-                spoken_keyword = config["alert_keyword"]
-
+            spoken_keyword = (
+                config["keywords"][index]
+                if index < len(config["keywords"])
+                else config["alert_keyword"]
+            )
+            context = _event_context(data)
+            context["snowboy_keyword"] = spoken_keyword
+            context["snowboy_sensitivity"] = sensitivity_controller.current_value
             dispatcher.submit(
-                config["alert_keyword"],
-                config["confidence"],
+                str(config["alert_keyword"]),
+                float(config["confidence"]),
                 "snowboy",
-                data.get("direction", "center"),
+                context=context,
             )
         elif result == -1:
             print("Snowboy detection error", file=sys.stderr, flush=True)
 
 
-def main():
+def _event_context(data: dict[str, object]) -> dict[str, object]:
+    context = {
+        "direction": data.get("direction", "center"),
+        "noise_level_db": data.get("noise_level_db", -90.0),
+        "signal_level_db": data.get("signal_level_db", -90.0),
+        "snr_db": data.get("snr_db", 0.0),
+        "noise_reduction_db": data.get("noise_reduction_db", 0.0),
+        "noise_suppression_active": data.get("noise_suppression_active", False),
+    }
+    sensitivity = data.get("snowboy_sensitivity")
+    if sensitivity is not None:
+        context["snowboy_sensitivity"] = sensitivity
+    return context
+
+
+def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
@@ -399,6 +518,18 @@ def main():
         threshold_rms=float(os.getenv("NOISE_GATE_THRESHOLD", "0.02")),
         hold_ms=int(os.getenv("NOISE_GATE_HOLD_MS", "100")),
         sample_rate=sample_rate,
+    )
+    noise_suppressor = NoiseSuppressor(
+        sample_rate=sample_rate,
+        noise_reduction_strength=float(os.getenv("NOISE_SUPPRESSOR_STRENGTH", "0.70")),
+        noise_profile_seconds=float(os.getenv("NOISE_PROFILE_SECONDS", "2.0")),
+        profile_update_rate=float(os.getenv("NOISE_PROFILE_ADAPT_RATE", "0.05")),
+    )
+    noise_log_interval = float(os.getenv("NOISE_LOG_INTERVAL_SECONDS", "5.0"))
+    adaptive_sensitivity = AdaptiveSnowboySensitivity(
+        quiet_value=float(os.getenv("SNOWBOY_SENSITIVITY_QUIET", "0.50")),
+        moderate_value=float(os.getenv("SNOWBOY_SENSITIVITY_MODERATE", "0.40")),
+        noisy_value=float(os.getenv("SNOWBOY_SENSITIVITY_NOISY", "0.30")),
     )
 
     snowboy_model_paths = [
@@ -420,17 +551,10 @@ def main():
         )
     )
     snowboy_keywords = _split_env(os.getenv("SNOWBOY_KEYWORDS", "help"))
-    snowboy_sensitivities = _split_env(os.getenv("SNOWBOY_SENSITIVITY", "0.55"))
-
-    if len(snowboy_sensitivities) == 1 and len(snowboy_model_paths) > 1:
-        snowboy_sensitivities = snowboy_sensitivities * len(snowboy_model_paths)
     if len(snowboy_keywords) == 1 and len(snowboy_model_paths) > 1:
         snowboy_keywords = snowboy_keywords * len(snowboy_model_paths)
-
     if len(snowboy_keywords) != len(snowboy_model_paths):
         raise RuntimeError("SNOWBOY_KEYWORDS must match SNOWBOY_MODEL_PATHS")
-    if len(snowboy_sensitivities) != len(snowboy_model_paths):
-        raise RuntimeError("SNOWBOY_SENSITIVITY must match SNOWBOY_MODEL_PATHS")
 
     missing = [
         str(path)
@@ -450,8 +574,8 @@ def main():
             os.getenv("SNOWBOY_SUPPRESS_AFTER_TULONG_SECONDS", "1.5")
         ),
     )
-    vosk_queue = queue.Queue(maxsize=32)
-    snowboy_queue = queue.Queue(maxsize=32)
+    vosk_queue: queue.Queue = queue.Queue(maxsize=32)
+    snowboy_queue: queue.Queue = queue.Queue(maxsize=32)
 
     vosk_thread = threading.Thread(
         target=vosk_worker,
@@ -481,11 +605,11 @@ def main():
                 "model_paths": snowboy_model_paths,
                 "keywords": snowboy_keywords,
                 "alert_keyword": os.getenv("SNOWBOY_ALERT_KEYWORD", "help"),
-                "sensitivities": snowboy_sensitivities,
                 "audio_gain": float(os.getenv("SNOWBOY_AUDIO_GAIN", "1.0")),
                 "confidence": float(os.getenv("SNOWBOY_CONFIDENCE", "0.95")),
                 "sample_rate": sample_rate,
             },
+            adaptive_sensitivity,
         ),
         daemon=True,
     )
@@ -504,19 +628,50 @@ def main():
             frames_per_buffer=chunk_frames,
         )
 
+        print(
+            f"Capturing {noise_suppressor.noise_profile_seconds:.1f}s of ambient noise profile",
+            flush=True,
+        )
+        while RUNNING and not noise_suppressor.profile_ready:
+            data = stream.read(chunk_frames, exception_on_overflow=False)
+            packet = split_audio_chunk(data, channels)
+            noise_suppressor.capture_noise_profile(packet["raw_mono_samples"])
+
         vosk_thread.start()
         snowboy_thread.start()
         print("Listening for: tulong via Vosk, help via Snowboy", flush=True)
 
         next_flush_at = 0.0
+        next_noise_log_at = 0.0
         while RUNNING:
             data = stream.read(chunk_frames, exception_on_overflow=False)
             packet = split_audio_chunk(data, channels)
-            if noise_gate.should_process(packet["mono_samples"]):
+            raw_samples = packet["raw_mono_samples"]
+            cleaned_samples = noise_suppressor.suppress_noise(raw_samples)
+            packet["mono_samples"] = cleaned_samples
+            packet["mono_bytes"] = cleaned_samples.tobytes()
+
+            process_chunk = noise_gate.should_process(cleaned_samples)
+            noise_suppressor.update_noise_profile(raw_samples, is_speech=process_chunk)
+            packet.update(noise_suppressor.get_last_metrics())
+            adaptive_sensitivity.update_for_snr(float(packet.get("snr_db", 0.0)))
+
+            if process_chunk:
                 put_latest(vosk_queue, packet)
                 put_latest(snowboy_queue, packet)
 
             now = time.monotonic()
+            if now >= next_noise_log_at:
+                print(
+                    "Noise metrics: "
+                    f"noise {packet['noise_level_db']:.1f} dB, "
+                    f"signal {packet['signal_level_db']:.1f} dB, "
+                    f"SNR {packet['snr_db']:.1f} dB, "
+                    f"reduction {packet['noise_reduction_db']:.1f} dB",
+                    flush=True,
+                )
+                next_noise_log_at = now + noise_log_interval
+
             if now >= next_flush_at:
                 poster.flush()
                 next_flush_at = now + ALERT_FLUSH_INTERVAL_SECONDS

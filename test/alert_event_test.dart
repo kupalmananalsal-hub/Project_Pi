@@ -9,6 +9,17 @@ void main() {
       'confidence': 0.95,
       'direction': 'left',
       'source': 'snowboy',
+      'final_confidence': 0.9,
+      'alert_level': 'full_alert',
+      'human_detected': true,
+      'body_coverage': 0.18,
+      'detected_part': 'torso_or_full_face',
+      'thermal_confidence_boost': 0.15,
+      'decision_factors': {
+        'noise_penalty': 0.05,
+        'noise_level_db': -38.2,
+        'snr_db': 14.6,
+      },
       'timestamp': '2026-05-15T01:00:00Z',
     });
 
@@ -17,5 +28,9 @@ void main() {
     expect(event.direction, 'left');
     expect(event.directionLabel, 'LEFT');
     expect(event.source, 'snowboy');
+    expect(event.displayedConfidence, 0.9);
+    expect(event.shouldVibrate, isTrue);
+    expect(event.detectedPartLabel, 'Torso or full face');
+    expect(event.noiseLevelDb, closeTo(-38.2, 0.01));
   });
 }

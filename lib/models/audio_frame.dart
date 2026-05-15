@@ -6,12 +6,22 @@ class AudioFrame {
     required this.rightRms,
     required this.timestamp,
     this.direction = 'center',
+    this.noiseLevelDb = -90,
+    this.signalLevelDb = -90,
+    this.snrDb = 0,
+    this.noiseReductionDb = 0,
+    this.noiseSuppressionActive = false,
   });
 
   final double leftRms;
   final double rightRms;
   final String direction;
   final DateTime timestamp;
+  final double noiseLevelDb;
+  final double signalLevelDb;
+  final double snrDb;
+  final double noiseReductionDb;
+  final bool noiseSuppressionActive;
 
   factory AudioFrame.fromMessage(dynamic message) {
     final decoded = message is String ? jsonDecode(message) : message;
@@ -25,6 +35,11 @@ class AudioFrame {
           leftRms: _asDouble(rms[0]),
           rightRms: _asDouble(rms[1]),
           direction: _normalizeDirection(decoded['direction']),
+          noiseLevelDb: _asDouble(decoded['noise_level_db'], fallback: -90),
+          signalLevelDb: _asDouble(decoded['signal_level_db'], fallback: -90),
+          snrDb: _asDouble(decoded['snr_db']),
+          noiseReductionDb: _asDouble(decoded['noise_reduction_db']),
+          noiseSuppressionActive: _asBool(decoded['noise_suppression_active']),
           timestamp: timestamp,
         );
       }
@@ -36,6 +51,11 @@ class AudioFrame {
           decoded['right'] ?? decoded['mic2'] ?? decoded['ch1'] ?? decoded['r'],
         ),
         direction: _normalizeDirection(decoded['direction']),
+        noiseLevelDb: _asDouble(decoded['noise_level_db'], fallback: -90),
+        signalLevelDb: _asDouble(decoded['signal_level_db'], fallback: -90),
+        snrDb: _asDouble(decoded['snr_db']),
+        noiseReductionDb: _asDouble(decoded['noise_reduction_db']),
+        noiseSuppressionActive: _asBool(decoded['noise_suppression_active']),
         timestamp: timestamp,
       );
     }
@@ -46,14 +66,14 @@ class AudioFrame {
 
   double get normalizedRight => _normalize(rightRms);
 
-  static double _asDouble(dynamic value) {
+  static double _asDouble(dynamic value, {double fallback = 0}) {
     if (value is num) {
       return value.toDouble();
     }
     if (value is String) {
-      return double.tryParse(value) ?? 0;
+      return double.tryParse(value) ?? fallback;
     }
-    return 0;
+    return fallback;
   }
 
   static double _normalize(double value) {
@@ -69,5 +89,13 @@ class AudioFrame {
       return normalized!;
     }
     return 'center';
+  }
+
+  static bool _asBool(dynamic value) {
+    if (value is bool) {
+      return value;
+    }
+    final normalized = value?.toString().trim().toLowerCase();
+    return normalized == 'true' || normalized == '1' || normalized == 'yes';
   }
 }

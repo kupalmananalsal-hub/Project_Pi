@@ -28,12 +28,28 @@ class ThermalFrame {
     required this.height,
     required this.pixels,
     required this.timestamp,
+    this.humanDetected = false,
+    this.bodyCoverage = 0,
+    this.detectedPart = 'no_human',
+    this.confidenceBoost = 0,
+    this.humanTemperatureAverage,
+    this.humanTemperatureMin,
+    this.humanTemperatureMax,
+    this.hasConfidenceMetadata = false,
   });
 
   final int width;
   final int height;
   final List<double> pixels;
   final DateTime timestamp;
+  final bool humanDetected;
+  final double bodyCoverage;
+  final String detectedPart;
+  final double confidenceBoost;
+  final double? humanTemperatureAverage;
+  final double? humanTemperatureMin;
+  final double? humanTemperatureMax;
+  final bool hasConfidenceMetadata;
 
   factory ThermalFrame.fromMessage(dynamic message) {
     final decoded = message is String ? jsonDecode(message) : message;
@@ -53,11 +69,23 @@ class ThermalFrame {
       final timestamp =
           DateTime.tryParse(decoded['timestamp']?.toString() ?? '') ??
           DateTime.now();
-      return _fromSamples(
-        samples,
-        width: width,
-        height: height,
-      ).copyWith(timestamp: timestamp);
+      final hasConfidenceMetadata =
+          decoded.containsKey('human_detected') ||
+          decoded.containsKey('body_coverage') ||
+          decoded.containsKey('confidence_boost');
+      return _fromSamples(samples, width: width, height: height).copyWith(
+        timestamp: timestamp,
+        humanDetected: _asBool(decoded['human_detected']),
+        bodyCoverage: _asDouble(decoded['body_coverage']) ?? 0,
+        detectedPart: decoded['detected_part']?.toString() ?? 'no_human',
+        confidenceBoost: _asDouble(decoded['confidence_boost']) ?? 0,
+        humanTemperatureAverage: _asDouble(
+          decoded['human_temp_avg'] ?? decoded['average_temperature'],
+        ),
+        humanTemperatureMin: _asDouble(decoded['human_temp_min']),
+        humanTemperatureMax: _asDouble(decoded['human_temp_max']),
+        hasConfidenceMetadata: hasConfidenceMetadata,
+      );
     }
     throw FormatException('Unsupported thermal payload: $message');
   }
@@ -107,12 +135,35 @@ class ThermalFrame {
     int? height,
     List<double>? pixels,
     DateTime? timestamp,
+    bool? humanDetected,
+    double? bodyCoverage,
+    String? detectedPart,
+    double? confidenceBoost,
+    Object? humanTemperatureAverage = _unset,
+    Object? humanTemperatureMin = _unset,
+    Object? humanTemperatureMax = _unset,
+    bool? hasConfidenceMetadata,
   }) {
     return ThermalFrame(
       width: width ?? this.width,
       height: height ?? this.height,
       pixels: pixels ?? this.pixels,
       timestamp: timestamp ?? this.timestamp,
+      humanDetected: humanDetected ?? this.humanDetected,
+      bodyCoverage: bodyCoverage ?? this.bodyCoverage,
+      detectedPart: detectedPart ?? this.detectedPart,
+      confidenceBoost: confidenceBoost ?? this.confidenceBoost,
+      humanTemperatureAverage: humanTemperatureAverage == _unset
+          ? this.humanTemperatureAverage
+          : humanTemperatureAverage as double?,
+      humanTemperatureMin: humanTemperatureMin == _unset
+          ? this.humanTemperatureMin
+          : humanTemperatureMin as double?,
+      humanTemperatureMax: humanTemperatureMax == _unset
+          ? this.humanTemperatureMax
+          : humanTemperatureMax as double?,
+      hasConfidenceMetadata:
+          hasConfidenceMetadata ?? this.hasConfidenceMetadata,
     );
   }
 
@@ -179,7 +230,17 @@ class ThermalFrame {
     }
     return null;
   }
+
+  static bool _asBool(dynamic value) {
+    if (value is bool) {
+      return value;
+    }
+    final normalized = value?.toString().trim().toLowerCase();
+    return normalized == 'true' || normalized == '1' || normalized == 'yes';
+  }
 }
+
+const _unset = Object();
 
 Color thermalColorForValue(
   double value,

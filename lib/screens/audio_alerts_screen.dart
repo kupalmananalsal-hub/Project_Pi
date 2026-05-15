@@ -44,6 +44,12 @@ class AudioAlertsScreen extends ConsumerWidget {
                 ),
                 const SizedBox(height: 12),
                 DirectionIndicator(direction: latest?.direction ?? 'center'),
+                const SizedBox(height: 12),
+                NoiseLevelSummary(
+                  noiseLevelDb: latest?.noiseLevelDb ?? -90,
+                  snrDb: latest?.snrDb ?? 0,
+                  suppressionActive: latest?.noiseSuppressionActive ?? false,
+                ),
                 const SizedBox(height: 18),
                 SizedBox(
                   height: 180,
@@ -113,9 +119,10 @@ class AudioAlertsScreen extends ConsumerWidget {
                 title: Text(event.displayKeyword),
                 subtitle: Text(
                   '${_formatTimestamp(event.timestamp)} - '
-                  'voice ${event.directionLabel.toLowerCase()}',
+                  'voice ${event.directionLabel.toLowerCase()} - '
+                  '${event.detectedPartLabel.toLowerCase()}',
                 ),
-                trailing: Text('${(event.confidence * 100).round()}%'),
+                trailing: Text('${(event.displayedConfidence * 100).round()}%'),
               ),
             ),
       ],

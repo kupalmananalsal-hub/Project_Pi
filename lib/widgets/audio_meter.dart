@@ -131,6 +131,50 @@ class DirectionIndicator extends StatelessWidget {
   }
 }
 
+class NoiseLevelSummary extends StatelessWidget {
+  const NoiseLevelSummary({
+    super.key,
+    required this.noiseLevelDb,
+    required this.snrDb,
+    required this.suppressionActive,
+  });
+
+  final double noiseLevelDb;
+  final double snrDb;
+  final bool suppressionActive;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        Chip(
+          avatar: const Icon(Icons.graphic_eq_rounded, size: 18),
+          label: Text('Noise ${noiseLevelDb.toStringAsFixed(1)} dB'),
+        ),
+        Chip(
+          avatar: const Icon(Icons.tune_rounded, size: 18),
+          label: Text('SNR ${snrDb.toStringAsFixed(1)} dB'),
+        ),
+        Chip(
+          avatar: Icon(
+            suppressionActive
+                ? Icons.shield_moon_rounded
+                : Icons.hearing_rounded,
+            size: 18,
+          ),
+          label: Text(
+            suppressionActive
+                ? 'Noise suppression active'
+                : 'Noise profile warming up',
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class AudioHistoryChart extends StatelessWidget {
   const AudioHistoryChart({super.key, required this.history});
 

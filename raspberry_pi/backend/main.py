@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import asyncio
+import os
 import subprocess
+import sys
+import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -14,28 +19,44 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+CURRENT_DIR = Path(__file__).resolve().parent
+RASPBERRY_PI_ROOT = CURRENT_DIR.parent
+for extra_path in (
+    RASPBERRY_PI_ROOT,
+    RASPBERRY_PI_ROOT / "kws",
+    RASPBERRY_PI_ROOT / "thermal",
+):
+    extra_as_str = str(extra_path)
+    if extra_as_str not in sys.path:
+        sys.path.insert(0, extra_as_str)
+
+from alert_decision import AlertDecisionEngine
+from noise_suppressor import NoiseSuppressor
+from thermal_confidence import ThermalConfidenceScorer
+
 try:
     import adafruit_mlx90640
     import board
     import busio
-except Exception:
+except Exception:  # pragma: no cover - hardware import
     adafruit_mlx90640 = None
     board = None
     busio = None
 
 try:
     import spidev
-except Exception:
+except Exception:  # pragma: no cover - hardware import
     spidev = None
 
 try:
     from gpiozero import DigitalInputDevice
-except Exception:
+except Exception:  # pragma: no cover - hardware import
     DigitalInputDevice = None
 
 
 APP_START = time.time()
 MLX_ADDRS = [0x10, 0x33]
+DEFAULT_AUDIO_SAMPLE_RATE = 16000
 
 app = FastAPI(title="Project Pi Thermal Backend", version="1.0.0")
 app.add_middleware(
@@ -62,6 +83,19 @@ class AlertIn(BaseModel):
     direction: str = "center"
     source: str | None = None
     timestamp: str | None = None
+    noise_level_db: float | None = None
+    signal_level_db: float | None = None
+    snr_db: float | None = None
+    noise_reduction_db: float | None = None
+    noise_suppression_active: bool | None = None
+    snowboy_sensitivity: float | None = None
+    final_confidence: float | None = None
+    alert_level: str | None = None
+    human_detected: bool | None = None
+    body_coverage: float | None = None
+    detected_part: str | None = None
+    thermal_confidence_boost: float | None = None
+    decision_factors: dict[str, Any] | None = None
 
 
 class AlertHub:
@@ -73,22 +107,23 @@ class AlertHub:
         if not event.get("timestamp"):
             event["timestamp"] = datetime.now(timezone.utc).isoformat()
         self.history.appendleft(event)
-        for queue in list(self.clients):
-            await queue.put(event)
+        for client_queue in list(self.clients):
+            await client_queue.put(event)
 
     async def connect(self):
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
-        self.clients.add(queue)
-        return queue
+        client_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
+        self.clients.add(client_queue)
+        return client_queue
 
-    def disconnect(self, queue):
-        self.clients.discard(queue)
+    def disconnect(self, client_queue):
+        self.clients.discard(client_queue)
 
 
 alerts = AlertHub()
+decision_engine = AlertDecisionEngine()
 
 
-def estimate_direction(left_chunk, right_chunk, sample_rate=16000):
+def estimate_direction(left_chunk, right_chunk, sample_rate=DEFAULT_AUDIO_SAMPLE_RATE):
     left = np.asarray(left_chunk, dtype=np.float32)
     right = np.asarray(right_chunk, dtype=np.float32)
     if left.size < 2 or right.size < 2:
@@ -102,7 +137,7 @@ def estimate_direction(left_chunk, right_chunk, sample_rate=16000):
     correlation = np.correlate(left, right, mode="full")
     lag = int(np.argmax(correlation) - (len(left) - 1))
     time_diff = lag / sample_rate
-    threshold = 0.00003
+    threshold = float(os.getenv("DIRECTION_THRESHOLD_SECONDS", "0.00003"))
 
     if time_diff > threshold:
         return "right"
@@ -117,6 +152,9 @@ class ThermalCamera:
         self.address = None
         self.frame = [0.0] * 768
         self.error = None
+        self._lock = threading.Lock()
+        self._last_payload: dict[str, Any] | None = None
+        self._last_read_at = 0.0
 
     def init(self):
         if self.mlx is not None:
@@ -134,30 +172,58 @@ class ThermalCamera:
                 self.address = address
                 self.error = None
                 return
-            except Exception as exc:
+            except Exception as exc:  # pragma: no cover - hardware path
                 last_error = exc
 
         self.error = f"MLX90640 not found at {[hex(a) for a in MLX_ADDRS]}: {last_error}"
 
-    def read(self):
+    def read(self) -> dict[str, Any]:
         self.init()
         if self.mlx is None:
             raise RuntimeError(self.error or "MLX90640 unavailable")
 
-        while True:
-            try:
-                self.mlx.getFrame(self.frame)
-                break
-            except ValueError:
-                time.sleep(0.02)
+        with self._lock:
+            while True:
+                try:
+                    self.mlx.getFrame(self.frame)
+                    break
+                except ValueError:
+                    time.sleep(0.02)
 
-        return {
-            "width": 32,
-            "height": 24,
-            "temperatures": [round(float(x), 2) for x in self.frame],
-            "address": f"0x{self.address:02x}",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+            payload: dict[str, Any] = {
+                "width": 32,
+                "height": 24,
+                "temperatures": [round(float(value), 2) for value in self.frame],
+                "address": f"0x{self.address:02x}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            payload.update(self._confidence_payload(payload["temperatures"]))
+            self._last_payload = payload
+            self._last_read_at = time.monotonic()
+            return payload
+
+    def latest(self, max_age_seconds: float = 1.0) -> dict[str, Any]:
+        if self._last_payload is not None and (time.monotonic() - self._last_read_at) <= max_age_seconds:
+            return self._last_payload
+        return self.read()
+
+    def _confidence_payload(self, temperatures: list[float]) -> dict[str, Any]:
+        try:
+            scorer = ThermalConfidenceScorer(temperatures, width=32, height=24)
+            return scorer.analyze()
+        except Exception as exc:
+            return {
+                "human_detected": False,
+                "body_coverage": 0.0,
+                "detected_part": "analysis_error",
+                "confidence_boost": 0.0,
+                "human_temp_avg": None,
+                "human_temp_min": None,
+                "human_temp_max": None,
+                "human_clusters": [],
+                "dominant_cluster": None,
+                "analysis_error": str(exc),
+            }
 
 
 thermal = ThermalCamera()
@@ -167,8 +233,23 @@ class AudioMonitor:
     def __init__(self):
         self.pa = None
         self.stream = None
-        self.latest = {"rms": [0.0, 0.0], "timestamp": None}
+        self.latest = {
+            "rms": [0.0, 0.0],
+            "direction": "center",
+            "noise_level_db": -90.0,
+            "signal_level_db": -90.0,
+            "snr_db": 0.0,
+            "noise_reduction_db": 0.0,
+            "noise_suppression_active": False,
+            "timestamp": None,
+        }
         self.device_index = None
+        self.noise_suppressor = NoiseSuppressor(
+            sample_rate=DEFAULT_AUDIO_SAMPLE_RATE,
+            noise_reduction_strength=float(os.getenv("NOISE_SUPPRESSOR_STRENGTH", "0.70")),
+            noise_profile_seconds=float(os.getenv("NOISE_PROFILE_SECONDS", "2.0")),
+            profile_update_rate=float(os.getenv("NOISE_PROFILE_ADAPT_RATE", "0.05")),
+        )
 
     def _find_device(self):
         fallback = None
@@ -191,7 +272,7 @@ class AudioMonitor:
         self.pa = pyaudio.PyAudio()
         self.device_index = self._find_device()
         self.stream = self.pa.open(
-            rate=16000,
+            rate=DEFAULT_AUDIO_SAMPLE_RATE,
             channels=2,
             format=pyaudio.paInt16,
             input=True,
@@ -199,20 +280,35 @@ class AudioMonitor:
             frames_per_buffer=800,
         )
 
-    def read(self):
+    def read(self) -> dict[str, Any]:
         self.start()
         data = self.stream.read(800, exception_on_overflow=False)
         samples = np.frombuffer(data, dtype=np.int16)
         left = samples[0::2].astype(np.float32)
         right = samples[1::2].astype(np.float32)
+        mono = np.mean(np.column_stack((left, right)), axis=1).astype(np.int16)
+
+        if not self.noise_suppressor.profile_ready:
+            self.noise_suppressor.capture_noise_profile(mono)
+        cleaned = self.noise_suppressor.suppress_noise(mono)
+        speech_active = bool(np.sqrt(np.mean(np.square(cleaned.astype(np.float32)))) / 32768.0 > 0.02)
+        self.noise_suppressor.update_noise_profile(mono, is_speech=speech_active)
+
         rms_left = float(np.sqrt(np.mean(left * left)) / 32768.0)
         rms_right = float(np.sqrt(np.mean(right * right)) / 32768.0)
         direction = estimate_direction(left, right)
+        metrics = self.noise_suppressor.get_last_metrics()
+
         self.latest = {
             "left": round(rms_left, 4),
             "right": round(rms_right, 4),
             "rms": [round(rms_left, 4), round(rms_right, 4)],
             "direction": direction,
+            "noise_level_db": metrics["noise_level_db"],
+            "signal_level_db": metrics["signal_level_db"],
+            "snr_db": metrics["snr_db"],
+            "noise_reduction_db": metrics["noise_reduction_db"],
+            "noise_suppression_active": metrics["noise_suppression_active"],
             "device_index": self.device_index,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
@@ -333,10 +429,24 @@ def i2c_devices():
     return {"devices": sorted(set(devices))}
 
 
-def alert_to_dict(event: AlertIn):
+def alert_to_dict(event: AlertIn) -> dict[str, Any]:
     if hasattr(event, "model_dump"):
         return event.model_dump()
     return event.dict()
+
+
+def enrich_alert_payload(payload: dict[str, Any], thermal_payload: dict[str, Any] | None) -> dict[str, Any]:
+    thermal_payload = thermal_payload or {}
+    decision = decision_engine.evaluate(payload, thermal_payload)
+    payload["human_detected"] = thermal_payload.get("human_detected", False)
+    payload["body_coverage"] = thermal_payload.get("body_coverage", 0.0)
+    payload["detected_part"] = thermal_payload.get("detected_part", "no_human")
+    payload["thermal_confidence_boost"] = thermal_payload.get("confidence_boost", 0.0)
+    payload["final_confidence"] = decision["final_confidence"]
+    payload["decision_factors"] = decision["decision_factors"]
+    payload["alert_level"] = decision["alert_level"]
+    payload["should_alert"] = decision["should_alert"]
+    return payload
 
 
 @app.on_event("startup")
@@ -360,6 +470,10 @@ async def ws_thermal(websocket: WebSocket):
             except Exception as exc:
                 payload = {
                     "error": str(exc),
+                    "human_detected": False,
+                    "body_coverage": 0.0,
+                    "detected_part": "error",
+                    "confidence_boost": 0.0,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             await websocket.send_json(payload)
@@ -380,6 +494,11 @@ async def ws_audio(websocket: WebSocket):
                     "error": str(exc),
                     "rms": [0.0, 0.0],
                     "direction": "center",
+                    "noise_level_db": -90.0,
+                    "signal_level_db": -90.0,
+                    "snr_db": 0.0,
+                    "noise_reduction_db": 0.0,
+                    "noise_suppression_active": False,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             await websocket.send_json(payload)
@@ -391,15 +510,15 @@ async def ws_audio(websocket: WebSocket):
 @app.websocket("/ws/alerts")
 async def ws_alerts(websocket: WebSocket):
     await websocket.accept()
-    queue = await alerts.connect()
+    client_queue = await alerts.connect()
     try:
         for event in list(alerts.history)[:10]:
             await websocket.send_json(event)
         while True:
-            event = await queue.get()
+            event = await client_queue.get()
             await websocket.send_json(event)
     except WebSocketDisconnect:
-        alerts.disconnect(queue)
+        alerts.disconnect(client_queue)
 
 
 @app.get("/api/status")
@@ -407,6 +526,7 @@ async def api_status():
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage("/")
     i2c = i2c_devices()
+    latest_thermal = thermal._last_payload or {}
     return {
         "cpu_temp_c": cpu_temp_c(),
         "ram_usage_percent": round(mem.percent, 2),
@@ -419,6 +539,10 @@ async def api_status():
         "thermal": {
             "address": f"0x{thermal.address:02x}" if thermal.address else None,
             "error": thermal.error,
+            "human_detected": latest_thermal.get("human_detected", False),
+            "body_coverage": latest_thermal.get("body_coverage", 0.0),
+            "detected_part": latest_thermal.get("detected_part", "unknown"),
+            "confidence_boost": latest_thermal.get("confidence_boost", 0.0),
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -438,8 +562,17 @@ async def api_button():
 @app.post("/api/alerts")
 async def api_alerts(event: AlertIn):
     payload = alert_to_dict(event)
-    await alerts.publish(payload)
-    return {"ok": True, "event": payload}
+    thermal_payload = None
+    try:
+        thermal_payload = await asyncio.to_thread(thermal.latest, 1.25)
+    except Exception:
+        thermal_payload = None
+
+    payload = enrich_alert_payload(payload, thermal_payload)
+    if payload["should_alert"]:
+        await alerts.publish(payload)
+        return {"ok": True, "event": payload}
+    return {"ok": True, "suppressed": True, "event": payload}
 
 
 @app.get("/api/alerts")
