@@ -12,6 +12,7 @@ CONTAINER_NAME="${SNOWBOY_SEASALT_CONTAINER:-snowboy-seasalt-$MODEL_NAME}"
 PORT="${SNOWBOY_SEASALT_PORT:-8000}"
 AUDIO_DEVICE="${AUDIO_DEVICE:-plughw:2,0}"
 RECORD_SECONDS="${RECORD_SECONDS:-2}"
+NO_TRIM="${SNOWBOY_NO_TRIM:-true}"
 
 usage() {
   cat <<USAGE
@@ -22,6 +23,7 @@ Environment:
   MODEL_NAME         Output model base name. Default: help
   AUDIO_DEVICE       ALSA capture device. Default: plughw:2,0
   RECORD_SECONDS     Seconds per sample. Default: 2
+  SNOWBOY_NO_TRIM    Send ?noTrim=true to Seasalt. Default: true
   SNOWBOY_TRAIN_DIR  Work directory. Default: ~/snowboy-training/<MODEL_NAME>
   TARGET_MODEL       Install path. Default: ~/snowboy/examples/Python3/resources/models/<MODEL_NAME>.pmdl
   DOCKER_PLATFORM    Optional Docker platform, for example linux/amd64
@@ -104,15 +106,24 @@ train_model() {
   start_server
 
   local output="$MODELS_DIR/$MODEL_NAME.pmdl"
-  curl \
-    -fsS \
-    -X POST \
-    -F "modelName=$MODEL_NAME" \
-    -F "example1=@$RECORDINGS_DIR/example1.wav" \
-    -F "example2=@$RECORDINGS_DIR/example2.wav" \
-    -F "example3=@$RECORDINGS_DIR/example3.wav" \
-    --output "$output" \
-    "http://127.0.0.1:$PORT/generate"
+  local generate_url="http://127.0.0.1:$PORT/generate"
+  if [[ "$NO_TRIM" == "true" || "$NO_TRIM" == "1" || "$NO_TRIM" == "yes" ]]; then
+    generate_url="$generate_url?noTrim=true"
+  fi
+
+  if ! curl \
+      -fsS \
+      -X POST \
+      -F "modelName=$MODEL_NAME" \
+      -F "example1=@$RECORDINGS_DIR/example1.wav" \
+      -F "example2=@$RECORDINGS_DIR/example2.wav" \
+      -F "example3=@$RECORDINGS_DIR/example3.wav" \
+      --output "$output" \
+      "$generate_url"; then
+    echo "Model generation request failed. Recent container logs:" >&2
+    docker logs "$CONTAINER_NAME" --tail 80 >&2 || true
+    exit 1
+  fi
 
   if [[ ! -s "$output" ]]; then
     echo "Model generation failed or produced an empty file: $output" >&2
