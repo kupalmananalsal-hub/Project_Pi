@@ -43,3 +43,10 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Raspberry Pi local training/runtime artifacts
+*.wav
+*.pmdl
+*.umdl
+raspberry_pi/kws/snowboy_training/recordings/
+raspberry_pi/kws/snowboy_training/models/

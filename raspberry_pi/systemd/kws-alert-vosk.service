@@ -1,7 +1,7 @@
 [Unit]
-Description=Project Pi Vosk keyword spotting alert service
+Description=Project Pi dual Vosk and Snowboy keyword spotting alert service
 After=sound.target network-online.target thermal-backend.service
-Wants=network-online.target
+Wants=network-online.target thermal-backend.service
 
 [Service]
 Type=simple
@@ -12,10 +12,21 @@ WorkingDirectory=/home/thesis/Project_Pi
 Environment=PYTHONUNBUFFERED=1
 Environment=VOSK_MODEL_PATH=/home/thesis/vosk-models/vosk-model-tl-ph-generic-0.6
 Environment=BACKEND_ALERT_URL=http://127.0.0.1:8765/api/alerts
+Environment=ALERT_QUEUE_PATH=/tmp/project_pi_alerts.jsonl
 Environment=MIC_NAME_HINT=seeed
 Environment=VOSK_KEYWORD_CONFIDENCE=0.60
+Environment=SNOWBOY_SWIG_PATH=/home/thesis/snowboy/swig/Python3
+Environment=SNOWBOY_EXAMPLES_PATH=/home/thesis/snowboy/examples/Python3
+Environment=SNOWBOY_RESOURCE_PATH=/home/thesis/snowboy/examples/Python3/resources/common.res
+Environment=SNOWBOY_MODEL_PATHS=/home/thesis/snowboy/examples/Python3/resources/models/help.pmdl
+Environment=SNOWBOY_KEYWORDS=help
+Environment=SNOWBOY_ALERT_KEYWORD=help
+Environment=SNOWBOY_SENSITIVITY=0.55
+Environment=SNOWBOY_AUDIO_GAIN=1.0
+Environment=SNOWBOY_CONFIDENCE=0.95
 Environment=KWS_COOLDOWN_SECONDS=1.5
-ExecStart=/home/thesis/kws-env/bin/python /home/thesis/Project_Pi/raspberry_pi/kws/kws_alert_vosk.py
+Environment=KWS_DEBUG=0
+ExecStart=/home/thesis/kws-env/bin/python /home/thesis/Project_Pi/raspberry_pi/kws/kws_alert_dual.py
 Restart=always
 RestartSec=3
 

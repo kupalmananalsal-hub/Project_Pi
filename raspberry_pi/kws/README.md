@@ -1,0 +1,131 @@
+# Project Pi Keyword Spotting
+
+This folder contains the Raspberry Pi keyword spotting services for the
+emergency alert system.
+
+## Current Engines
+
+- Vosk detects `tulong` using the Tagalog model:
+  `/home/thesis/vosk-models/vosk-model-tl-ph-generic-0.6`
+- Snowboy detects `help` using a personal model:
+  `/home/thesis/snowboy/examples/Python3/resources/models/help.pmdl`
+
+Both engines send alerts to:
+
+```text
+http://127.0.0.1:8765/api/alerts
+```
+
+The FastAPI backend then broadcasts the alert to the Flutter app over:
+
+```text
+ws://<pi-ip>:8765/ws/alerts
+```
+
+## Install Updated Service
+
+From the Pi:
+
+```bash
+cd ~/Project_Pi
+git pull
+chmod +x raspberry_pi/kws/kws_alert_dual.py
+chmod +x raspberry_pi/kws/snowboy_training/train_help_model.sh
+sudo cp raspberry_pi/systemd/kws-alert-vosk.service /etc/systemd/system/kws-alert.service
+sudo systemctl daemon-reload
+sudo systemctl enable thermal-backend.service kws-alert.service
+sudo systemctl restart thermal-backend.service
+sudo systemctl restart kws-alert.service
+```
+
+Watch logs:
+
+```bash
+sudo journalctl -u kws-alert.service -f
+```
+
+Expected startup:
+
+```text
+Vosk ready for tulong
+Snowboy ready for help
+Listening for: tulong via Vosk, help via Snowboy
+```
+
+## Train `help.pmdl`
+
+Snowboy's original hosted trainer is no longer available. The helper script
+uses the Docker-based `rhasspy/snowboy-seasalt` trainer.
+
+Install Docker if needed:
+
+```bash
+sudo apt update
+sudo apt install -y docker.io curl
+sudo usermod -aG docker thesis
+newgrp docker
+```
+
+Train a `help.pmdl` model:
+
+```bash
+cd ~/Project_Pi
+bash raspberry_pi/kws/snowboy_training/train_help_model.sh all
+```
+
+For a phrase model:
+
+```bash
+HOTWORD_TEXT="please help" MODEL_NAME=please_help \
+  bash raspberry_pi/kws/snowboy_training/train_help_model.sh all
+```
+
+If the Docker image does not run on the Pi architecture, run the same helper
+from a Linux/x86_64 computer with Docker, then copy the generated `.pmdl` file
+to:
+
+```text
+/home/thesis/snowboy/examples/Python3/resources/models/help.pmdl
+```
+
+## Temporary Stand-In Model
+
+Before `help.pmdl` exists, use a bundled model for wiring tests:
+
+```bash
+sudo systemctl edit kws-alert.service
+```
+
+Add:
+
+```ini
+[Service]
+Environment=SNOWBOY_MODEL_PATHS=/home/thesis/snowboy/examples/Python3/resources/models/jarvis.umdl
+Environment=SNOWBOY_KEYWORDS=jarvis
+Environment=SNOWBOY_ALERT_KEYWORD=help
+```
+
+Restart:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart kws-alert.service
+```
+
+Saying `Jarvis` should post an app alert with keyword `help`.
+
+## Alert Proof
+
+When Snowboy works:
+
+```text
+Alert: help detected by snowboy!
+Backend alert posted: help
+```
+
+When Vosk works:
+
+```text
+Alert: tulong detected by vosk!
+Backend alert posted: tulong
+```
