@@ -123,6 +123,70 @@ class CooldownGate:
             return True
 
 
+class DetectionDispatcher:
+    def __init__(
+        self,
+        poster,
+        cooldown,
+        help_confirm_seconds,
+        help_suppress_after_tulong_seconds,
+    ):
+        self.poster = poster
+        self.cooldown = cooldown
+        self.help_confirm_seconds = help_confirm_seconds
+        self.help_suppress_after_tulong_seconds = help_suppress_after_tulong_seconds
+        self.lock = threading.Lock()
+        self.pending_help_timer = None
+        self.last_tulong_at = 0.0
+
+    def submit(self, keyword, confidence, source):
+        if keyword == "tulong":
+            self._publish_tulong(confidence, source)
+            return
+        if keyword == "help":
+            self._schedule_help(confidence, source)
+
+    def _publish_tulong(self, confidence, source):
+        with self.lock:
+            self.last_tulong_at = time.monotonic()
+            if self.pending_help_timer is not None:
+                self.pending_help_timer.cancel()
+                self.pending_help_timer = None
+
+        if self.cooldown.allow("tulong"):
+            self.poster.publish("tulong", confidence, source)
+
+    def _schedule_help(self, confidence, source):
+        now = time.monotonic()
+        with self.lock:
+            if now - self.last_tulong_at < self.help_suppress_after_tulong_seconds:
+                print("Snowboy help ignored near recent tulong detection", flush=True)
+                return
+            if self.pending_help_timer is not None:
+                return
+
+            self.pending_help_timer = threading.Timer(
+                self.help_confirm_seconds,
+                self._publish_help,
+                args=(confidence, source),
+            )
+            self.pending_help_timer.daemon = True
+            self.pending_help_timer.start()
+
+    def _publish_help(self, confidence, source):
+        with self.lock:
+            self.pending_help_timer = None
+            if (
+                time.monotonic() - self.last_tulong_at
+                < self.help_suppress_after_tulong_seconds
+            ):
+                print("Pending Snowboy help cancelled by tulong", flush=True)
+                return
+
+        if self.cooldown.allow("help"):
+            self.poster.publish("help", confidence, source)
+
+
 def find_input_device(pa, hint):
     hint = hint.lower()
     fallback = None
@@ -175,7 +239,7 @@ def put_latest(target_queue, data):
         target_queue.put_nowait(data)
 
 
-def vosk_worker(audio_queue, poster, cooldown, config):
+def vosk_worker(audio_queue, dispatcher, config):
     recognizer = create_vosk_recognizer(config["model_path"], config["sample_rate"])
     debug = config["debug"]
     last_debug_text = ""
@@ -192,12 +256,12 @@ def vosk_worker(audio_queue, poster, cooldown, config):
             print(f"vosk heard: {text}", flush=True)
             last_debug_text = text
 
-        if "tulong" in text and cooldown.allow("tulong"):
-            poster.publish("tulong", config["confidence"], "vosk")
+        if "tulong" in text:
+            dispatcher.submit("tulong", config["confidence"], "vosk")
             recognizer.Reset()
 
 
-def snowboy_worker(audio_queue, poster, cooldown, config):
+def snowboy_worker(audio_queue, dispatcher, config):
     snowboydetect = import_snowboydetect(config["swig_path"], config["examples_path"])
     detector = snowboydetect.SnowboyDetect(
         str(config["resource_path"]).encode(),
@@ -235,8 +299,7 @@ def snowboy_worker(audio_queue, poster, cooldown, config):
             else:
                 spoken_keyword = config["alert_keyword"]
 
-            if cooldown.allow(spoken_keyword):
-                poster.publish(config["alert_keyword"], config["confidence"], "snowboy")
+            dispatcher.submit(config["alert_keyword"], config["confidence"], "snowboy")
         elif result == -1:
             print("Snowboy detection error", file=sys.stderr, flush=True)
 
@@ -297,6 +360,14 @@ def main():
 
     poster = AlertPoster(backend_url, queue_path)
     cooldown = CooldownGate(cooldown_seconds)
+    dispatcher = DetectionDispatcher(
+        poster=poster,
+        cooldown=cooldown,
+        help_confirm_seconds=float(os.getenv("SNOWBOY_HELP_CONFIRM_SECONDS", "0.8")),
+        help_suppress_after_tulong_seconds=float(
+            os.getenv("SNOWBOY_SUPPRESS_AFTER_TULONG_SECONDS", "1.5")
+        ),
+    )
     vosk_queue = queue.Queue(maxsize=32)
     snowboy_queue = queue.Queue(maxsize=32)
 
@@ -304,8 +375,7 @@ def main():
         target=vosk_worker,
         args=(
             vosk_queue,
-            poster,
-            cooldown,
+            dispatcher,
             {
                 "model_path": vosk_model_path,
                 "sample_rate": sample_rate,
@@ -319,8 +389,7 @@ def main():
         target=snowboy_worker,
         args=(
             snowboy_queue,
-            poster,
-            cooldown,
+            dispatcher,
             {
                 "swig_path": os.getenv("SNOWBOY_SWIG_PATH", "/home/thesis/snowboy/swig/Python3"),
                 "examples_path": os.getenv(

@@ -129,3 +129,37 @@ When Vosk works:
 Alert: tulong detected by vosk!
 Backend alert posted: tulong
 ```
+
+## Tuning False Help Alerts
+
+If saying `tulong` sometimes posts `help`, Snowboy is too sensitive for the
+custom `help.pmdl`. The service defaults to:
+
+```ini
+Environment=SNOWBOY_SENSITIVITY=0.40
+Environment=SNOWBOY_HELP_CONFIRM_SECONDS=0.8
+Environment=SNOWBOY_SUPPRESS_AFTER_TULONG_SECONDS=1.5
+```
+
+That means Snowboy waits briefly before posting `help`; if Vosk hears `tulong`
+in that window, the pending `help` alert is cancelled.
+
+To make Snowboy less sensitive:
+
+```bash
+sudo systemctl edit kws-alert.service
+```
+
+Add:
+
+```ini
+[Service]
+Environment=SNOWBOY_SENSITIVITY=0.30
+```
+
+Then restart:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart kws-alert.service
+```

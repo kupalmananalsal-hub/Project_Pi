@@ -21,9 +21,11 @@ Environment=SNOWBOY_RESOURCE_PATH=/home/thesis/snowboy/examples/Python3/resource
 Environment=SNOWBOY_MODEL_PATHS=/home/thesis/snowboy/examples/Python3/resources/models/help.pmdl
 Environment=SNOWBOY_KEYWORDS=help
 Environment=SNOWBOY_ALERT_KEYWORD=help
-Environment=SNOWBOY_SENSITIVITY=0.55
+Environment=SNOWBOY_SENSITIVITY=0.40
 Environment=SNOWBOY_AUDIO_GAIN=1.0
 Environment=SNOWBOY_CONFIDENCE=0.95
+Environment=SNOWBOY_HELP_CONFIRM_SECONDS=0.8
+Environment=SNOWBOY_SUPPRESS_AFTER_TULONG_SECONDS=1.5
 Environment=KWS_COOLDOWN_SECONDS=1.5
 Environment=KWS_DEBUG=0
 ExecStart=/home/thesis/kws-env/bin/python /home/thesis/Project_Pi/raspberry_pi/kws/kws_alert_dual.py
