@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/app_settings.dart';
 import '../providers/settings_provider.dart';
+import 'voice_calibration_screen.dart';
 import '../widgets/status_card.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -101,6 +102,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           onChanged: (value) {
             ref.read(settingsProvider.notifier).setDarkMode(value);
           },
+        ),
+        const SizedBox(height: 12),
+        FilledButton.tonalIcon(
+          onPressed: () {
+            Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => const VoiceCalibrationScreen(),
+              ),
+            );
+          },
+          icon: const Icon(Icons.record_voice_over_rounded),
+          label: const Text('Voice Calibration'),
         ),
         const SizedBox(height: 18),
         StatusCard(

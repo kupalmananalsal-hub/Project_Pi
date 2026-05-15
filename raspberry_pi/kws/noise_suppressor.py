@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import numpy as np
 
 
 INT16_MAX = 32768.0
+DEFAULT_CONFIG_PATH = Path("/tmp/project_pi_noise_suppression.json")
 
 
 @dataclass(frozen=True)
@@ -20,48 +23,88 @@ class NoiseMetrics:
 
     def to_dict(self) -> dict[str, float | bool]:
         return {
+            "noise_floor_db": round(self.noise_level_db, 2),
             "noise_level_db": round(self.noise_level_db, 2),
             "signal_level_db": round(self.signal_level_db, 2),
+            "snr_estimate": round(self.snr_db, 2),
             "snr_db": round(self.snr_db, 2),
+            "reduction_db": round(self.reduction_db, 2),
             "noise_reduction_db": round(self.reduction_db, 2),
             "noise_suppression_active": self.profile_ready,
         }
 
 
+@dataclass
+class NoiseSuppressionConfig:
+    active: bool = True
+    strength: float = 0.5
+    sensitivity: float = 0.5
+    snowboy_sensitivity: float | None = None
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> "NoiseSuppressionConfig":
+        return cls(
+            active=_as_bool(payload.get("active"), True),
+            strength=_clamp(payload.get("strength"), 0.5),
+            sensitivity=_clamp(payload.get("sensitivity"), 0.5),
+            snowboy_sensitivity=_optional_clamp(payload.get("snowboy_sensitivity")),
+        )
+
+
+class NoiseSuppressionConfigStore:
+    def __init__(self, path: Path | str = DEFAULT_CONFIG_PATH):
+        self.path = Path(path)
+
+    def load(self) -> NoiseSuppressionConfig:
+        if not self.path.exists():
+            return NoiseSuppressionConfig()
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return NoiseSuppressionConfig()
+        if not isinstance(payload, dict):
+            return NoiseSuppressionConfig()
+        return NoiseSuppressionConfig.from_dict(payload)
+
+    def save(self, config: NoiseSuppressionConfig) -> NoiseSuppressionConfig:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(asdict(config), indent=2), encoding="utf-8")
+        return config
+
+
 class NoiseSuppressor:
     """
-    Lightweight real-time noise suppressor for keyword spotting.
+    Real-time noise suppression with adjustable strength and sensitivity.
 
-    The implementation uses:
-    - a startup ambient-noise capture window
-    - FFT-domain spectral subtraction
-    - speech-band emphasis (300 Hz to 3400 Hz)
-    - adaptive noise profile updates while speech is absent
+    - `strength`: how much background energy to subtract
+    - `sensitivity`: how much low-volume / wide-band speech detail to preserve
+    - preserves human fundamentals (~85-400 Hz) and speech formants (300-3400 Hz)
     """
 
     def __init__(
         self,
         sample_rate: int = 16000,
-        noise_reduction_strength: float = 0.7,
+        noise_reduction_strength: float = 0.5,
+        sensitivity: float = 0.5,
+        active: bool = True,
         noise_profile_seconds: float = 2.0,
         profile_update_rate: float = 0.05,
-        speech_min_hz: float = 300.0,
-        speech_max_hz: float = 3400.0,
-        min_gain: float = 0.08,
+        min_gain: float = 0.06,
     ) -> None:
         self.sample_rate = sample_rate
-        self.noise_reduction_strength = float(
-            np.clip(noise_reduction_strength, 0.0, 1.0)
-        )
+        self.active = active
+        self.strength = _clamp(noise_reduction_strength, 0.5)
+        self.sensitivity = _clamp(sensitivity, 0.5)
         self.noise_profile_seconds = max(0.25, float(noise_profile_seconds))
         self.profile_update_rate = float(np.clip(profile_update_rate, 0.0, 1.0))
-        self.speech_min_hz = speech_min_hz
-        self.speech_max_hz = speech_max_hz
         self.min_gain = float(np.clip(min_gain, 0.0, 1.0))
+        self.noise_floor_db = -60.0
+        self.snr_estimate = 20.0
+        self.reduction_db = 0.0
         self._capture_buffer = np.empty(0, dtype=np.float32)
         self._noise_spectrum: np.ndarray | None = None
         self._noise_rms = 0.0
-        self._window: np.ndarray | None = None
+        self._window_cache: dict[int, np.ndarray] = {}
         self._last_metrics = NoiseMetrics(
             noise_level_db=-90.0,
             signal_level_db=-90.0,
@@ -77,6 +120,31 @@ class NoiseSuppressor:
     @property
     def last_metrics(self) -> NoiseMetrics:
         return self._last_metrics
+
+    def set_strength(self, value: float) -> None:
+        self.strength = _clamp(value, self.strength)
+
+    def set_sensitivity(self, value: float) -> None:
+        self.sensitivity = _clamp(value, self.sensitivity)
+
+    def set_active(self, value: bool) -> None:
+        self.active = bool(value)
+
+    def apply_config(self, config: NoiseSuppressionConfig) -> None:
+        self.set_active(config.active)
+        self.set_strength(config.strength)
+        self.set_sensitivity(config.sensitivity)
+
+    def export_settings(self) -> dict[str, float | bool]:
+        metrics = self.get_last_metrics()
+        return {
+            "active": self.active,
+            "strength": round(self.strength, 3),
+            "sensitivity": round(self.sensitivity, 3),
+            "noise_floor_db": metrics["noise_floor_db"],
+            "snr_estimate": metrics["snr_estimate"],
+            "reduction_db": metrics["reduction_db"],
+        }
 
     def capture_noise_profile(
         self,
@@ -113,17 +181,27 @@ class NoiseSuppressor:
         )
         return True
 
-    def suppress_noise(
+    def process(
         self,
         audio_chunk: bytes | np.ndarray | list[int] | list[float],
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, dict[str, float | bool]]:
         samples = self._prepare_samples(audio_chunk)
         if samples.size == 0:
-            return np.empty(0, dtype=np.int16)
+            return np.empty(0, dtype=np.int16), self.get_last_metrics()
 
         if not self.profile_ready:
             self.capture_noise_profile(samples)
-            return np.clip(samples, -32768, 32767).astype(np.int16)
+            passthrough = np.clip(samples, -32768, 32767).astype(np.int16)
+            return passthrough, self.get_last_metrics()
+
+        if not self.active or self.strength <= 0.001:
+            self._update_metrics(
+                raw_signal=samples,
+                cleaned_signal=samples,
+                profile_ready=True,
+            )
+            passthrough = np.clip(samples, -32768, 32767).astype(np.int16)
+            return passthrough, self.get_last_metrics()
 
         spectrum = np.fft.rfft(self._windowed(samples))
         magnitude = np.abs(spectrum)
@@ -131,12 +209,21 @@ class NoiseSuppressor:
         noise_spectrum = self._match_noise_spectrum(magnitude.size)
         frequencies = np.fft.rfftfreq(samples.size, d=1.0 / self.sample_rate)
 
-        speech_mask = (frequencies >= self.speech_min_hz) & (
-            frequencies <= self.speech_max_hz
+        fundamental_mask = (frequencies >= 85.0) & (frequencies <= 400.0)
+        formant_mask = (frequencies >= 300.0) & (frequencies <= 3400.0)
+        voice_mask = fundamental_mask | formant_mask
+
+        speech_preservation = 0.35 + (self.sensitivity * 0.65)
+        non_voice_preservation = 0.04 + (self.sensitivity * 0.36)
+
+        band_preservation = np.where(
+            voice_mask,
+            speech_preservation,
+            non_voice_preservation,
         )
-        band_strength = np.where(speech_mask, 1.0, 0.75)
-        noise_floor = noise_spectrum * (0.65 + self.noise_reduction_strength)
-        cleaned_magnitude = magnitude - (noise_floor * band_strength)
+        subtract_strength = self.strength * (1.18 - (self.sensitivity * 0.55))
+        noise_floor = noise_spectrum * subtract_strength
+        cleaned_magnitude = magnitude - (noise_floor * (1.0 - band_preservation))
         cleaned_magnitude = np.maximum(cleaned_magnitude, magnitude * self.min_gain)
 
         cleaned_spectrum = cleaned_magnitude * np.exp(1j * phase)
@@ -148,7 +235,14 @@ class NoiseSuppressor:
             cleaned_signal=cleaned_signal,
             profile_ready=True,
         )
-        return cleaned_signal.astype(np.int16)
+        return cleaned_signal.astype(np.int16), self.get_last_metrics()
+
+    def suppress_noise(
+        self,
+        audio_chunk: bytes | np.ndarray | list[int] | list[float],
+    ) -> np.ndarray:
+        cleaned, _ = self.process(audio_chunk)
+        return cleaned
 
     def update_noise_profile(
         self,
@@ -176,7 +270,11 @@ class NoiseSuppressor:
         self._noise_rms = ((1.0 - alpha) * self._noise_rms) + (alpha * self._rms(samples))
 
     def get_last_metrics(self) -> dict[str, float | bool]:
-        return self.last_metrics.to_dict()
+        metrics = self.last_metrics.to_dict()
+        metrics["active"] = self.active
+        metrics["strength"] = round(self.strength, 3)
+        metrics["sensitivity"] = round(self.sensitivity, 3)
+        return metrics
 
     def _prepare_samples(
         self,
@@ -196,9 +294,11 @@ class NoiseSuppressor:
         return np.abs(spectrum).astype(np.float32)
 
     def _windowed(self, samples: np.ndarray) -> np.ndarray:
-        if self._window is None or self._window.size != samples.size:
-            self._window = np.hanning(samples.size).astype(np.float32)
-        return samples * self._window
+        window = self._window_cache.get(samples.size)
+        if window is None:
+            window = np.hanning(samples.size).astype(np.float32)
+            self._window_cache[samples.size] = window
+        return samples * window
 
     def _match_noise_spectrum(self, size: int) -> np.ndarray:
         if self._noise_spectrum is None or self._noise_spectrum.size == size:
@@ -226,12 +326,16 @@ class NoiseSuppressor:
         snr_db = signal_db - noise_db
         raw_db = self._rms_db(self._rms(raw_signal))
         reduction_db = max(0.0, raw_db - signal_db)
+
+        self.noise_floor_db = noise_db
+        self.snr_estimate = snr_db
+        self.reduction_db = reduction_db
         self._last_metrics = NoiseMetrics(
             noise_level_db=noise_db,
             signal_level_db=signal_db,
             snr_db=snr_db,
             reduction_db=reduction_db,
-            profile_ready=profile_ready,
+            profile_ready=profile_ready and self.active,
         )
 
     @staticmethod
@@ -246,3 +350,27 @@ class NoiseSuppressor:
         if rms <= 1e-9:
             return -90.0
         return 20.0 * math.log10(rms)
+
+
+def _clamp(value: object, fallback: float) -> float:
+    try:
+        return float(np.clip(float(value), 0.0, 1.0))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _optional_clamp(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(np.clip(float(value), 0.0, 1.0))
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_bool(value: object, fallback: bool) -> bool:
+    if value is None:
+        return fallback
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}

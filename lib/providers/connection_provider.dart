@@ -8,6 +8,7 @@ import '../models/system_status.dart';
 import '../services/pi_api_service.dart';
 import 'alerts_provider.dart';
 import 'audio_provider.dart';
+import 'noise_suppression_provider.dart';
 import 'settings_provider.dart';
 import 'thermal_provider.dart';
 
@@ -99,6 +100,11 @@ class ConnectionController extends Notifier<PiConnectionState> {
       ref.read(thermalProvider.notifier).connect(target.host, target.port);
       ref.read(audioProvider.notifier).connect(target.host, target.port);
       ref.read(alertsProvider.notifier).connect(target.host, target.port);
+      unawaited(
+        ref
+            .read(noiseSuppressionProvider.notifier)
+            .connect(target.host, target.port),
+      );
       state = state.copyWith(
         host: target.host,
         port: target.port,
@@ -130,6 +136,7 @@ class ConnectionController extends Notifier<PiConnectionState> {
     ref.read(thermalProvider.notifier).disconnect();
     ref.read(audioProvider.notifier).disconnect();
     ref.read(alertsProvider.notifier).disconnect();
+    ref.read(noiseSuppressionProvider.notifier).disconnect();
     state = state.copyWith(
       isConnected: false,
       isConnecting: false,

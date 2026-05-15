@@ -16,7 +16,11 @@ import pyaudio
 import requests
 from vosk import KaldiRecognizer, Model
 
-from noise_suppressor import NoiseSuppressor
+from noise_suppressor import (
+    DEFAULT_CONFIG_PATH,
+    NoiseSuppressionConfigStore,
+    NoiseSuppressor,
+)
 
 
 RUNNING = True
@@ -172,6 +176,14 @@ class AdaptiveSnowboySensitivity:
         self._lock = threading.Lock()
         self._current_value = moderate_value
         self._last_logged: float | None = None
+
+    def apply_base_sensitivity(self, base_value: float) -> None:
+        base = float(np.clip(base_value, 0.2, 0.9))
+        with self._lock:
+            self.moderate_value = base
+            self.quiet_value = float(np.clip(base + 0.10, 0.2, 0.95))
+            self.noisy_value = float(np.clip(base - 0.10, 0.2, 0.95))
+            self._current_value = self.moderate_value
 
     @property
     def current_value(self) -> float:
@@ -492,6 +504,8 @@ def _event_context(data: dict[str, object]) -> dict[str, object]:
         "snr_db": data.get("snr_db", 0.0),
         "noise_reduction_db": data.get("noise_reduction_db", 0.0),
         "noise_suppression_active": data.get("noise_suppression_active", False),
+        "suppression_strength": data.get("strength", 0.5),
+        "suppression_sensitivity": data.get("sensitivity", 0.5),
     }
     sensitivity = data.get("snowboy_sensitivity")
     if sensitivity is not None:
@@ -519,18 +533,29 @@ def main() -> None:
         hold_ms=int(os.getenv("NOISE_GATE_HOLD_MS", "100")),
         sample_rate=sample_rate,
     )
+    config_store = NoiseSuppressionConfigStore(
+        Path(os.getenv("NOISE_SUPPRESSION_CONFIG_PATH", str(DEFAULT_CONFIG_PATH)))
+    )
+    current_noise_config = config_store.load()
     noise_suppressor = NoiseSuppressor(
         sample_rate=sample_rate,
         noise_reduction_strength=float(os.getenv("NOISE_SUPPRESSOR_STRENGTH", "0.70")),
+        sensitivity=float(os.getenv("NOISE_SUPPRESSOR_SENSITIVITY", "0.50")),
+        active=True,
         noise_profile_seconds=float(os.getenv("NOISE_PROFILE_SECONDS", "2.0")),
         profile_update_rate=float(os.getenv("NOISE_PROFILE_ADAPT_RATE", "0.05")),
     )
+    noise_suppressor.apply_config(current_noise_config)
     noise_log_interval = float(os.getenv("NOISE_LOG_INTERVAL_SECONDS", "5.0"))
     adaptive_sensitivity = AdaptiveSnowboySensitivity(
         quiet_value=float(os.getenv("SNOWBOY_SENSITIVITY_QUIET", "0.50")),
         moderate_value=float(os.getenv("SNOWBOY_SENSITIVITY_MODERATE", "0.40")),
         noisy_value=float(os.getenv("SNOWBOY_SENSITIVITY_NOISY", "0.30")),
     )
+    if current_noise_config.snowboy_sensitivity is not None:
+        adaptive_sensitivity.apply_base_sensitivity(
+            current_noise_config.snowboy_sensitivity
+        )
 
     snowboy_model_paths = [
         Path(path)
@@ -643,31 +668,53 @@ def main() -> None:
 
         next_flush_at = 0.0
         next_noise_log_at = 0.0
+        next_config_poll_at = 0.0
         while RUNNING:
+            now = time.monotonic()
+            if now >= next_config_poll_at:
+                latest_config = config_store.load()
+                if latest_config != current_noise_config:
+                    current_noise_config = latest_config
+                    noise_suppressor.apply_config(current_noise_config)
+                    if current_noise_config.snowboy_sensitivity is not None:
+                        adaptive_sensitivity.apply_base_sensitivity(
+                            current_noise_config.snowboy_sensitivity
+                        )
+                    print(
+                        "Updated live noise suppression settings: "
+                        f"active={current_noise_config.active}, "
+                        f"strength={current_noise_config.strength:.2f}, "
+                        f"sensitivity={current_noise_config.sensitivity:.2f}, "
+                        f"snowboy={current_noise_config.snowboy_sensitivity}",
+                        flush=True,
+                    )
+                next_config_poll_at = now + 1.0
+
             data = stream.read(chunk_frames, exception_on_overflow=False)
             packet = split_audio_chunk(data, channels)
             raw_samples = packet["raw_mono_samples"]
-            cleaned_samples = noise_suppressor.suppress_noise(raw_samples)
+            cleaned_samples, metrics = noise_suppressor.process(raw_samples)
             packet["mono_samples"] = cleaned_samples
             packet["mono_bytes"] = cleaned_samples.tobytes()
 
             process_chunk = noise_gate.should_process(cleaned_samples)
             noise_suppressor.update_noise_profile(raw_samples, is_speech=process_chunk)
-            packet.update(noise_suppressor.get_last_metrics())
+            packet.update(metrics)
             adaptive_sensitivity.update_for_snr(float(packet.get("snr_db", 0.0)))
 
             if process_chunk:
                 put_latest(vosk_queue, packet)
                 put_latest(snowboy_queue, packet)
 
-            now = time.monotonic()
             if now >= next_noise_log_at:
                 print(
                     "Noise metrics: "
                     f"noise {packet['noise_level_db']:.1f} dB, "
                     f"signal {packet['signal_level_db']:.1f} dB, "
                     f"SNR {packet['snr_db']:.1f} dB, "
-                    f"reduction {packet['noise_reduction_db']:.1f} dB",
+                    f"reduction {packet['noise_reduction_db']:.1f} dB, "
+                    f"strength {packet['strength']:.2f}, "
+                    f"sensitivity {packet['sensitivity']:.2f}",
                     flush=True,
                 )
                 next_noise_log_at = now + noise_log_interval

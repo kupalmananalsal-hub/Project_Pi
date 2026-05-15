@@ -31,7 +31,12 @@ for extra_path in (
         sys.path.insert(0, extra_as_str)
 
 from alert_decision import AlertDecisionEngine
-from noise_suppressor import NoiseSuppressor
+from noise_suppressor import (
+    DEFAULT_CONFIG_PATH,
+    NoiseSuppressionConfig,
+    NoiseSuppressionConfigStore,
+    NoiseSuppressor,
+)
 from thermal_confidence import ThermalConfidenceScorer
 
 try:
@@ -98,6 +103,13 @@ class AlertIn(BaseModel):
     decision_factors: dict[str, Any] | None = None
 
 
+class NoiseSuppressionRequest(BaseModel):
+    strength: float = Field(default=0.5, ge=0.0, le=1.0)
+    sensitivity: float = Field(default=0.5, ge=0.0, le=1.0)
+    active: bool = True
+    snowboy_sensitivity: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
 class AlertHub:
     def __init__(self):
         self.clients: set[asyncio.Queue[dict[str, Any]]] = set()
@@ -121,6 +133,9 @@ class AlertHub:
 
 alerts = AlertHub()
 decision_engine = AlertDecisionEngine()
+noise_config_store = NoiseSuppressionConfigStore(
+    Path(os.getenv("NOISE_SUPPRESSION_CONFIG_PATH", str(DEFAULT_CONFIG_PATH)))
+)
 
 
 def estimate_direction(left_chunk, right_chunk, sample_rate=DEFAULT_AUDIO_SAMPLE_RATE):
@@ -144,6 +159,27 @@ def estimate_direction(left_chunk, right_chunk, sample_rate=DEFAULT_AUDIO_SAMPLE
     if time_diff < -threshold:
         return "left"
     return "center"
+
+
+def estimate_pitch_hz(samples, sample_rate=DEFAULT_AUDIO_SAMPLE_RATE):
+    signal = np.asarray(samples, dtype=np.float32)
+    if signal.size < 128:
+        return None
+    signal = signal - float(np.mean(signal))
+    if float(np.max(np.abs(signal))) < 150:
+        return None
+
+    windowed = signal * np.hanning(signal.size)
+    spectrum = np.abs(np.fft.rfft(windowed))
+    frequencies = np.fft.rfftfreq(signal.size, d=1.0 / sample_rate)
+    mask = (frequencies >= 85.0) & (frequencies <= 400.0)
+    if not np.any(mask):
+        return None
+    band = spectrum[mask]
+    if band.size == 0 or float(np.max(band)) <= 1e-6:
+        return None
+    index = int(np.argmax(band))
+    return float(frequencies[mask][index])
 
 
 class ThermalCamera:
@@ -241,15 +277,23 @@ class AudioMonitor:
             "snr_db": 0.0,
             "noise_reduction_db": 0.0,
             "noise_suppression_active": False,
+            "suppression_strength": 0.5,
+            "suppression_sensitivity": 0.5,
+            "estimated_pitch_hz": None,
             "timestamp": None,
         }
         self.device_index = None
+        self.config_store = noise_config_store
+        self._config = self.config_store.load()
         self.noise_suppressor = NoiseSuppressor(
             sample_rate=DEFAULT_AUDIO_SAMPLE_RATE,
             noise_reduction_strength=float(os.getenv("NOISE_SUPPRESSOR_STRENGTH", "0.70")),
+            sensitivity=float(os.getenv("NOISE_SUPPRESSOR_SENSITIVITY", "0.50")),
+            active=True,
             noise_profile_seconds=float(os.getenv("NOISE_PROFILE_SECONDS", "2.0")),
             profile_update_rate=float(os.getenv("NOISE_PROFILE_ADAPT_RATE", "0.05")),
         )
+        self.apply_noise_settings(self._config)
 
     def _find_device(self):
         fallback = None
@@ -280,6 +324,15 @@ class AudioMonitor:
             frames_per_buffer=800,
         )
 
+    def apply_noise_settings(self, config: NoiseSuppressionConfig) -> None:
+        self._config = config
+        self.noise_suppressor.apply_config(config)
+
+    def get_noise_settings(self) -> dict[str, Any]:
+        payload = self.noise_suppressor.export_settings()
+        payload["snowboy_sensitivity"] = self._config.snowboy_sensitivity
+        return payload
+
     def read(self) -> dict[str, Any]:
         self.start()
         data = self.stream.read(800, exception_on_overflow=False)
@@ -290,14 +343,19 @@ class AudioMonitor:
 
         if not self.noise_suppressor.profile_ready:
             self.noise_suppressor.capture_noise_profile(mono)
-        cleaned = self.noise_suppressor.suppress_noise(mono)
+        else:
+            latest_config = self.config_store.load()
+            if latest_config != self._config:
+                self.apply_noise_settings(latest_config)
+
+        cleaned, metrics = self.noise_suppressor.process(mono)
         speech_active = bool(np.sqrt(np.mean(np.square(cleaned.astype(np.float32)))) / 32768.0 > 0.02)
         self.noise_suppressor.update_noise_profile(mono, is_speech=speech_active)
 
         rms_left = float(np.sqrt(np.mean(left * left)) / 32768.0)
         rms_right = float(np.sqrt(np.mean(right * right)) / 32768.0)
         direction = estimate_direction(left, right)
-        metrics = self.noise_suppressor.get_last_metrics()
+        pitch_hz = estimate_pitch_hz(cleaned, DEFAULT_AUDIO_SAMPLE_RATE)
 
         self.latest = {
             "left": round(rms_left, 4),
@@ -309,6 +367,9 @@ class AudioMonitor:
             "snr_db": metrics["snr_db"],
             "noise_reduction_db": metrics["noise_reduction_db"],
             "noise_suppression_active": metrics["noise_suppression_active"],
+            "suppression_strength": metrics["strength"],
+            "suppression_sensitivity": metrics["sensitivity"],
+            "estimated_pitch_hz": round(pitch_hz, 1) if pitch_hz is not None else None,
             "device_index": self.device_index,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
@@ -449,10 +510,28 @@ def enrich_alert_payload(payload: dict[str, Any], thermal_payload: dict[str, Any
     return payload
 
 
+def current_noise_settings() -> dict[str, Any]:
+    payload = audio.get_noise_settings()
+    latest = audio.latest
+    return {
+        "active": payload["active"],
+        "strength": payload["strength"],
+        "sensitivity": payload["sensitivity"],
+        "snowboy_sensitivity": payload.get("snowboy_sensitivity"),
+        "noise_floor_db": latest.get("noise_level_db", payload.get("noise_floor_db", -90.0)),
+        "snr_estimate": latest.get("snr_db", payload.get("snr_estimate", 0.0)),
+        "reduction_db": latest.get(
+            "noise_reduction_db",
+            payload.get("reduction_db", 0.0),
+        ),
+    }
+
+
 @app.on_event("startup")
 async def startup():
     button.init()
     thermal.init()
+    noise_config_store.save(noise_config_store.load())
 
 
 @app.on_event("shutdown")
@@ -557,6 +636,24 @@ async def api_leds(request: LedRequest):
 @app.get("/api/button")
 async def api_button():
     return button.get()
+
+
+@app.get("/api/audio/noise-suppression")
+async def get_noise_suppression():
+    return current_noise_settings()
+
+
+@app.post("/api/audio/noise-suppression")
+async def set_noise_suppression(request: NoiseSuppressionRequest):
+    config = NoiseSuppressionConfig(
+        active=request.active,
+        strength=request.strength,
+        sensitivity=request.sensitivity,
+        snowboy_sensitivity=request.snowboy_sensitivity,
+    )
+    noise_config_store.save(config)
+    audio.apply_noise_settings(config)
+    return {"ok": True, "settings": current_noise_settings()}
 
 
 @app.post("/api/alerts")

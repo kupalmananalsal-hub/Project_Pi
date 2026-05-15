@@ -11,6 +11,7 @@ class AudioFrame {
     this.snrDb = 0,
     this.noiseReductionDb = 0,
     this.noiseSuppressionActive = false,
+    this.estimatedPitchHz,
   });
 
   final double leftRms;
@@ -22,6 +23,7 @@ class AudioFrame {
   final double snrDb;
   final double noiseReductionDb;
   final bool noiseSuppressionActive;
+  final double? estimatedPitchHz;
 
   factory AudioFrame.fromMessage(dynamic message) {
     final decoded = message is String ? jsonDecode(message) : message;
@@ -40,6 +42,7 @@ class AudioFrame {
           snrDb: _asDouble(decoded['snr_db']),
           noiseReductionDb: _asDouble(decoded['noise_reduction_db']),
           noiseSuppressionActive: _asBool(decoded['noise_suppression_active']),
+          estimatedPitchHz: _asNullableDouble(decoded['estimated_pitch_hz']),
           timestamp: timestamp,
         );
       }
@@ -56,6 +59,7 @@ class AudioFrame {
         snrDb: _asDouble(decoded['snr_db']),
         noiseReductionDb: _asDouble(decoded['noise_reduction_db']),
         noiseSuppressionActive: _asBool(decoded['noise_suppression_active']),
+        estimatedPitchHz: _asNullableDouble(decoded['estimated_pitch_hz']),
         timestamp: timestamp,
       );
     }
@@ -97,5 +101,15 @@ class AudioFrame {
     }
     final normalized = value?.toString().trim().toLowerCase();
     return normalized == 'true' || normalized == '1' || normalized == 'yes';
+  }
+
+  static double? _asNullableDouble(dynamic value) {
+    if (value is num) {
+      return value.toDouble();
+    }
+    if (value is String) {
+      return double.tryParse(value);
+    }
+    return null;
   }
 }

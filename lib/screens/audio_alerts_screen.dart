@@ -6,6 +6,7 @@ import '../providers/audio_provider.dart';
 import '../providers/connection_provider.dart';
 import '../services/pi_api_service.dart';
 import '../widgets/audio_meter.dart';
+import '../widgets/noise_suppression_panel.dart';
 import '../widgets/status_card.dart';
 
 class AudioAlertsScreen extends ConsumerWidget {
@@ -59,6 +60,8 @@ class AudioAlertsScreen extends ConsumerWidget {
             ),
           ),
         ),
+        const SizedBox(height: 12),
+        const NoiseSuppressionPanel(),
         const SizedBox(height: 12),
         StatusCard(
           title: 'Audio Socket',
