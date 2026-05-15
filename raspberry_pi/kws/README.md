@@ -174,16 +174,16 @@ Defaults:
 
 ```ini
 Environment=KWS_CHANNELS=2
-Environment=NOISE_GATE_THRESHOLD=0.02
-Environment=NOISE_GATE_HOLD_MS=100
-Environment=NOISE_SUPPRESSOR_STRENGTH=0.70
+Environment=NOISE_GATE_THRESHOLD=0.015
+Environment=NOISE_GATE_HOLD_MS=220
+Environment=NOISE_SUPPRESSOR_STRENGTH=0.60
 Environment=NOISE_PROFILE_SECONDS=2.0
 Environment=NOISE_PROFILE_ADAPT_RATE=0.05
 Environment=NOISE_LOG_INTERVAL_SECONDS=5.0
 Environment=DIRECTION_THRESHOLD_SECONDS=0.00003
-Environment=SNOWBOY_SENSITIVITY_QUIET=0.50
-Environment=SNOWBOY_SENSITIVITY_MODERATE=0.40
-Environment=SNOWBOY_SENSITIVITY_NOISY=0.30
+Environment=SNOWBOY_SENSITIVITY_QUIET=0.58
+Environment=SNOWBOY_SENSITIVITY_MODERATE=0.48
+Environment=SNOWBOY_SENSITIVITY_NOISY=0.38
 ```
 
 If fans or air conditioning trigger detections, raise the noise gate:
@@ -197,7 +197,8 @@ If quiet voices are missed, lower it:
 
 ```ini
 [Service]
-Environment=NOISE_GATE_THRESHOLD=0.015
+Environment=NOISE_GATE_THRESHOLD=0.012
+Environment=NOISE_GATE_HOLD_MS=280
 ```
 
 If speech is still buried under fans or room echo, increase the suppressor:
@@ -213,6 +214,18 @@ If the suppressor is eating too much speech detail, relax it:
 [Service]
 Environment=NOISE_SUPPRESSOR_STRENGTH=0.55
 ```
+
+If `help` is still not triggering often enough, push Snowboy higher in steps:
+
+```ini
+[Service]
+Environment=SNOWBOY_SENSITIVITY_QUIET=0.62
+Environment=SNOWBOY_SENSITIVITY_MODERATE=0.52
+Environment=SNOWBOY_SENSITIVITY_NOISY=0.42
+```
+
+That will make the ReSpeaker more eager to react to quiet speech, but it can
+also increase false `help` triggers, especially near `tulong`.
 
 If left/right detection is too sensitive, raise the direction threshold:
 
