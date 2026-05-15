@@ -163,3 +163,46 @@ Then restart:
 sudo systemctl daemon-reload
 sudo systemctl restart kws-alert.service
 ```
+
+## Noise Gate And Direction Tuning
+
+The dual keyword service captures two channels from the ReSpeaker, estimates
+voice direction with cross-correlation, and skips quiet chunks before they reach
+Vosk/Snowboy.
+
+Defaults:
+
+```ini
+Environment=KWS_CHANNELS=2
+Environment=NOISE_GATE_THRESHOLD=0.02
+Environment=NOISE_GATE_HOLD_MS=100
+Environment=DIRECTION_THRESHOLD_SECONDS=0.00003
+```
+
+If fans or air conditioning trigger detections, raise the noise gate:
+
+```ini
+[Service]
+Environment=NOISE_GATE_THRESHOLD=0.03
+```
+
+If quiet voices are missed, lower it:
+
+```ini
+[Service]
+Environment=NOISE_GATE_THRESHOLD=0.015
+```
+
+If left/right detection is too sensitive, raise the direction threshold:
+
+```ini
+[Service]
+Environment=DIRECTION_THRESHOLD_SECONDS=0.00005
+```
+
+Apply overrides:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart kws-alert.service
+```

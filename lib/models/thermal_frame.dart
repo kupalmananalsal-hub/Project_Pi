@@ -70,6 +70,29 @@ class ThermalFrame {
 
   double get centerTemperature => temperatureAt(width ~/ 2, height ~/ 2);
 
+  ({double min, double max}) clippedTemperatureRange({
+    double clipPercent = 0.02,
+  }) {
+    if (pixels.isEmpty) {
+      return (min: 20, max: 45);
+    }
+    final sorted = [...pixels]..sort();
+    final lowerIndex = (sorted.length * clipPercent).floor().clamp(
+      0,
+      sorted.length - 1,
+    );
+    final upperIndex = (sorted.length * (1 - clipPercent)).ceil().clamp(
+      0,
+      sorted.length - 1,
+    );
+    final minValue = sorted[lowerIndex];
+    final maxValue = sorted[upperIndex];
+    if ((maxValue - minValue).abs() < 0.5) {
+      return (min: minValue - 0.25, max: maxValue + 0.25);
+    }
+    return (min: minValue, max: maxValue);
+  }
+
   double temperatureAt(int x, int y) {
     if (pixels.isEmpty) {
       return 0;
@@ -174,6 +197,7 @@ Color thermalColorForValue(
         Color(0xFF008BFF),
         Color(0xFF00FF70),
         Color(0xFFFFE600),
+        Color(0xFFFF8A00),
         Color(0xFFFF2A00),
         Color(0xFF7A0000),
       ]);

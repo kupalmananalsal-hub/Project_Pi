@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pyaudio
 import requests
 from vosk import KaldiRecognizer, Model
@@ -17,6 +18,7 @@ RUNNING = True
 SAMPLE_RATE = 16000
 CHUNK_FRAMES = 1024
 ALERT_FLUSH_INTERVAL_SECONDS = 2.0
+INT16_MAX = 32768.0
 
 
 def _split_env(value):
@@ -43,12 +45,13 @@ class AlertPoster:
         self.lock = threading.Lock()
         self.pending = self._load_pending()
 
-    def publish(self, keyword, confidence, source):
+    def publish(self, keyword, confidence, source, direction="center"):
         event = {
             "event": "keyword_detected",
             "keyword": keyword,
             "confidence": confidence,
             "source": source,
+            "direction": direction,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         print(f"Alert: {keyword} detected by {source}! {json.dumps(event)}", flush=True)
@@ -123,6 +126,24 @@ class CooldownGate:
             return True
 
 
+class NoiseGate:
+    def __init__(self, threshold_rms=0.02, hold_ms=100, sample_rate=16000):
+        self.threshold = threshold_rms
+        self.hold_samples = int(sample_rate * hold_ms / 1000)
+        self.below_counter = 0
+
+    def should_process(self, mono_samples):
+        if mono_samples.size == 0:
+            return False
+        rms = float(np.sqrt(np.mean(np.square(mono_samples.astype(np.float32)))) / INT16_MAX)
+        if rms > self.threshold:
+            self.below_counter = 0
+            return True
+
+        self.below_counter += mono_samples.size
+        return self.below_counter < self.hold_samples
+
+
 class DetectionDispatcher:
     def __init__(
         self,
@@ -139,14 +160,14 @@ class DetectionDispatcher:
         self.pending_help_timer = None
         self.last_tulong_at = 0.0
 
-    def submit(self, keyword, confidence, source):
+    def submit(self, keyword, confidence, source, direction="center"):
         if keyword == "tulong":
-            self._publish_tulong(confidence, source)
+            self._publish_tulong(confidence, source, direction)
             return
         if keyword == "help":
-            self._schedule_help(confidence, source)
+            self._schedule_help(confidence, source, direction)
 
-    def _publish_tulong(self, confidence, source):
+    def _publish_tulong(self, confidence, source, direction):
         with self.lock:
             self.last_tulong_at = time.monotonic()
             if self.pending_help_timer is not None:
@@ -154,9 +175,9 @@ class DetectionDispatcher:
                 self.pending_help_timer = None
 
         if self.cooldown.allow("tulong"):
-            self.poster.publish("tulong", confidence, source)
+            self.poster.publish("tulong", confidence, source, direction)
 
-    def _schedule_help(self, confidence, source):
+    def _schedule_help(self, confidence, source, direction):
         now = time.monotonic()
         with self.lock:
             if now - self.last_tulong_at < self.help_suppress_after_tulong_seconds:
@@ -168,12 +189,12 @@ class DetectionDispatcher:
             self.pending_help_timer = threading.Timer(
                 self.help_confirm_seconds,
                 self._publish_help,
-                args=(confidence, source),
+                args=(confidence, source, direction),
             )
             self.pending_help_timer.daemon = True
             self.pending_help_timer.start()
 
-    def _publish_help(self, confidence, source):
+    def _publish_help(self, confidence, source, direction):
         with self.lock:
             self.pending_help_timer = None
             if (
@@ -184,7 +205,7 @@ class DetectionDispatcher:
                 return
 
         if self.cooldown.allow("help"):
-            self.poster.publish("help", confidence, source)
+            self.poster.publish("help", confidence, source, direction)
 
 
 def find_input_device(pa, hint):
@@ -239,6 +260,51 @@ def put_latest(target_queue, data):
         target_queue.put_nowait(data)
 
 
+def split_audio_chunk(data, channels):
+    samples = np.frombuffer(data, dtype=np.int16)
+    if channels >= 2:
+        usable = samples[: samples.size - (samples.size % channels)]
+        framed = usable.reshape(-1, channels)
+        left = framed[:, 0]
+        right = framed[:, 1]
+        mono = np.mean(framed[:, :2].astype(np.float32), axis=1).astype(np.int16)
+    else:
+        mono = samples
+        left = samples
+        right = samples
+
+    return {
+        "mono_bytes": mono.tobytes(),
+        "mono_samples": mono,
+        "left": left,
+        "right": right,
+        "direction": estimate_direction(left, right),
+    }
+
+
+def estimate_direction(left_chunk, right_chunk, sample_rate=SAMPLE_RATE):
+    left = np.asarray(left_chunk, dtype=np.float32)
+    right = np.asarray(right_chunk, dtype=np.float32)
+    if left.size < 2 or right.size < 2:
+        return "center"
+
+    left -= float(np.mean(left))
+    right -= float(np.mean(right))
+    if float(np.max(np.abs(left))) < 1 or float(np.max(np.abs(right))) < 1:
+        return "center"
+
+    correlation = np.correlate(left, right, mode="full")
+    lag = int(np.argmax(correlation) - (len(left) - 1))
+    time_diff = lag / sample_rate
+    threshold = float(os.getenv("DIRECTION_THRESHOLD_SECONDS", "0.00003"))
+
+    if time_diff > threshold:
+        return "right"
+    if time_diff < -threshold:
+        return "left"
+    return "center"
+
+
 def vosk_worker(audio_queue, dispatcher, config):
     recognizer = create_vosk_recognizer(config["model_path"], config["sample_rate"])
     debug = config["debug"]
@@ -251,13 +317,18 @@ def vosk_worker(audio_queue, dispatcher, config):
         except queue.Empty:
             continue
 
-        text = read_vosk_text(recognizer, data)
+        text = read_vosk_text(recognizer, data["mono_bytes"])
         if debug and text and text != last_debug_text:
             print(f"vosk heard: {text}", flush=True)
             last_debug_text = text
 
         if "tulong" in text:
-            dispatcher.submit("tulong", config["confidence"], "vosk")
+            dispatcher.submit(
+                "tulong",
+                config["confidence"],
+                "vosk",
+                data.get("direction", "center"),
+            )
             recognizer.Reset()
 
 
@@ -291,7 +362,7 @@ def snowboy_worker(audio_queue, dispatcher, config):
         except queue.Empty:
             continue
 
-        result = detector.RunDetection(data)
+        result = detector.RunDetection(data["mono_bytes"])
         if result > 0:
             index = result - 1
             if index < len(config["keywords"]):
@@ -299,7 +370,12 @@ def snowboy_worker(audio_queue, dispatcher, config):
             else:
                 spoken_keyword = config["alert_keyword"]
 
-            dispatcher.submit(config["alert_keyword"], config["confidence"], "snowboy")
+            dispatcher.submit(
+                config["alert_keyword"],
+                config["confidence"],
+                "snowboy",
+                data.get("direction", "center"),
+            )
         elif result == -1:
             print("Snowboy detection error", file=sys.stderr, flush=True)
 
@@ -316,8 +392,14 @@ def main():
     mic_hint = os.getenv("MIC_NAME_HINT", "seeed")
     sample_rate = int(os.getenv("KWS_SAMPLE_RATE", str(SAMPLE_RATE)))
     chunk_frames = int(os.getenv("KWS_CHUNK_FRAMES", str(CHUNK_FRAMES)))
+    channels = int(os.getenv("KWS_CHANNELS", "2"))
     cooldown_seconds = float(os.getenv("KWS_COOLDOWN_SECONDS", "1.5"))
     debug = _env_bool("KWS_DEBUG", False)
+    noise_gate = NoiseGate(
+        threshold_rms=float(os.getenv("NOISE_GATE_THRESHOLD", "0.02")),
+        hold_ms=int(os.getenv("NOISE_GATE_HOLD_MS", "100")),
+        sample_rate=sample_rate,
+    )
 
     snowboy_model_paths = [
         Path(path)
@@ -415,7 +497,7 @@ def main():
         print(f"Using shared input device index {device_index}", flush=True)
         stream = pa.open(
             rate=sample_rate,
-            channels=1,
+            channels=channels,
             format=pyaudio.paInt16,
             input=True,
             input_device_index=device_index,
@@ -429,8 +511,10 @@ def main():
         next_flush_at = 0.0
         while RUNNING:
             data = stream.read(chunk_frames, exception_on_overflow=False)
-            put_latest(vosk_queue, data)
-            put_latest(snowboy_queue, data)
+            packet = split_audio_chunk(data, channels)
+            if noise_gate.should_process(packet["mono_samples"]):
+                put_latest(vosk_queue, packet)
+                put_latest(snowboy_queue, packet)
 
             now = time.monotonic()
             if now >= next_flush_at:

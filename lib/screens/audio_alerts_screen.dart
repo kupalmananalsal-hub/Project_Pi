@@ -42,6 +42,8 @@ class AudioAlertsScreen extends ConsumerWidget {
                   value: latest?.normalizedRight ?? 0,
                   color: Colors.orangeAccent,
                 ),
+                const SizedBox(height: 12),
+                DirectionIndicator(direction: latest?.direction ?? 'center'),
                 const SizedBox(height: 18),
                 SizedBox(
                   height: 180,
@@ -108,8 +110,11 @@ class AudioAlertsScreen extends ConsumerWidget {
                       : Icons.record_voice_over_rounded,
                   color: event.isEmergencyKeyword ? Colors.redAccent : null,
                 ),
-                title: Text(event.keyword.toUpperCase()),
-                subtitle: Text(_formatTimestamp(event.timestamp)),
+                title: Text(event.displayKeyword),
+                subtitle: Text(
+                  '${_formatTimestamp(event.timestamp)} - '
+                  'voice ${event.directionLabel.toLowerCase()}',
+                ),
                 trailing: Text('${(event.confidence * 100).round()}%'),
               ),
             ),

@@ -59,6 +59,8 @@ class AlertIn(BaseModel):
     event: str = "keyword_detected"
     keyword: str
     confidence: float = 0.0
+    direction: str = "center"
+    source: str | None = None
     timestamp: str | None = None
 
 
@@ -84,6 +86,29 @@ class AlertHub:
 
 
 alerts = AlertHub()
+
+
+def estimate_direction(left_chunk, right_chunk, sample_rate=16000):
+    left = np.asarray(left_chunk, dtype=np.float32)
+    right = np.asarray(right_chunk, dtype=np.float32)
+    if left.size < 2 or right.size < 2:
+        return "center"
+
+    left -= float(np.mean(left))
+    right -= float(np.mean(right))
+    if float(np.max(np.abs(left))) < 1 or float(np.max(np.abs(right))) < 1:
+        return "center"
+
+    correlation = np.correlate(left, right, mode="full")
+    lag = int(np.argmax(correlation) - (len(left) - 1))
+    time_diff = lag / sample_rate
+    threshold = 0.00003
+
+    if time_diff > threshold:
+        return "right"
+    if time_diff < -threshold:
+        return "left"
+    return "center"
 
 
 class ThermalCamera:
@@ -182,10 +207,12 @@ class AudioMonitor:
         right = samples[1::2].astype(np.float32)
         rms_left = float(np.sqrt(np.mean(left * left)) / 32768.0)
         rms_right = float(np.sqrt(np.mean(right * right)) / 32768.0)
+        direction = estimate_direction(left, right)
         self.latest = {
             "left": round(rms_left, 4),
             "right": round(rms_right, 4),
             "rms": [round(rms_left, 4), round(rms_right, 4)],
+            "direction": direction,
             "device_index": self.device_index,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
@@ -352,6 +379,7 @@ async def ws_audio(websocket: WebSocket):
                 payload = {
                     "error": str(exc),
                     "rms": [0.0, 0.0],
+                    "direction": "center",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             await websocket.send_json(payload)

@@ -32,6 +32,9 @@ class _AppShellState extends ConsumerState<AppShell> {
     final activeAlert = ref.watch(
       alertsProvider.select((state) => state.activeAlert),
     );
+    final activeAlertHumanDetected = ref.watch(
+      alertsProvider.select((state) => state.activeAlertHumanDetected),
+    );
 
     return Stack(
       children: [
@@ -70,6 +73,7 @@ class _AppShellState extends ConsumerState<AppShell> {
         if (activeAlert != null)
           AlertOverlay(
             event: activeAlert,
+            humanDetected: activeAlertHumanDetected,
             onDismiss: () {
               ref.read(alertsProvider.notifier).dismissActiveAlert();
             },

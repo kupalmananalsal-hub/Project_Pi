@@ -3,9 +3,15 @@ import 'package:flutter/material.dart';
 import '../models/alert_event.dart';
 
 class AlertOverlay extends StatefulWidget {
-  const AlertOverlay({super.key, required this.event, required this.onDismiss});
+  const AlertOverlay({
+    super.key,
+    required this.event,
+    required this.humanDetected,
+    required this.onDismiss,
+  });
 
   final AlertEvent event;
+  final bool humanDetected;
   final VoidCallback onDismiss;
 
   @override
@@ -56,7 +62,7 @@ class _AlertOverlayState extends State<AlertOverlay>
                   ),
                   const SizedBox(height: 24),
                   Text(
-                    'Emergency Keyword Detected',
+                    widget.event.emergencyTitle,
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                       color: Colors.white,
@@ -65,11 +71,23 @@ class _AlertOverlayState extends State<AlertOverlay>
                   ),
                   const SizedBox(height: 18),
                   Text(
-                    widget.event.keyword.toUpperCase(),
+                    widget.event.displayKeyword,
                     style: Theme.of(context).textTheme.displaySmall?.copyWith(
                       color: Colors.white,
                       fontWeight: FontWeight.w900,
                     ),
+                  ),
+                  const SizedBox(height: 8),
+                  _AlertDirection(event: widget.event),
+                  const SizedBox(height: 12),
+                  Text(
+                    widget.humanDetected
+                        ? 'Thermal human detected - vibration enabled'
+                        : 'No thermal human visible - vibration skipped',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(
+                      context,
+                    ).textTheme.titleMedium?.copyWith(color: Colors.white),
                   ),
                   const SizedBox(height: 8),
                   Text(
@@ -95,6 +113,34 @@ class _AlertOverlayState extends State<AlertOverlay>
           ),
         ),
       ),
+    );
+  }
+}
+
+class _AlertDirection extends StatelessWidget {
+  const _AlertDirection({required this.event});
+
+  final AlertEvent event;
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = switch (event.direction) {
+      'left' => Icons.keyboard_arrow_left_rounded,
+      'right' => Icons.keyboard_arrow_right_rounded,
+      _ => Icons.keyboard_arrow_up_rounded,
+    };
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Icon(icon, color: Colors.white, size: 34),
+        const SizedBox(width: 8),
+        Text(
+          'Voice from the ${event.directionLabel}',
+          style: Theme.of(
+            context,
+          ).textTheme.titleLarge?.copyWith(color: Colors.white),
+        ),
+      ],
     );
   }
 }

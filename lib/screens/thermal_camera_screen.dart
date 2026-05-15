@@ -58,8 +58,8 @@ class _ThermalCameraScreenState extends ConsumerState<ThermalCameraScreen> {
           child: ThermalDisplay(
             frame: frame,
             colorMap: thermal.colorMap,
-            minTemp: thermal.minTemp,
-            maxTemp: thermal.maxTemp,
+            minTemp: thermal.displayMinTemp,
+            maxTemp: thermal.displayMaxTemp,
             selectedX: thermal.selectedX,
             selectedY: thermal.selectedY,
             onPixelSelected: (x, y) {
@@ -101,12 +101,28 @@ class _ThermalCameraScreenState extends ConsumerState<ThermalCameraScreen> {
                   ? 'Center --'
                   : '${frame.centerTemperature.toStringAsFixed(1)} C',
             ),
+            StatusChip(
+              icon: thermal.humanDetected
+                  ? Icons.accessibility_new_rounded
+                  : Icons.person_off_rounded,
+              label: thermal.humanDetected ? 'Human visible' : 'No human',
+            ),
           ],
         ),
         const SizedBox(height: 18),
-        Text(
-          'Temperature Range',
-          style: Theme.of(context).textTheme.titleMedium,
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Auto Range'),
+          subtitle: Text(
+            thermal.autoRange
+                ? '${thermal.displayMinTemp.toStringAsFixed(1)} C to '
+                      '${thermal.displayMaxTemp.toStringAsFixed(1)} C'
+                : 'Manual range sliders enabled',
+          ),
+          value: thermal.autoRange,
+          onChanged: (value) {
+            ref.read(thermalProvider.notifier).setAutoRange(value);
+          },
         ),
         RangeSlider(
           values: RangeValues(thermal.minTemp, thermal.maxTemp),
@@ -117,11 +133,13 @@ class _ThermalCameraScreenState extends ConsumerState<ThermalCameraScreen> {
             '${thermal.minTemp.round()} C',
             '${thermal.maxTemp.round()} C',
           ),
-          onChanged: (values) {
-            ref
-                .read(thermalProvider.notifier)
-                .setTemperatureRange(values.start, values.end);
-          },
+          onChanged: thermal.autoRange
+              ? null
+              : (values) {
+                  ref
+                      .read(thermalProvider.notifier)
+                      .setTemperatureRange(values.start, values.end);
+                },
         ),
         Row(
           children: [
@@ -156,6 +174,16 @@ class _ThermalCameraScreenState extends ConsumerState<ThermalCameraScreen> {
                     '${thermal.selectedTemperature!.toStringAsFixed(1)} C',
           icon: Icons.ads_click_rounded,
           accentColor: Colors.greenAccent,
+        ),
+        StatusCard(
+          title: 'Human Detection',
+          value: thermal.humanDetection.detected
+              ? 'Blob ${thermal.humanDetection.blob?.width}x'
+                    '${thermal.humanDetection.blob?.height}, '
+                    'avg ${thermal.humanDetection.averageTemperature?.toStringAsFixed(1)} C'
+              : 'No 30-40 C human-shaped blob',
+          icon: Icons.accessibility_new_rounded,
+          accentColor: thermal.humanDetected ? Colors.greenAccent : Colors.grey,
         ),
       ],
     );

@@ -5,10 +5,12 @@ class AudioFrame {
     required this.leftRms,
     required this.rightRms,
     required this.timestamp,
+    this.direction = 'center',
   });
 
   final double leftRms;
   final double rightRms;
+  final String direction;
   final DateTime timestamp;
 
   factory AudioFrame.fromMessage(dynamic message) {
@@ -22,6 +24,7 @@ class AudioFrame {
         return AudioFrame(
           leftRms: _asDouble(rms[0]),
           rightRms: _asDouble(rms[1]),
+          direction: _normalizeDirection(decoded['direction']),
           timestamp: timestamp,
         );
       }
@@ -32,6 +35,7 @@ class AudioFrame {
         rightRms: _asDouble(
           decoded['right'] ?? decoded['mic2'] ?? decoded['ch1'] ?? decoded['r'],
         ),
+        direction: _normalizeDirection(decoded['direction']),
         timestamp: timestamp,
       );
     }
@@ -57,5 +61,13 @@ class AudioFrame {
       return value.clamp(0.0, 1.0);
     }
     return (value / 100).clamp(0.0, 1.0);
+  }
+
+  static String _normalizeDirection(dynamic value) {
+    final normalized = value?.toString().trim().toLowerCase();
+    if (normalized == 'left' || normalized == 'right') {
+      return normalized!;
+    }
+    return 'center';
   }
 }

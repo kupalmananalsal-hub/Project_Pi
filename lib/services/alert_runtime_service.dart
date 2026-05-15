@@ -66,11 +66,19 @@ class AlertRuntimeService {
     _initialized = true;
   }
 
-  Future<void> startEmergency(AlertEvent event, AlertSound sound) async {
+  Future<void> startEmergency(
+    AlertEvent event,
+    AlertSound sound, {
+    bool vibrate = true,
+  }) async {
     await initialize();
-    await _showNotification(event);
+    await _showNotification(event, vibrate: vibrate);
     await _startAudio(sound);
-    await _startVibration();
+    if (vibrate) {
+      await _startVibration();
+    } else {
+      await Vibration.cancel();
+    }
   }
 
   Future<void> stopEmergency() async {
@@ -86,7 +94,10 @@ class AlertRuntimeService {
     await _player.dispose();
   }
 
-  Future<void> _showNotification(AlertEvent event) async {
+  Future<void> _showNotification(
+    AlertEvent event, {
+    required bool vibrate,
+  }) async {
     const android = AndroidNotificationDetails(
       'keyword_alerts',
       'Keyword Alerts',
@@ -113,8 +124,11 @@ class AlertRuntimeService {
 
     await _notifications.show(
       id: 1001,
-      title: 'Emergency keyword detected',
-      body: '${event.keyword.toUpperCase()} at ${_formatTime(event.timestamp)}',
+      title: event.emergencyTitle,
+      body:
+          'Voice from ${event.directionLabel}. '
+          '${vibrate ? 'Thermal human detected.' : 'No thermal human; vibration skipped.'} '
+          '${_formatTime(event.timestamp)}',
       notificationDetails: const NotificationDetails(
         android: android,
         iOS: darwin,

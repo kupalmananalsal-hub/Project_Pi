@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/thermal_frame.dart';
 import '../services/reconnecting_web_socket_service.dart';
+import '../utils/human_detector.dart';
 
 final thermalProvider = NotifierProvider<ThermalController, ThermalState>(
   ThermalController.new,
@@ -16,6 +17,8 @@ class ThermalState {
     this.colorMap = ThermalColorMap.jet,
     this.minTemp = 20,
     this.maxTemp = 45,
+    this.autoRange = true,
+    this.humanDetection = const HumanDetectionResult(detected: false),
     this.selectedX,
     this.selectedY,
     this.fps = 0,
@@ -27,6 +30,8 @@ class ThermalState {
   final ThermalColorMap colorMap;
   final double minTemp;
   final double maxTemp;
+  final bool autoRange;
+  final HumanDetectionResult humanDetection;
   final int? selectedX;
   final int? selectedY;
   final double fps;
@@ -40,12 +45,24 @@ class ThermalState {
     return currentFrame.temperatureAt(selectedX!, selectedY!);
   }
 
+  bool get humanDetected => humanDetection.detected;
+
+  double get displayMinTemp => autoRange && frame != null
+      ? frame!.clippedTemperatureRange().min
+      : minTemp;
+
+  double get displayMaxTemp => autoRange && frame != null
+      ? frame!.clippedTemperatureRange().max
+      : maxTemp;
+
   ThermalState copyWith({
     Object? frame = _unset,
     SocketConnectionStatus? socketStatus,
     ThermalColorMap? colorMap,
     double? minTemp,
     double? maxTemp,
+    bool? autoRange,
+    HumanDetectionResult? humanDetection,
     Object? selectedX = _unset,
     Object? selectedY = _unset,
     double? fps,
@@ -57,6 +74,8 @@ class ThermalState {
       colorMap: colorMap ?? this.colorMap,
       minTemp: minTemp ?? this.minTemp,
       maxTemp: maxTemp ?? this.maxTemp,
+      autoRange: autoRange ?? this.autoRange,
+      humanDetection: humanDetection ?? this.humanDetection,
       selectedX: selectedX == _unset ? this.selectedX : selectedX as int?,
       selectedY: selectedY == _unset ? this.selectedY : selectedY as int?,
       fps: fps ?? this.fps,
@@ -87,7 +106,15 @@ class ThermalController extends Notifier<ThermalState> {
     _frameSubscription = _socket!.messages.listen(
       (frame) {
         _framesThisSecond++;
-        state = state.copyWith(frame: frame, error: null);
+        state = state.copyWith(
+          frame: frame,
+          humanDetection: HumanDetector.analyze(
+            frame.pixels,
+            frame.width,
+            frame.height,
+          ),
+          error: null,
+        );
       },
       onError: (Object error) {
         state = state.copyWith(error: error.toString());
@@ -109,6 +136,10 @@ class ThermalController extends Notifier<ThermalState> {
 
   void setTemperatureRange(double minTemp, double maxTemp) {
     state = state.copyWith(minTemp: minTemp, maxTemp: maxTemp);
+  }
+
+  void setAutoRange(bool enabled) {
+    state = state.copyWith(autoRange: enabled);
   }
 
   void selectPixel(int x, int y) {
