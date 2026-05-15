@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import numpy as np
@@ -228,6 +229,7 @@ class DetectionDispatcher:
         self.pending_help_timer: threading.Timer | None = None
         self.pending_help_payload: tuple[float, str, dict[str, object]] | None = None
         self.last_tulong_at = 0.0
+        self.last_tulong_hint_at = 0.0
 
     def submit(
         self,
@@ -243,9 +245,25 @@ class DetectionDispatcher:
         if keyword == "help":
             self._schedule_help(confidence, source, context)
 
+    def note_vosk_text(self, text: str) -> None:
+        if not looks_like_tulong(text):
+            return
+        with self.lock:
+            self.last_tulong_hint_at = time.monotonic()
+            if self.pending_help_timer is not None:
+                self.pending_help_timer.cancel()
+                self.pending_help_timer = None
+                self.pending_help_payload = None
+                print(
+                    "Pending Snowboy help cancelled by Vosk tulong hint",
+                    flush=True,
+                )
+
     def _publish_tulong(self, confidence: float, source: str, context: dict[str, object]) -> None:
         with self.lock:
-            self.last_tulong_at = time.monotonic()
+            now = time.monotonic()
+            self.last_tulong_at = now
+            self.last_tulong_hint_at = now
             if self.pending_help_timer is not None:
                 self.pending_help_timer.cancel()
                 self.pending_help_timer = None
@@ -263,7 +281,8 @@ class DetectionDispatcher:
     def _schedule_help(self, confidence: float, source: str, context: dict[str, object]) -> None:
         now = time.monotonic()
         with self.lock:
-            if now - self.last_tulong_at < self.help_suppress_after_tulong_seconds:
+            tulong_recent = max(self.last_tulong_at, self.last_tulong_hint_at)
+            if now - tulong_recent < self.help_suppress_after_tulong_seconds:
                 print("Snowboy help ignored near recent tulong detection", flush=True)
                 return
             if self.pending_help_timer is not None:
@@ -282,8 +301,9 @@ class DetectionDispatcher:
             payload = self.pending_help_payload
             self.pending_help_payload = None
             self.pending_help_timer = None
+            tulong_recent = max(self.last_tulong_at, self.last_tulong_hint_at)
             if (
-                time.monotonic() - self.last_tulong_at
+                time.monotonic() - tulong_recent
                 < self.help_suppress_after_tulong_seconds
             ):
                 print("Pending Snowboy help cancelled by tulong", flush=True)
@@ -326,6 +346,30 @@ def create_vosk_recognizer(model_path: Path, sample_rate: int) -> KaldiRecognize
     recognizer = KaldiRecognizer(model, sample_rate)
     recognizer.SetWords(True)
     return recognizer
+
+
+def looks_like_tulong(text: str) -> bool:
+    normalized = " ".join(
+        "".join(char for char in token.lower() if char.isalpha())
+        for token in text.split()
+    ).strip()
+    if not normalized:
+        return False
+
+    tokens = [token for token in normalized.split() if token]
+    if not tokens:
+        tokens = [normalized]
+
+    for token in tokens:
+        if token == "tulong":
+            return True
+        if len(token) >= 3 and "tulong".startswith(token):
+            return True
+        if token in {"tolong", "tulon", "tulom", "tulungan"}:
+            return True
+        if len(token) >= 4 and SequenceMatcher(None, token, "tulong").ratio() >= 0.72:
+            return True
+    return False
 
 
 def read_vosk_text(recognizer: KaldiRecognizer, data: bytes) -> str:
@@ -420,6 +464,9 @@ def vosk_worker(
         if debug and text and text != last_debug_text:
             print(f"vosk heard: {text}", flush=True)
             last_debug_text = text
+
+        if text:
+            dispatcher.note_vosk_text(text)
 
         if "tulong" in text:
             dispatcher.submit(
