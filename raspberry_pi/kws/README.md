@@ -5,6 +5,10 @@ emergency alert system.
 
 ## Current Engines
 
+- openWakeWord runs first as an optional preprocessor:
+  - Speex noise suppression is enabled inside openWakeWord's inference path.
+  - VAD gates whether Vosk/Snowboy should receive each audio chunk.
+  - Extra wake words such as `alexa` and `hey jarvis` can post alerts too.
 - Vosk detects `tulong` using the Tagalog model:
   `/home/thesis/vosk-models/vosk-model-tl-ph-generic-0.6`
 - Snowboy detects `help` using a personal model:
@@ -47,9 +51,91 @@ sudo journalctl -u kws-alert.service -f
 Expected startup:
 
 ```text
+openWakeWord ready
 Vosk ready for tulong
 Snowboy ready for help
 Listening for: tulong via Vosk, help via Snowboy
+```
+
+If openWakeWord is not installed yet, the service logs a warning and continues
+with the existing Vosk/Snowboy path. This keeps the current emergency alert
+pipeline running while dependencies are installed.
+
+## Install openWakeWord
+
+Install the optional third engine inside the same KWS virtual environment:
+
+```bash
+source ~/kws-env/bin/activate
+pip install openwakeword
+sudo apt-get update
+sudo apt-get install -y libspeexdsp-dev
+python3 -c "import openwakeword; openwakeword.utils.download_models()"
+```
+
+Smoke test VAD and Speex noise suppression:
+
+```bash
+source ~/kws-env/bin/activate
+python3 - <<'PY'
+from openwakeword.model import Model
+
+model = Model(
+    wakeword_models=[],
+    enable_speex_noise_suppression=True,
+    vad_threshold=0.5,
+)
+print("openWakeWord noise suppression + VAD ready")
+PY
+```
+
+Run the full triple-engine script manually:
+
+```bash
+source ~/kws-env/bin/activate
+python3 ~/Project_Pi/raspberry_pi/kws/kws_alert_dual.py
+```
+
+## Triple-Engine Audio Flow
+
+```text
+ReSpeaker 2-Mics audio
+  -> Project Pi spectral NoiseSuppressor
+  -> openWakeWord VAD + additional wake words
+  -> Vosk checks "tulong" only when speech is active
+  -> Snowboy checks "help" only when speech is active
+  -> FastAPI /api/alerts
+  -> Flutter app /ws/alerts
+```
+
+openWakeWord is configured through systemd environment variables:
+
+```ini
+Environment=OPENWAKEWORD_ENABLED=1
+Environment="OPENWAKEWORD_MODELS=alexa,hey jarvis"
+Environment=OPENWAKEWORD_VAD_THRESHOLD=0.50
+Environment=OPENWAKEWORD_WAKE_THRESHOLD=0.50
+Environment=OPENWAKEWORD_SPEEX_NOISE_SUPPRESSION=1
+```
+
+To use VAD gating without posting openWakeWord wake-word alerts, leave the
+model list blank:
+
+```ini
+Environment=OPENWAKEWORD_MODELS=
+```
+
+To disable openWakeWord without changing code:
+
+```ini
+Environment=OPENWAKEWORD_ENABLED=0
+```
+
+Apply overrides:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart kws-alert.service
 ```
 
 ## Train `help.pmdl`
@@ -174,6 +260,7 @@ Defaults:
 
 ```ini
 Environment=KWS_CHANNELS=2
+Environment=KWS_CHUNK_FRAMES=1280
 Environment=NOISE_GATE_THRESHOLD=0.015
 Environment=NOISE_GATE_HOLD_MS=220
 Environment=NOISE_SUPPRESSOR_STRENGTH=0.60

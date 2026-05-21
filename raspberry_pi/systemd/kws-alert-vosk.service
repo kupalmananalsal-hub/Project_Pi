@@ -17,12 +17,18 @@ Environment=PROJECT_PI_AUDIO_STATUS_PATH=/tmp/project_pi_audio_status.json
 Environment=MIC_NAME_HINT=seeed
 Environment=VOSK_KEYWORD_CONFIDENCE=0.60
 Environment=KWS_CHANNELS=2
+Environment=KWS_CHUNK_FRAMES=1280
 Environment=NOISE_GATE_THRESHOLD=0.015
 Environment=NOISE_GATE_HOLD_MS=220
 Environment=NOISE_SUPPRESSOR_STRENGTH=0.60
 Environment=NOISE_PROFILE_SECONDS=2.0
 Environment=NOISE_PROFILE_ADAPT_RATE=0.05
 Environment=NOISE_LOG_INTERVAL_SECONDS=5.0
+Environment=OPENWAKEWORD_ENABLED=1
+Environment="OPENWAKEWORD_MODELS=alexa,hey jarvis"
+Environment=OPENWAKEWORD_VAD_THRESHOLD=0.50
+Environment=OPENWAKEWORD_WAKE_THRESHOLD=0.50
+Environment=OPENWAKEWORD_SPEEX_NOISE_SUPPRESSION=1
 Environment=DIRECTION_THRESHOLD_SECONDS=0.00003
 Environment=SNOWBOY_SWIG_PATH=/home/thesis/snowboy/swig/Python3
 Environment=SNOWBOY_EXAMPLES_PATH=/home/thesis/snowboy/examples/Python3

@@ -17,6 +17,7 @@ import pyaudio
 import requests
 from vosk import KaldiRecognizer, Model
 
+from audio_preprocessor import AudioPreprocessor
 from noise_suppressor import (
     DEFAULT_CONFIG_PATH,
     NoiseSuppressionConfigStore,
@@ -40,6 +41,12 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _friendly_keyword(value: str) -> str:
+    keyword = Path(value).stem if any(sep in value for sep in ("/", "\\")) else value
+    keyword = keyword.replace("_", " ").replace("-", " ").strip().lower()
+    return " ".join(keyword.split())
 
 
 def handle_signal(signum, frame):
@@ -245,6 +252,8 @@ class DetectionDispatcher:
             return
         if keyword == "help":
             self._schedule_help(confidence, source, context)
+            return
+        self._publish_generic(keyword, confidence, source, context)
 
     def note_vosk_text(self, text: str) -> None:
         if not looks_like_tulong(text):
@@ -316,6 +325,22 @@ class DetectionDispatcher:
         if self.cooldown.allow("help"):
             self.poster.publish(
                 "help",
+                confidence,
+                source,
+                direction=str(context.get("direction", "center")),
+                extra={k: v for k, v in context.items() if k != "direction"},
+            )
+
+    def _publish_generic(
+        self,
+        keyword: str,
+        confidence: float,
+        source: str,
+        context: dict[str, object],
+    ) -> None:
+        if self.cooldown.allow(keyword):
+            self.poster.publish(
+                keyword,
                 confidence,
                 source,
                 direction=str(context.get("direction", "center")),
@@ -416,6 +441,15 @@ def write_audio_status(status_path: Path, packet: dict[str, object]) -> None:
         "snr_estimate": packet.get("snr_db", 0.0),
         "noise_reduction_db": packet.get("noise_reduction_db", 0.0),
         "noise_suppression_active": packet.get("noise_suppression_active", False),
+        "openwakeword_available": packet.get("openwakeword_available", False),
+        "openwakeword_vad_score": packet.get("openwakeword_vad_score", 0.0),
+        "openwakeword_is_speech": packet.get("openwakeword_is_speech", True),
+        "openwakeword_wake_word": packet.get("openwakeword_wake_word"),
+        "openwakeword_wake_word_score": packet.get(
+            "openwakeword_wake_word_score",
+            0.0,
+        ),
+        "openwakeword_error": packet.get("openwakeword_error"),
         "source": "kws_shared_audio",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -580,7 +614,18 @@ def _event_context(data: dict[str, object]) -> dict[str, object]:
         "noise_suppression_active": data.get("noise_suppression_active", False),
         "suppression_strength": data.get("strength", 0.5),
         "suppression_sensitivity": data.get("sensitivity", 0.5),
+        "openwakeword_available": data.get("openwakeword_available", False),
+        "openwakeword_vad_score": data.get("openwakeword_vad_score", 0.0),
+        "openwakeword_is_speech": data.get("openwakeword_is_speech", True),
+        "openwakeword_wake_word": data.get("openwakeword_wake_word"),
+        "openwakeword_wake_word_score": data.get(
+            "openwakeword_wake_word_score",
+            0.0,
+        ),
     }
+    openwakeword_error = data.get("openwakeword_error")
+    if openwakeword_error:
+        context["openwakeword_error"] = openwakeword_error
     sensitivity = data.get("snowboy_sensitivity")
     if sensitivity is not None:
         context["snowboy_sensitivity"] = sensitivity
@@ -623,6 +668,35 @@ def main() -> None:
         profile_update_rate=float(os.getenv("NOISE_PROFILE_ADAPT_RATE", "0.05")),
     )
     noise_suppressor.apply_config(current_noise_config)
+    openwakeword_enabled = _env_bool("OPENWAKEWORD_ENABLED", True)
+    openwakeword_models = _split_env(os.getenv("OPENWAKEWORD_MODELS", "alexa,hey jarvis"))
+    audio_preprocessor = AudioPreprocessor(
+        wake_word_models=openwakeword_models,
+        enabled=openwakeword_enabled,
+        vad_threshold=float(os.getenv("OPENWAKEWORD_VAD_THRESHOLD", "0.50")),
+        wake_word_threshold=float(os.getenv("OPENWAKEWORD_WAKE_THRESHOLD", "0.50")),
+        enable_speex_noise_suppression=_env_bool(
+            "OPENWAKEWORD_SPEEX_NOISE_SUPPRESSION",
+            True,
+        ),
+    )
+    if audio_preprocessor.available:
+        print(
+            "openWakeWord ready: "
+            f"models={openwakeword_models or ['vad-only']}, "
+            f"vad={audio_preprocessor.vad_threshold:.2f}, "
+            f"wake={audio_preprocessor.wake_word_threshold:.2f}",
+            flush=True,
+        )
+    elif openwakeword_enabled:
+        print(
+            "openWakeWord unavailable; continuing with Vosk/Snowboy only: "
+            f"{audio_preprocessor.error}",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        print("openWakeWord disabled; continuing with Vosk/Snowboy only", flush=True)
     noise_log_interval = float(os.getenv("NOISE_LOG_INTERVAL_SECONDS", "5.0"))
     adaptive_sensitivity = AdaptiveSnowboySensitivity(
         quiet_value=float(os.getenv("SNOWBOY_SENSITIVITY_QUIET", "0.50")),
@@ -741,7 +815,15 @@ def main() -> None:
 
         vosk_thread.start()
         snowboy_thread.start()
-        print("Listening for: tulong via Vosk, help via Snowboy", flush=True)
+        print(
+            "Listening for: tulong via Vosk, help via Snowboy"
+            + (
+                f", {', '.join(openwakeword_models)} via openWakeWord"
+                if audio_preprocessor.available and openwakeword_models
+                else ""
+            ),
+            flush=True,
+        )
 
         next_flush_at = 0.0
         next_noise_log_at = 0.0
@@ -771,14 +853,33 @@ def main() -> None:
             packet = split_audio_chunk(data, channels)
             raw_samples = packet["raw_mono_samples"]
             cleaned_samples, metrics = noise_suppressor.process(raw_samples)
-            packet["mono_samples"] = cleaned_samples
-            packet["mono_bytes"] = cleaned_samples.tobytes()
+            preprocessor_result = audio_preprocessor.process(cleaned_samples)
+            preprocessed_samples = np.asarray(
+                preprocessor_result.cleaned_audio,
+                dtype=np.int16,
+            )
+            packet["mono_samples"] = preprocessed_samples
+            packet["mono_bytes"] = preprocessed_samples.tobytes()
 
-            process_chunk = noise_gate.should_process(cleaned_samples)
+            process_chunk = (
+                preprocessor_result.is_speech
+                and noise_gate.should_process(preprocessed_samples)
+            )
             noise_suppressor.update_noise_profile(raw_samples, is_speech=process_chunk)
             packet.update(metrics)
+            packet.update(preprocessor_result.to_metrics())
             write_audio_status(audio_status_path, packet)
             adaptive_sensitivity.update_for_snr(float(packet.get("snr_db", 0.0)))
+
+            if preprocessor_result.wake_word:
+                context = _event_context(packet)
+                context["openwakeword_model"] = preprocessor_result.wake_word
+                dispatcher.submit(
+                    _friendly_keyword(preprocessor_result.wake_word),
+                    preprocessor_result.wake_word_score,
+                    "openwakeword",
+                    context=context,
+                )
 
             if process_chunk:
                 put_latest(vosk_queue, packet)
