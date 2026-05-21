@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'voice_direction.dart';
+
 class AudioFrame {
   const AudioFrame({
     required this.leftRms,
@@ -12,6 +14,9 @@ class AudioFrame {
     this.noiseReductionDb = 0,
     this.noiseSuppressionActive = false,
     this.estimatedPitchHz,
+    this.directionAngleDegrees,
+    this.directionConfidence,
+    this.distanceEstimateMeters,
     this.error,
   });
 
@@ -25,6 +30,9 @@ class AudioFrame {
   final double noiseReductionDb;
   final bool noiseSuppressionActive;
   final double? estimatedPitchHz;
+  final double? directionAngleDegrees;
+  final double? directionConfidence;
+  final double? distanceEstimateMeters;
   final String? error;
 
   factory AudioFrame.fromMessage(dynamic message) {
@@ -48,6 +56,13 @@ class AudioFrame {
           noiseReductionDb: _asDouble(decoded['noise_reduction_db']),
           noiseSuppressionActive: _asBool(decoded['noise_suppression_active']),
           estimatedPitchHz: _asNullableDouble(decoded['estimated_pitch_hz']),
+          directionAngleDegrees: _asNullableDouble(decoded['direction_angle']),
+          directionConfidence: _asNullableDouble(
+            decoded['direction_confidence'],
+          ),
+          distanceEstimateMeters: _asNullableDouble(
+            decoded['distance_estimate_m'] ?? decoded['distance_m'],
+          ),
           error: decoded['error']?.toString(),
           timestamp: timestamp,
         );
@@ -69,6 +84,11 @@ class AudioFrame {
         noiseReductionDb: _asDouble(decoded['noise_reduction_db']),
         noiseSuppressionActive: _asBool(decoded['noise_suppression_active']),
         estimatedPitchHz: _asNullableDouble(decoded['estimated_pitch_hz']),
+        directionAngleDegrees: _asNullableDouble(decoded['direction_angle']),
+        directionConfidence: _asNullableDouble(decoded['direction_confidence']),
+        distanceEstimateMeters: _asNullableDouble(
+          decoded['distance_estimate_m'] ?? decoded['distance_m'],
+        ),
         error: decoded['error']?.toString(),
         timestamp: timestamp,
       );
@@ -79,6 +99,17 @@ class AudioFrame {
   double get normalizedLeft => _normalize(leftRms);
 
   double get normalizedRight => _normalize(rightRms);
+
+  VoiceDirection get voiceDirection {
+    return VoiceDirection.fromPayload(
+      direction: direction,
+      angleDegrees: directionAngleDegrees,
+      confidence: directionConfidence,
+      distanceMeters: distanceEstimateMeters,
+      leftRms: leftRms,
+      rightRms: rightRms,
+    );
+  }
 
   static double _asDouble(dynamic value, {double fallback = 0}) {
     if (value is num) {
@@ -98,11 +129,24 @@ class AudioFrame {
   }
 
   static String _normalizeDirection(dynamic value) {
-    final normalized = value?.toString().trim().toLowerCase();
-    if (normalized == 'left' || normalized == 'right') {
+    final normalized = value?.toString().trim().toLowerCase().replaceAll(
+      '_',
+      '-',
+    );
+    if (const {
+      'front',
+      'front-left',
+      'front-right',
+      'left',
+      'right',
+      'back-left',
+      'back-right',
+      'back',
+      'center',
+    }.contains(normalized)) {
       return normalized!;
     }
-    return 'center';
+    return 'front';
   }
 
   static bool _asBool(dynamic value) {

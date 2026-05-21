@@ -98,8 +98,8 @@ class _AlertOverlayState extends State<AlertOverlay>
                   ),
                   const SizedBox(height: 10),
                   Text(
-                    '${widget.event.detectedPartLabel} • '
-                    '${(widget.event.bodyCoverage * 100).toStringAsFixed(1)}% coverage • '
+                    '${widget.event.detectedPartLabel} - '
+                    '${(widget.event.bodyCoverage * 100).toStringAsFixed(1)}% coverage - '
                     'boost +${(widget.event.thermalConfidenceBoost * 100).round()}%',
                     textAlign: TextAlign.center,
                     style: Theme.of(
@@ -147,7 +147,7 @@ class _AlertOverlayState extends State<AlertOverlay>
     if (snr != null) {
       parts.add('SNR ${snr.toStringAsFixed(1)} dB');
     }
-    return parts.join(' • ');
+    return parts.join(' - ');
   }
 }
 
@@ -159,8 +159,13 @@ class _AlertDirection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final icon = switch (event.direction) {
+      'front-left' => Icons.north_west_rounded,
+      'front-right' => Icons.north_east_rounded,
       'left' => Icons.keyboard_arrow_left_rounded,
       'right' => Icons.keyboard_arrow_right_rounded,
+      'back-left' => Icons.south_west_rounded,
+      'back-right' => Icons.south_east_rounded,
+      'back' => Icons.keyboard_arrow_down_rounded,
       _ => Icons.keyboard_arrow_up_rounded,
     };
     return Row(
@@ -169,7 +174,7 @@ class _AlertDirection extends StatelessWidget {
         Icon(icon, color: Colors.white, size: 34),
         const SizedBox(width: 8),
         Text(
-          'Voice from the ${event.directionLabel}',
+          'Voice from ${event.directionLabel}',
           style: Theme.of(
             context,
           ).textTheme.titleLarge?.copyWith(color: Colors.white),

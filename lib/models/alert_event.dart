@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'voice_direction.dart';
+
 class AlertEvent {
   const AlertEvent({
     required this.keyword,
@@ -18,6 +20,10 @@ class AlertEvent {
     this.noiseLevelDb,
     this.signalLevelDb,
     this.snrDb,
+    this.directionAngleDegrees,
+    this.directionConfidence,
+    this.distanceEstimateMeters,
+    this.phase = 'direction_guidance',
     this.streamType = 'live',
     this.message,
   });
@@ -38,6 +44,10 @@ class AlertEvent {
   final double? noiseLevelDb;
   final double? signalLevelDb;
   final double? snrDb;
+  final double? directionAngleDegrees;
+  final double? directionConfidence;
+  final double? distanceEstimateMeters;
+  final String phase;
   final String streamType;
   final String? message;
 
@@ -90,6 +100,14 @@ class AlertEvent {
         snrDb: _asNullableDouble(
           decoded['snr_db'] ?? decisionFactors['snr_db'],
         ),
+        directionAngleDegrees: _asNullableDouble(
+          decoded['direction_angle'] ?? decoded['direction_angle_degrees'],
+        ),
+        directionConfidence: _asNullableDouble(decoded['direction_confidence']),
+        distanceEstimateMeters: _asNullableDouble(
+          decoded['distance_estimate_m'] ?? decoded['distance_m'],
+        ),
+        phase: decoded['phase']?.toString() ?? 'direction_guidance',
         streamType: decoded['type']?.toString() ?? 'live',
         message: decoded['message']?.toString(),
         timestamp:
@@ -110,6 +128,8 @@ class AlertEvent {
 
   bool get isConnectionMessage => streamType == 'connected';
 
+  bool get isKeywordDetection => event == 'keyword_detected';
+
   bool get isHelpKeyword => _keywordWords.contains('help');
 
   bool get isTulongKeyword => _keywordWords.contains('tulong');
@@ -117,6 +137,17 @@ class AlertEvent {
   double get displayedConfidence => finalConfidence ?? confidence;
 
   bool get shouldVibrate => alertLevel == 'full_alert';
+
+  bool get shouldShowDirectionGuidance => isLive && isKeywordDetection;
+
+  VoiceDirection get voiceDirection {
+    return VoiceDirection.fromPayload(
+      direction: direction,
+      angleDegrees: directionAngleDegrees,
+      confidence: directionConfidence,
+      distanceMeters: distanceEstimateMeters,
+    );
+  }
 
   String get displayKeyword {
     if (isHelpKeyword) {
@@ -130,14 +161,7 @@ class AlertEvent {
   }
 
   String get directionLabel {
-    switch (direction) {
-      case 'left':
-        return 'LEFT';
-      case 'right':
-        return 'RIGHT';
-      default:
-        return 'CENTER';
-    }
+    return voiceDirection.label;
   }
 
   String get emergencyTitle =>
@@ -190,11 +214,24 @@ class AlertEvent {
   }
 
   static String _normalizeDirection(dynamic value) {
-    final normalized = value?.toString().trim().toLowerCase();
-    if (normalized == 'left' || normalized == 'right') {
+    final normalized = value?.toString().trim().toLowerCase().replaceAll(
+      '_',
+      '-',
+    );
+    if (const {
+      'front',
+      'front-left',
+      'front-right',
+      'left',
+      'right',
+      'back-left',
+      'back-right',
+      'back',
+      'center',
+    }.contains(normalized)) {
       return normalized!;
     }
-    return 'center';
+    return 'front';
   }
 
   static bool _asBool(dynamic value) {

@@ -15,6 +15,8 @@ final alertsProvider = NotifierProvider<AlertsController, AlertsState>(
 class AlertsState {
   const AlertsState({
     this.history = const [],
+    this.pendingGuidance,
+    this.pendingGuidanceHumanDetected = false,
     this.activeAlert,
     this.activeAlertHumanDetected = false,
     this.socketStatus = SocketConnectionStatus.disconnected,
@@ -22,6 +24,8 @@ class AlertsState {
   });
 
   final List<AlertEvent> history;
+  final AlertEvent? pendingGuidance;
+  final bool pendingGuidanceHumanDetected;
   final AlertEvent? activeAlert;
   final bool activeAlertHumanDetected;
   final SocketConnectionStatus socketStatus;
@@ -29,6 +33,8 @@ class AlertsState {
 
   AlertsState copyWith({
     List<AlertEvent>? history,
+    Object? pendingGuidance = _unset,
+    bool? pendingGuidanceHumanDetected,
     Object? activeAlert = _unset,
     bool? activeAlertHumanDetected,
     SocketConnectionStatus? socketStatus,
@@ -36,6 +42,11 @@ class AlertsState {
   }) {
     return AlertsState(
       history: history ?? this.history,
+      pendingGuidance: pendingGuidance == _unset
+          ? this.pendingGuidance
+          : pendingGuidance as AlertEvent?,
+      pendingGuidanceHumanDetected:
+          pendingGuidanceHumanDetected ?? this.pendingGuidanceHumanDetected,
       activeAlert: activeAlert == _unset
           ? this.activeAlert
           : activeAlert as AlertEvent?,
@@ -81,6 +92,31 @@ class AlertsController extends Notifier<AlertsState> {
     state = state.copyWith(activeAlert: null, activeAlertHumanDetected: false);
   }
 
+  Future<void> confirmGuidanceAlert() async {
+    final event = state.pendingGuidance;
+    if (event == null) {
+      return;
+    }
+    final humanDetected = state.pendingGuidanceHumanDetected;
+    state = state.copyWith(
+      pendingGuidance: null,
+      pendingGuidanceHumanDetected: false,
+      activeAlert: event,
+      activeAlertHumanDetected: humanDetected,
+    );
+    final sound = ref.read(settingsProvider).alertSound;
+    await ref
+        .read(alertRuntimeServiceProvider)
+        .startEmergency(event, sound, vibrate: event.shouldVibrate);
+  }
+
+  void dismissGuidance() {
+    state = state.copyWith(
+      pendingGuidance: null,
+      pendingGuidanceHumanDetected: false,
+    );
+  }
+
   void disconnect() {
     _alertSubscription?.cancel();
     _alertSubscription = null;
@@ -109,18 +145,12 @@ class AlertsController extends Notifier<AlertsState> {
     }
     state = state.copyWith(history: nextHistory, error: null);
 
-    if (event.isLive && event.isEmergencyKeyword) {
+    if (event.shouldShowDirectionGuidance) {
       final humanDetected =
           event.humanDetected || ref.read(thermalProvider).humanDetected;
       state = state.copyWith(
-        activeAlert: event,
-        activeAlertHumanDetected: humanDetected,
-      );
-      final sound = ref.read(settingsProvider).alertSound;
-      unawaited(
-        ref
-            .read(alertRuntimeServiceProvider)
-            .startEmergency(event, sound, vibrate: event.shouldVibrate),
+        pendingGuidance: event,
+        pendingGuidanceHumanDetected: humanDetected,
       );
     }
   }

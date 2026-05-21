@@ -14,12 +14,72 @@ class ControlsScreen extends ConsumerWidget {
     final controls = ref.watch(controlsProvider);
     final connection = ref.watch(connectionProvider);
     final button = controls.buttonEvent;
+    final status = connection.status;
 
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
         Text('Controls', style: Theme.of(context).textTheme.headlineSmall),
         const SizedBox(height: 14),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'System Status',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    Chip(
+                      avatar: const Icon(Icons.device_thermostat_rounded),
+                      label: Text(
+                        status?.cpuTempC == null
+                            ? 'CPU unavailable'
+                            : 'CPU ${status!.cpuTempC!.toStringAsFixed(1)} C',
+                      ),
+                    ),
+                    Chip(
+                      avatar: const Icon(Icons.memory_rounded),
+                      label: Text(
+                        status?.ramUsagePercent == null
+                            ? 'RAM unavailable'
+                            : 'RAM ${status!.ramUsagePercent!.toStringAsFixed(1)}%',
+                      ),
+                    ),
+                    Chip(
+                      avatar: const Icon(Icons.storage_rounded),
+                      label: Text(
+                        status?.diskUsagePercent == null
+                            ? 'Disk unavailable'
+                            : 'Disk ${status!.diskUsagePercent!.toStringAsFixed(1)}%',
+                      ),
+                    ),
+                    Chip(
+                      avatar: const Icon(Icons.schedule_rounded),
+                      label: Text('Uptime ${status?.uptime ?? 'Unavailable'}'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                StatusCard(
+                  title: 'I2C Devices',
+                  value: status?.i2cDevices.isEmpty ?? true
+                      ? 'No devices reported'
+                      : status!.i2cDevices.join(', '),
+                  icon: Icons.cable_rounded,
+                  accentColor: Colors.purpleAccent,
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(16),

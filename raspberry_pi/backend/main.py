@@ -91,6 +91,11 @@ class AlertIn(BaseModel):
     keyword: str
     confidence: float = 0.0
     direction: str = "center"
+    direction_angle: float | None = None
+    direction_confidence: float | None = None
+    distance_estimate_m: float | None = None
+    distance_m: float | None = None
+    phase: str | None = None
     source: str | None = None
     timestamp: str | None = None
     noise_level_db: float | None = None
@@ -175,6 +180,44 @@ def estimate_direction(left_chunk, right_chunk, sample_rate=DEFAULT_AUDIO_SAMPLE
     if time_diff < -threshold:
         return "left"
     return "center"
+
+
+def calculate_direction(left_rms: float, right_rms: float):
+    if left_rms <= 0 and right_rms <= 0:
+        return "unknown", 0, 0.0, None
+
+    diff = right_rms - left_rms
+    total = left_rms + right_rms
+    if total <= 0:
+        return "front", 0, 0.0, None
+
+    ratio = diff / total
+    if -0.1 <= ratio <= 0.1:
+        direction = "front"
+        angle = 0
+    elif 0.1 < ratio <= 0.3:
+        direction = "front-right"
+        angle = 45
+    elif 0.3 < ratio <= 0.6:
+        direction = "right"
+        angle = 90
+    elif ratio > 0.6:
+        direction = "back-right"
+        angle = 135
+    elif -0.3 <= ratio < -0.1:
+        direction = "front-left"
+        angle = -45
+    elif -0.6 <= ratio < -0.3:
+        direction = "left"
+        angle = -90
+    else:
+        direction = "back-left"
+        angle = -135
+
+    avg_level = (left_rms + right_rms) / 2
+    distance_m = max(0.5, min(10.0, 1.0 / (avg_level + 0.01) * 0.05))
+    confidence = min(1.0, abs(ratio) * 2)
+    return direction, angle, confidence, distance_m
 
 
 def estimate_pitch_hz(samples, sample_rate=DEFAULT_AUDIO_SAMPLE_RATE):
@@ -382,7 +425,15 @@ class AudioMonitor:
 
         rms_left = float(np.sqrt(np.mean(left * left)) / 32768.0)
         rms_right = float(np.sqrt(np.mean(right * right)) / 32768.0)
-        direction = estimate_direction(left, right)
+        correlation_direction = estimate_direction(left, right)
+        direction, direction_angle, direction_confidence, distance_m = calculate_direction(
+            rms_left,
+            rms_right,
+        )
+        if direction == "front" and correlation_direction in {"left", "right"}:
+            direction = f"front-{correlation_direction}"
+            direction_angle = -45 if correlation_direction == "left" else 45
+            direction_confidence = max(direction_confidence, 0.35)
         pitch_hz = estimate_pitch_hz(cleaned, DEFAULT_AUDIO_SAMPLE_RATE)
 
         self.latest = normalize_audio_payload({
@@ -390,6 +441,9 @@ class AudioMonitor:
             "right": round(rms_right, 4),
             "rms": [round(rms_left, 4), round(rms_right, 4)],
             "direction": direction,
+            "direction_angle": direction_angle,
+            "direction_confidence": round(direction_confidence, 3),
+            "distance_estimate_m": round(distance_m, 2) if distance_m else None,
             "noise_level_db": metrics["noise_level_db"],
             "signal_level_db": metrics["signal_level_db"],
             "snr_db": metrics["snr_db"],
@@ -536,6 +590,13 @@ def alert_with_type(event: dict[str, Any], event_type: str) -> dict[str, Any]:
 def normalize_audio_payload(data: dict[str, Any], *, working: bool = True) -> dict[str, Any]:
     left = round(float(data.get("left", 0.0) or 0.0), 4)
     right = round(float(data.get("right", 0.0) or 0.0), 4)
+    derived_direction, derived_angle, derived_confidence, derived_distance = calculate_direction(
+        left,
+        right,
+    )
+    direction = data.get("direction") or derived_direction
+    if direction == "center":
+        direction = "front"
     return {
         "working": working,
         "left": left,
@@ -543,7 +604,13 @@ def normalize_audio_payload(data: dict[str, Any], *, working: bool = True) -> di
         "left_rms": left,
         "right_rms": right,
         "rms": [left, right],
-        "direction": data.get("direction", "center"),
+        "direction": direction,
+        "direction_angle": data.get("direction_angle", derived_angle),
+        "direction_confidence": data.get("direction_confidence", derived_confidence),
+        "distance_estimate_m": data.get(
+            "distance_estimate_m",
+            data.get("distance_m", derived_distance),
+        ),
         "noise_floor_db": data.get("noise_floor_db", data.get("noise_level_db", -90.0)),
         "noise_level_db": data.get("noise_level_db", data.get("noise_floor_db", -90.0)),
         "signal_level_db": data.get("signal_level_db", -90.0),
@@ -685,6 +752,24 @@ def alert_to_dict(event: AlertIn) -> dict[str, Any]:
 
 def enrich_alert_payload(payload: dict[str, Any], thermal_payload: dict[str, Any] | None) -> dict[str, Any]:
     thermal_payload = thermal_payload or {}
+    latest_audio = read_shared_audio_status() or (
+        audio.latest if isinstance(audio.latest, dict) else {}
+    )
+    direction = payload.get("direction") or latest_audio.get("direction") or "front"
+    if direction == "center":
+        direction = "front"
+    payload["direction"] = direction
+    payload["direction_angle"] = payload.get("direction_angle") or latest_audio.get(
+        "direction_angle",
+        0,
+    )
+    payload["direction_confidence"] = payload.get(
+        "direction_confidence",
+    ) or latest_audio.get("direction_confidence", 0.0)
+    payload["distance_estimate_m"] = payload.get(
+        "distance_estimate_m",
+    ) or payload.get("distance_m") or latest_audio.get("distance_estimate_m")
+    payload["phase"] = payload.get("phase") or "direction_guidance"
     decision = decision_engine.evaluate(payload, thermal_payload)
     payload["human_detected"] = thermal_payload.get("human_detected", False)
     payload["body_coverage"] = thermal_payload.get("body_coverage", 0.0)
