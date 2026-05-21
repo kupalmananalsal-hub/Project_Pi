@@ -12,6 +12,7 @@ class AudioFrame {
     this.noiseReductionDb = 0,
     this.noiseSuppressionActive = false,
     this.estimatedPitchHz,
+    this.error,
   });
 
   final double leftRms;
@@ -24,6 +25,7 @@ class AudioFrame {
   final double noiseReductionDb;
   final bool noiseSuppressionActive;
   final double? estimatedPitchHz;
+  final String? error;
 
   factory AudioFrame.fromMessage(dynamic message) {
     final decoded = message is String ? jsonDecode(message) : message;
@@ -37,12 +39,16 @@ class AudioFrame {
           leftRms: _asDouble(rms[0]),
           rightRms: _asDouble(rms[1]),
           direction: _normalizeDirection(decoded['direction']),
-          noiseLevelDb: _asDouble(decoded['noise_level_db'], fallback: -90),
+          noiseLevelDb: _asDouble(
+            decoded['noise_level_db'] ?? decoded['noise_floor_db'],
+            fallback: -90,
+          ),
           signalLevelDb: _asDouble(decoded['signal_level_db'], fallback: -90),
-          snrDb: _asDouble(decoded['snr_db']),
+          snrDb: _asDouble(decoded['snr_db'] ?? decoded['snr_estimate']),
           noiseReductionDb: _asDouble(decoded['noise_reduction_db']),
           noiseSuppressionActive: _asBool(decoded['noise_suppression_active']),
           estimatedPitchHz: _asNullableDouble(decoded['estimated_pitch_hz']),
+          error: decoded['error']?.toString(),
           timestamp: timestamp,
         );
       }
@@ -54,12 +60,16 @@ class AudioFrame {
           decoded['right'] ?? decoded['mic2'] ?? decoded['ch1'] ?? decoded['r'],
         ),
         direction: _normalizeDirection(decoded['direction']),
-        noiseLevelDb: _asDouble(decoded['noise_level_db'], fallback: -90),
+        noiseLevelDb: _asDouble(
+          decoded['noise_level_db'] ?? decoded['noise_floor_db'],
+          fallback: -90,
+        ),
         signalLevelDb: _asDouble(decoded['signal_level_db'], fallback: -90),
-        snrDb: _asDouble(decoded['snr_db']),
+        snrDb: _asDouble(decoded['snr_db'] ?? decoded['snr_estimate']),
         noiseReductionDb: _asDouble(decoded['noise_reduction_db']),
         noiseSuppressionActive: _asBool(decoded['noise_suppression_active']),
         estimatedPitchHz: _asNullableDouble(decoded['estimated_pitch_hz']),
+        error: decoded['error']?.toString(),
         timestamp: timestamp,
       );
     }

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -11,11 +13,12 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import wave
 
 import numpy as np
 import psutil
 import pyaudio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -62,6 +65,8 @@ except Exception:  # pragma: no cover - hardware import
 APP_START = time.time()
 MLX_ADDRS = [0x10, 0x33]
 DEFAULT_AUDIO_SAMPLE_RATE = 16000
+VOICE_SAMPLES_DIR = Path.home() / "voice_samples"
+AUDIO_STATUS_PATH = Path(os.getenv("PROJECT_PI_AUDIO_STATUS_PATH", "/tmp/project_pi_audio_status.json"))
 
 app = FastAPI(title="Project Pi Thermal Backend", version="1.0.0")
 app.add_middleware(
@@ -108,6 +113,17 @@ class NoiseSuppressionRequest(BaseModel):
     sensitivity: float = Field(default=0.5, ge=0.0, le=1.0)
     active: bool = True
     snowboy_sensitivity: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class VoiceSampleResponse(BaseModel):
+    sample_id: str
+    filename: str
+    duration_seconds: float
+    sample_rate: int
+    channels: int
+    keyword: str
+    timestamp: str
+    message: str
 
 
 class AlertHub:
@@ -191,6 +207,11 @@ class ThermalCamera:
         self._lock = threading.Lock()
         self._last_payload: dict[str, Any] | None = None
         self._last_read_at = 0.0
+        self._confidence_scorer = ThermalConfidenceScorer(
+            width=32,
+            height=24,
+            temporal_required=True,
+        )
 
     def init(self):
         if self.mlx is not None:
@@ -245,8 +266,7 @@ class ThermalCamera:
 
     def _confidence_payload(self, temperatures: list[float]) -> dict[str, Any]:
         try:
-            scorer = ThermalConfidenceScorer(temperatures, width=32, height=24)
-            return scorer.analyze()
+            return self._confidence_scorer.analyze(temperatures)
         except Exception as exc:
             return {
                 "human_detected": False,
@@ -334,8 +354,16 @@ class AudioMonitor:
         return payload
 
     def read(self) -> dict[str, Any]:
-        self.start()
-        data = self.stream.read(800, exception_on_overflow=False)
+        try:
+            self.start()
+            data = self.stream.read(800, exception_on_overflow=False)
+        except Exception:
+            shared = read_shared_audio_status()
+            if shared is not None:
+                self.latest = shared
+                return shared
+            raise
+
         samples = np.frombuffer(data, dtype=np.int16)
         left = samples[0::2].astype(np.float32)
         right = samples[1::2].astype(np.float32)
@@ -357,7 +385,7 @@ class AudioMonitor:
         direction = estimate_direction(left, right)
         pitch_hz = estimate_pitch_hz(cleaned, DEFAULT_AUDIO_SAMPLE_RATE)
 
-        self.latest = {
+        self.latest = normalize_audio_payload({
             "left": round(rms_left, 4),
             "right": round(rms_right, 4),
             "rms": [round(rms_left, 4), round(rms_right, 4)],
@@ -372,7 +400,7 @@ class AudioMonitor:
             "estimated_pitch_hz": round(pitch_hz, 1) if pitch_hz is not None else None,
             "device_index": self.device_index,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        })
         return self.latest
 
     def close(self):
@@ -490,6 +518,165 @@ def i2c_devices():
     return {"devices": sorted(set(devices))}
 
 
+def sanitize_token(value: str, fallback: str = "unknown") -> str:
+    cleaned = "".join(
+        char.lower() if char.isalnum() else "_" for char in value.strip()
+    ).strip("_")
+    while "__" in cleaned:
+        cleaned = cleaned.replace("__", "_")
+    return cleaned or fallback
+
+
+def alert_with_type(event: dict[str, Any], event_type: str) -> dict[str, Any]:
+    payload = dict(event)
+    payload["type"] = event_type
+    return payload
+
+
+def normalize_audio_payload(data: dict[str, Any], *, working: bool = True) -> dict[str, Any]:
+    left = round(float(data.get("left", 0.0) or 0.0), 4)
+    right = round(float(data.get("right", 0.0) or 0.0), 4)
+    return {
+        "working": working,
+        "left": left,
+        "right": right,
+        "left_rms": left,
+        "right_rms": right,
+        "rms": [left, right],
+        "direction": data.get("direction", "center"),
+        "noise_floor_db": data.get("noise_floor_db", data.get("noise_level_db", -90.0)),
+        "noise_level_db": data.get("noise_level_db", data.get("noise_floor_db", -90.0)),
+        "signal_level_db": data.get("signal_level_db", -90.0),
+        "snr_estimate": data.get("snr_estimate", data.get("snr_db", 0.0)),
+        "snr_db": data.get("snr_db", data.get("snr_estimate", 0.0)),
+        "noise_reduction_db": data.get("noise_reduction_db", 0.0),
+        "noise_suppression_active": data.get("noise_suppression_active", False),
+        "estimated_pitch_hz": data.get("estimated_pitch_hz"),
+        "device_index": data.get("device_index"),
+        "source": data.get("source", "backend_audio"),
+        "timestamp": data.get("timestamp", datetime.now(timezone.utc).isoformat()),
+        **({"error": data["error"]} if data.get("error") else {}),
+    }
+
+
+def read_shared_audio_status(max_age_seconds: float = 1.5) -> dict[str, Any] | None:
+    if not AUDIO_STATUS_PATH.exists():
+        return None
+    try:
+        payload = json.loads(AUDIO_STATUS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        timestamp = datetime.fromisoformat(str(payload.get("timestamp")))
+        age = datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)
+        if age.total_seconds() > max_age_seconds:
+            return None
+    except (TypeError, ValueError):
+        return None
+    payload["source"] = "kws_shared_audio"
+    return normalize_audio_payload(payload)
+
+
+def voice_sample_metadata_files(keyword: str | None = None):
+    search_dir = VOICE_SAMPLES_DIR / sanitize_token(keyword) if keyword else VOICE_SAMPLES_DIR
+    if not search_dir.exists():
+        return []
+    return sorted(search_dir.rglob("*.json"))
+
+
+def load_voice_samples(keyword: str | None = None) -> list[dict[str, Any]]:
+    samples = []
+    for json_file in voice_sample_metadata_files(keyword):
+        try:
+            payload = json.loads(json_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            samples.append(payload)
+    samples.sort(key=lambda item: str(item.get("timestamp", "")))
+    return samples
+
+
+def count_samples(keyword: str | None = None) -> int:
+    return len(load_voice_samples(keyword))
+
+
+def count_by_keyword() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for sample in load_voice_samples():
+        keyword = str(sample.get("keyword", "unknown"))
+        counts[keyword] = counts.get(keyword, 0) + 1
+    return counts
+
+
+def count_by_speaker() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for sample in load_voice_samples():
+        speaker = str(sample.get("speaker_name", "unknown"))
+        counts[speaker] = counts.get(speaker, 0) + 1
+    return counts
+
+
+def count_unique_speakers() -> int:
+    return len(count_by_speaker())
+
+
+def read_wav_samples(path: Path) -> tuple[np.ndarray, int]:
+    with wave.open(str(path), "rb") as wav_file:
+        sample_rate = wav_file.getframerate()
+        channels = wav_file.getnchannels()
+        raw = wav_file.readframes(wav_file.getnframes())
+    samples = np.frombuffer(raw, dtype=np.int16)
+    if channels > 1 and samples.size >= channels:
+        samples = samples.reshape(-1, channels).mean(axis=1).astype(np.int16)
+    return samples.astype(np.float32), sample_rate
+
+
+def calculate_average_volume(samples: list[dict[str, Any]]) -> float:
+    rms_values = []
+    for sample in samples:
+        try:
+            audio_samples, _ = read_wav_samples(Path(str(sample["filepath"])))
+        except Exception:
+            continue
+        if audio_samples.size:
+            rms_values.append(float(np.sqrt(np.mean(np.square(audio_samples))) / 32768.0))
+    return float(np.mean(rms_values)) if rms_values else 0.0
+
+
+def estimate_pitch_range_from_samples(samples: list[dict[str, Any]]) -> list[float | None]:
+    pitches = []
+    for sample in samples:
+        try:
+            audio_samples, sample_rate = read_wav_samples(Path(str(sample["filepath"])))
+            pitch = estimate_pitch_hz(audio_samples, sample_rate)
+        except Exception:
+            pitch = None
+        if pitch is not None:
+            pitches.append(pitch)
+    if not pitches:
+        return [None, None]
+    return [round(float(min(pitches)), 1), round(float(max(pitches)), 1)]
+
+
+def estimate_clarity(samples: list[dict[str, Any]]) -> float:
+    scores = []
+    for sample in samples:
+        try:
+            audio_samples, _ = read_wav_samples(Path(str(sample["filepath"])))
+        except Exception:
+            continue
+        if audio_samples.size == 0:
+            continue
+        rms = float(np.sqrt(np.mean(np.square(audio_samples))) / 32768.0)
+        peak = float(np.max(np.abs(audio_samples)) / 32768.0)
+        crest = peak / max(rms, 1e-6)
+        scores.append(float(np.clip((rms * 8.0) + (1.0 / max(crest, 1.0)), 0.0, 1.0)))
+    return float(np.mean(scores)) if scores else 0.0
+
+
 def alert_to_dict(event: AlertIn) -> dict[str, Any]:
     if hasattr(event, "model_dump"):
         return event.model_dump()
@@ -531,6 +718,7 @@ def current_noise_settings() -> dict[str, Any]:
 async def startup():
     button.init()
     thermal.init()
+    VOICE_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
     noise_config_store.save(noise_config_store.load())
 
 
@@ -567,10 +755,13 @@ async def ws_audio(websocket: WebSocket):
     try:
         while True:
             try:
-                payload = await asyncio.to_thread(audio.read)
+                payload = normalize_audio_payload(await asyncio.to_thread(audio.read))
             except Exception as exc:
-                payload = {
+                payload = normalize_audio_payload({
                     "error": str(exc),
+                    "working": False,
+                    "left": 0.0,
+                    "right": 0.0,
                     "rms": [0.0, 0.0],
                     "direction": "center",
                     "noise_level_db": -90.0,
@@ -579,7 +770,7 @@ async def ws_audio(websocket: WebSocket):
                     "noise_reduction_db": 0.0,
                     "noise_suppression_active": False,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
+                }, working=False)
             await websocket.send_json(payload)
             await asyncio.sleep(0.05)
     except WebSocketDisconnect:
@@ -592,10 +783,17 @@ async def ws_alerts(websocket: WebSocket):
     client_queue = await alerts.connect()
     try:
         for event in list(alerts.history)[:10]:
-            await websocket.send_json(event)
+            await websocket.send_json(alert_with_type(event, "historical"))
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "message": "Alert stream active",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         while True:
             event = await client_queue.get()
-            await websocket.send_json(event)
+            await websocket.send_json(alert_with_type(event, "live"))
     except WebSocketDisconnect:
         alerts.disconnect(client_queue)
 
@@ -656,9 +854,165 @@ async def set_noise_suppression(request: NoiseSuppressionRequest):
     return {"ok": True, "settings": current_noise_settings()}
 
 
+@app.get("/api/audio/status")
+async def audio_status():
+    try:
+        data = normalize_audio_payload(await asyncio.to_thread(audio.read))
+        return {
+            **data,
+            "working": True,
+            "sample_rate": DEFAULT_AUDIO_SAMPLE_RATE,
+            "channels": 2,
+        }
+    except Exception as exc:
+        shared = read_shared_audio_status()
+        if shared is not None:
+            return {
+                **shared,
+                "working": True,
+                "sample_rate": DEFAULT_AUDIO_SAMPLE_RATE,
+                "channels": 2,
+            }
+        return {
+            "working": False,
+            "error": str(exc),
+            "device_index": audio.device_index,
+            "sample_rate": DEFAULT_AUDIO_SAMPLE_RATE,
+            "channels": 2,
+        }
+
+
+@app.post("/api/voice/sample", response_model=VoiceSampleResponse)
+async def upload_voice_sample(
+    request: Request,
+    keyword: str = "tulong",
+    speaker_name: str = "mobile_user",
+):
+    keyword = sanitize_token(keyword, "tulong")
+    speaker_name = sanitize_token(speaker_name, "mobile_user")
+    if keyword not in {"tulong", "help"}:
+        raise HTTPException(status_code=400, detail="keyword must be 'tulong' or 'help'")
+
+    audio_data = await request.body()
+    if len(audio_data) < 44 or not audio_data.startswith(b"RIFF"):
+        raise HTTPException(status_code=400, detail="Only WAV audio is accepted")
+
+    sample_hash = hashlib.md5(audio_data).hexdigest()[:12]
+    timestamp_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
+    sample_id = f"{keyword}_{speaker_name}_{timestamp_slug}_{sample_hash}"
+    keyword_dir = VOICE_SAMPLES_DIR / keyword / speaker_name
+    keyword_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{sample_id}.wav"
+    filepath = keyword_dir / filename
+    filepath.write_bytes(audio_data)
+
+    try:
+        with wave.open(str(filepath), "rb") as wav_file:
+            duration = wav_file.getnframes() / float(wav_file.getframerate())
+            sample_rate = wav_file.getframerate()
+            channels = wav_file.getnchannels()
+    except wave.Error as exc:
+        filepath.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=f"Invalid WAV file: {exc}") from exc
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    metadata = {
+        "sample_id": sample_id,
+        "filename": filename,
+        "keyword": keyword,
+        "speaker_name": speaker_name,
+        "duration_seconds": round(duration, 2),
+        "sample_rate": sample_rate,
+        "channels": channels,
+        "filepath": str(filepath),
+        "timestamp": timestamp,
+        "file_size_bytes": len(audio_data),
+    }
+    (keyword_dir / f"{sample_id}.json").write_text(
+        json.dumps(metadata, indent=2),
+        encoding="utf-8",
+    )
+
+    return VoiceSampleResponse(
+        sample_id=sample_id,
+        filename=filename,
+        duration_seconds=round(duration, 2),
+        sample_rate=sample_rate,
+        channels=channels,
+        keyword=keyword,
+        timestamp=timestamp,
+        message=(
+            f"Voice sample saved for '{keyword}'. "
+            f"Total samples for this keyword: {count_samples(keyword)}"
+        ),
+    )
+
+
+@app.get("/api/voice/samples")
+async def list_voice_samples(keyword: str | None = None):
+    samples = load_voice_samples(keyword)
+    return {
+        "total": len(samples),
+        "by_keyword": count_by_keyword(),
+        "by_speaker": count_by_speaker(),
+        "samples": samples[-20:],
+    }
+
+
+@app.get("/api/voice/stats")
+async def voice_sample_stats():
+    tulong_samples = count_samples("tulong")
+    help_samples = count_samples("help")
+    return {
+        "tulong_samples": tulong_samples,
+        "help_samples": help_samples,
+        "unique_speakers": count_unique_speakers(),
+        "total_samples": count_samples(),
+        "ready_for_training": tulong_samples >= 3 and help_samples >= 3,
+        "message": "Minimum 3 samples per keyword recommended for training",
+    }
+
+
+@app.post("/api/voice/calibrate")
+async def calibrate_from_samples():
+    samples = load_voice_samples()
+    if len(samples) < 3:
+        raise HTTPException(status_code=400, detail="Need at least 3 samples for calibration")
+
+    avg_volume = calculate_average_volume(samples)
+    pitch_range = estimate_pitch_range_from_samples(samples)
+    clarity_score = estimate_clarity(samples)
+    if avg_volume < 0.1:
+        gain_boost = 1.5
+        snowboy_sensitivity = 0.35
+    elif avg_volume < 0.3:
+        gain_boost = 1.0
+        snowboy_sensitivity = 0.40
+    else:
+        gain_boost = 0.8
+        snowboy_sensitivity = 0.45
+
+    return {
+        "voice_profile": {
+            "avg_volume": round(avg_volume, 3),
+            "pitch_range_hz": pitch_range,
+            "clarity_score": round(clarity_score, 2),
+        },
+        "recommended_settings": {
+            "noise_suppression_strength": 0.3 if clarity_score > 0.7 else 0.5,
+            "noise_suppression_sensitivity": 0.6 if avg_volume < 0.2 else 0.5,
+            "snowboy_sensitivity": snowboy_sensitivity,
+            "gain_boost": gain_boost,
+        },
+        "samples_analyzed": len(samples),
+        "ready_for_production": len(samples) >= 5,
+    }
+
+
 @app.post("/api/alerts")
 async def api_alerts(event: AlertIn):
     payload = alert_to_dict(event)
+    payload["type"] = "live"
     thermal_payload = None
     try:
         thermal_payload = await asyncio.to_thread(thermal.latest, 1.25)

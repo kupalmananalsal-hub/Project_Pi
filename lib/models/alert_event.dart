@@ -18,6 +18,8 @@ class AlertEvent {
     this.noiseLevelDb,
     this.signalLevelDb,
     this.snrDb,
+    this.streamType = 'live',
+    this.message,
   });
 
   final String event;
@@ -36,6 +38,8 @@ class AlertEvent {
   final double? noiseLevelDb;
   final double? signalLevelDb;
   final double? snrDb;
+  final String streamType;
+  final String? message;
 
   factory AlertEvent.fromMessage(dynamic message) {
     final decoded = message is String ? jsonDecode(message) : message;
@@ -86,6 +90,8 @@ class AlertEvent {
         snrDb: _asNullableDouble(
           decoded['snr_db'] ?? decisionFactors['snr_db'],
         ),
+        streamType: decoded['type']?.toString() ?? 'live',
+        message: decoded['message']?.toString(),
         timestamp:
             DateTime.tryParse(decoded['timestamp']?.toString() ?? '') ??
             DateTime.now(),
@@ -97,6 +103,12 @@ class AlertEvent {
   bool get isEmergencyKeyword {
     return isHelpKeyword || isTulongKeyword;
   }
+
+  bool get isLive => streamType == 'live';
+
+  bool get isHistorical => streamType == 'historical';
+
+  bool get isConnectionMessage => streamType == 'connected';
 
   bool get isHelpKeyword => _keywordWords.contains('help');
 

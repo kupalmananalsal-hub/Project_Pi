@@ -28,6 +28,7 @@ RUNNING = True
 SAMPLE_RATE = 16000
 CHUNK_FRAMES = 1024
 ALERT_FLUSH_INTERVAL_SECONDS = 2.0
+DEFAULT_AUDIO_STATUS_PATH = Path("/tmp/project_pi_audio_status.json")
 
 
 def _split_env(value: str) -> list[str]:
@@ -398,6 +399,32 @@ def put_latest(target_queue: queue.Queue, data: dict[str, object]) -> None:
         target_queue.put_nowait(data)
 
 
+def write_audio_status(status_path: Path, packet: dict[str, object]) -> None:
+    left = np.asarray(packet.get("left", []), dtype=np.float32)
+    right = np.asarray(packet.get("right", []), dtype=np.float32)
+    left_rms = float(np.sqrt(np.mean(np.square(left))) / 32768.0) if left.size else 0.0
+    right_rms = float(np.sqrt(np.mean(np.square(right))) / 32768.0) if right.size else 0.0
+    payload = {
+        "left": round(left_rms, 4),
+        "right": round(right_rms, 4),
+        "rms": [round(left_rms, 4), round(right_rms, 4)],
+        "direction": packet.get("direction", "center"),
+        "noise_level_db": packet.get("noise_level_db", -90.0),
+        "noise_floor_db": packet.get("noise_level_db", -90.0),
+        "signal_level_db": packet.get("signal_level_db", -90.0),
+        "snr_db": packet.get("snr_db", 0.0),
+        "snr_estimate": packet.get("snr_db", 0.0),
+        "noise_reduction_db": packet.get("noise_reduction_db", 0.0),
+        "noise_suppression_active": packet.get("noise_suppression_active", False),
+        "source": "kws_shared_audio",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        status_path.write_text(json.dumps(payload), encoding="utf-8")
+    except OSError as exc:
+        print(f"Audio status write failed: {exc}", file=sys.stderr, flush=True)
+
+
 def split_audio_chunk(data: bytes, channels: int) -> dict[str, object]:
     samples = np.frombuffer(data, dtype=np.int16)
     if channels >= 2:
@@ -569,6 +596,9 @@ def main() -> None:
     )
     backend_url = os.getenv("BACKEND_ALERT_URL", "http://127.0.0.1:8765/api/alerts")
     queue_path = Path(os.getenv("ALERT_QUEUE_PATH", "/tmp/project_pi_alerts.jsonl"))
+    audio_status_path = Path(
+        os.getenv("PROJECT_PI_AUDIO_STATUS_PATH", str(DEFAULT_AUDIO_STATUS_PATH))
+    )
     mic_hint = os.getenv("MIC_NAME_HINT", "seeed")
     sample_rate = int(os.getenv("KWS_SAMPLE_RATE", str(SAMPLE_RATE)))
     chunk_frames = int(os.getenv("KWS_CHUNK_FRAMES", str(CHUNK_FRAMES)))
@@ -747,6 +777,7 @@ def main() -> None:
             process_chunk = noise_gate.should_process(cleaned_samples)
             noise_suppressor.update_noise_profile(raw_samples, is_speech=process_chunk)
             packet.update(metrics)
+            write_audio_status(audio_status_path, packet)
             adaptive_sensitivity.update_for_snr(float(packet.get("snr_db", 0.0)))
 
             if process_chunk:

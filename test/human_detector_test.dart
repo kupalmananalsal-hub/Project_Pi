@@ -41,7 +41,7 @@ void main() {
     const height = 24;
     final pixels = List<double>.filled(width * height, 24);
 
-    for (var y = 10; y < 13; y++) {
+    for (var y = 10; y < 14; y++) {
       for (var x = 14; x < 18; x++) {
         pixels[(y * width) + x] = 33;
       }

@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import '../models/thermal_frame.dart';
 
 class HumanDetectionResult {
@@ -54,12 +56,15 @@ class HumanBlob {
 }
 
 class HumanDetector {
-  static const double minTemp = 30.0;
-  static const double maxTemp = 40.0;
-  static const double fingerThreshold = 0.01;
+  static const double minTemp = 32.0;
+  static const double maxTemp = 37.5;
+  static const int minClusterSize = 8;
+  static const double maxTempVariance = 3.0;
+  static const double maxClusterStd = 2.0;
+  static const double fingerThreshold = 0.02;
   static const double handThreshold = 0.05;
   static const double fullBodyThreshold = 0.15;
-  static const double minBlobSizePercent = 0.01;
+  static const double minBlobSizePercent = 0.02;
   static const double maxBlobSizePercent = 0.40;
 
   static bool detectHuman(List<double> temperatures, int width, int height) {
@@ -97,6 +102,8 @@ class HumanDetector {
     double? bestAverage;
     double? bestMin;
     double? bestMax;
+    double? bestStd;
+    final allHumanTemps = <double>[];
 
     for (var index = 0; index < totalPixels; index++) {
       if (visited[index] || !_isBodyTemperature(temperatures[index])) {
@@ -105,6 +112,7 @@ class HumanDetector {
 
       final result = _floodFill(temperatures, visited, width, height, index);
       humanPixelCount += result.blob.pixelCount;
+      allHumanTemps.addAll(result.temperatures);
       final blob = result.blob;
       final sizePercent = blob.pixelCount / totalPixels;
       final aspectRatio = blob.width == 0 ? 0 : blob.height / blob.width;
@@ -112,28 +120,38 @@ class HumanDetector {
           sizePercent >= minBlobSizePercent &&
           sizePercent <= maxBlobSizePercent;
       final validShape = aspectRatio >= 0.7 && aspectRatio <= 4.5;
+      final validCluster =
+          blob.pixelCount >= minClusterSize &&
+          result.temperatureStd <= maxClusterStd;
 
-      if (validSize && validShape) {
+      if (validSize && validShape && validCluster) {
         if (bestBlob == null || blob.pixelCount > bestBlob.pixelCount) {
           bestBlob = blob;
           bestAverage = result.averageTemperature;
           bestMin = result.minTemperature;
           bestMax = result.maxTemperature;
+          bestStd = result.temperatureStd;
         }
       }
     }
 
     final bodyCoverage = humanPixelCount / totalPixels;
+    final tempVariance = _std(allHumanTemps);
+    final detected =
+        bodyCoverage >= fingerThreshold &&
+        bestBlob != null &&
+        tempVariance <= maxTempVariance &&
+        (bestStd ?? double.infinity) <= maxClusterStd;
     final detectedPart = _detectedPartForCoverage(bodyCoverage);
     final confidenceBoost = _confidenceBoostForCoverage(bodyCoverage);
 
     return HumanDetectionResult(
-      detected: bodyCoverage >= fingerThreshold && bestBlob != null,
+      detected: detected,
       blob: bestBlob,
       averageTemperature: bestAverage,
-      bodyCoverage: bodyCoverage,
-      detectedPart: detectedPart,
-      confidenceBoost: confidenceBoost,
+      bodyCoverage: detected ? bodyCoverage : 0,
+      detectedPart: detected ? detectedPart : 'no_human',
+      confidenceBoost: detected ? confidenceBoost : 0,
       temperatureMin: bestMin,
       temperatureMax: bestMax,
     );
@@ -187,6 +205,7 @@ class HumanDetector {
     var tempSum = 0.0;
     var tempMin = double.infinity;
     var tempMax = double.negativeInfinity;
+    final blobTemperatures = <double>[];
 
     while (queue.isNotEmpty) {
       final index = queue.removeLast();
@@ -199,6 +218,7 @@ class HumanDetector {
       pixelCount++;
       final temperature = temperatures[index];
       tempSum += temperature;
+      blobTemperatures.add(temperature);
       tempMin = temperature < tempMin ? temperature : tempMin;
       tempMax = temperature > tempMax ? temperature : tempMax;
 
@@ -231,7 +251,25 @@ class HumanDetector {
       averageTemperature: tempSum / pixelCount,
       minTemperature: tempMin,
       maxTemperature: tempMax,
+      temperatureStd: _std(blobTemperatures),
+      temperatures: blobTemperatures,
     );
+  }
+
+  static double _std(List<double> values) {
+    if (values.isEmpty) {
+      return 0;
+    }
+    final mean = values.reduce((a, b) => a + b) / values.length;
+    final variance =
+        values
+            .map((value) {
+              final delta = value - mean;
+              return delta * delta;
+            })
+            .reduce((a, b) => a + b) /
+        values.length;
+    return math.sqrt(variance);
   }
 }
 
@@ -241,10 +279,14 @@ class _FloodFillResult {
     required this.averageTemperature,
     required this.minTemperature,
     required this.maxTemperature,
+    required this.temperatureStd,
+    required this.temperatures,
   });
 
   final HumanBlob blob;
   final double averageTemperature;
   final double minTemperature;
   final double maxTemperature;
+  final double temperatureStd;
+  final List<double> temperatures;
 }

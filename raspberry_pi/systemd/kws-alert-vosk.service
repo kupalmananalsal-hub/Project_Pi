@@ -13,6 +13,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=VOSK_MODEL_PATH=/home/thesis/vosk-models/vosk-model-tl-ph-generic-0.6
 Environment=BACKEND_ALERT_URL=http://127.0.0.1:8765/api/alerts
 Environment=ALERT_QUEUE_PATH=/tmp/project_pi_alerts.jsonl
+Environment=PROJECT_PI_AUDIO_STATUS_PATH=/tmp/project_pi_audio_status.json
 Environment=MIC_NAME_HINT=seeed
 Environment=VOSK_KEYWORD_CONFIDENCE=0.60
 Environment=KWS_CHANNELS=2

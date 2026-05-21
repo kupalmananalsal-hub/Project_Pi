@@ -94,13 +94,22 @@ class AlertsController extends Notifier<AlertsState> {
   }
 
   void _handleAlert(AlertEvent event) {
+    if (event.isConnectionMessage) {
+      return;
+    }
+
+    if (event.isHistorical) {
+      _addAlertToHistorySilently(event);
+      return;
+    }
+
     final nextHistory = [event, ...state.history];
     if (nextHistory.length > 100) {
       nextHistory.removeRange(100, nextHistory.length);
     }
     state = state.copyWith(history: nextHistory, error: null);
 
-    if (event.isEmergencyKeyword) {
+    if (event.isLive && event.isEmergencyKeyword) {
       final humanDetected =
           event.humanDetected || ref.read(thermalProvider).humanDetected;
       state = state.copyWith(
@@ -114,6 +123,14 @@ class AlertsController extends Notifier<AlertsState> {
             .startEmergency(event, sound, vibrate: event.shouldVibrate),
       );
     }
+  }
+
+  void _addAlertToHistorySilently(AlertEvent event) {
+    final nextHistory = [event, ...state.history];
+    if (nextHistory.length > 100) {
+      nextHistory.removeRange(100, nextHistory.length);
+    }
+    state = state.copyWith(history: nextHistory, error: null);
   }
 }
 

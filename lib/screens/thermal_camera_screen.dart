@@ -104,8 +104,8 @@ class _ThermalCameraScreenState extends ConsumerState<ThermalCameraScreen> {
             StatusChip(
               icon: thermal.humanDetected
                   ? Icons.accessibility_new_rounded
-                  : Icons.person_off_rounded,
-              label: thermal.humanDetected ? 'Human visible' : 'No human',
+                  : Icons.radio_button_checked_rounded,
+              label: thermal.humanDetected ? 'Human detected' : 'Monitoring',
             ),
           ],
         ),
@@ -175,16 +175,16 @@ class _ThermalCameraScreenState extends ConsumerState<ThermalCameraScreen> {
           icon: Icons.ads_click_rounded,
           accentColor: Colors.greenAccent,
         ),
-        StatusCard(
-          title: 'Human Detection',
-          value: thermal.humanDetection.detected
-              ? '${thermal.humanDetection.detectedPartLabel} • '
-                    '${(thermal.humanDetection.bodyCoverage * 100).toStringAsFixed(1)}% frame • '
-                    'avg ${thermal.humanDetection.averageTemperature?.toStringAsFixed(1)} C'
-              : 'No 30-40 C human signature',
-          icon: Icons.accessibility_new_rounded,
-          accentColor: thermal.humanDetected ? Colors.greenAccent : Colors.grey,
-        ),
+        if (thermal.humanDetection.detected)
+          StatusCard(
+            title: 'Human Detection',
+            value:
+                '${thermal.humanDetection.detectedPartLabel} - '
+                '${(thermal.humanDetection.bodyCoverage * 100).toStringAsFixed(1)}% frame - '
+                'avg ${thermal.humanDetection.averageTemperature?.toStringAsFixed(1)} C',
+            icon: Icons.accessibility_new_rounded,
+            accentColor: Colors.greenAccent,
+          ),
       ],
     );
   }
