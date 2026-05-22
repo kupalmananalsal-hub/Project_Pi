@@ -61,15 +61,32 @@ class PiConnectionState {
 
 class ConnectionController extends Notifier<PiConnectionState> {
   Timer? _statusTimer;
+  bool _startupConnectScheduled = false;
 
   @override
   PiConnectionState build() {
-    final settings = ref.read(settingsProvider);
-    ref.listen(settingsProvider, (_, next) {
+    final settings = ref.watch(settingsProvider);
+    ref.listen(settingsProvider, (previous, next) {
+      if (previous != null &&
+          (previous.host != next.host || previous.port != next.port)) {
+        unawaited(connect(host: next.host, port: next.port));
+        return;
+      }
       if (!state.isConnected && !state.isConnecting) {
         state = state.copyWith(host: next.host, port: next.port);
       }
     });
+    if (!_startupConnectScheduled) {
+      _startupConnectScheduled = true;
+      Future.microtask(() async {
+        if (!ref.mounted) {
+          return;
+        }
+        if (!state.isConnected && !state.isConnecting) {
+          await connect(host: settings.host, port: settings.port);
+        }
+      });
+    }
     ref.onDispose(_stopPolling);
     return PiConnectionState(host: settings.host, port: settings.port);
   }

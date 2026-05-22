@@ -14,6 +14,20 @@ class SettingsScreen extends ConsumerStatefulWidget {
   ConsumerState<SettingsScreen> createState() => _SettingsScreenState();
 }
 
+Future<void> _applyConnection(
+  WidgetRef ref, {
+  String? host,
+  int? port,
+}) async {
+  final notifier = ref.read(settingsProvider.notifier);
+  if (host != null) {
+    await notifier.updateHost(host);
+  }
+  if (port != null) {
+    await notifier.updatePort(port);
+  }
+}
+
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   late final TextEditingController _hostController;
   late final TextEditingController _portController;
@@ -57,9 +71,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             prefixIcon: Icon(Icons.lan_rounded),
             border: OutlineInputBorder(),
           ),
-          onSubmitted: (value) {
-            ref.read(settingsProvider.notifier).updateHost(value);
-          },
+          onSubmitted: (value) => _applyConnection(ref, host: value),
         ),
         const SizedBox(height: 12),
         TextField(
@@ -70,11 +82,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             prefixIcon: Icon(Icons.numbers_rounded),
             border: OutlineInputBorder(),
           ),
-          onSubmitted: (value) {
-            ref
-                .read(settingsProvider.notifier)
-                .updatePort(int.tryParse(value) ?? AppSettings.defaultPort);
-          },
+          onSubmitted: (value) => _applyConnection(
+            ref,
+            port: int.tryParse(value) ?? AppSettings.defaultPort,
+          ),
         ),
         const SizedBox(height: 12),
         DropdownButtonFormField<AlertSound>(

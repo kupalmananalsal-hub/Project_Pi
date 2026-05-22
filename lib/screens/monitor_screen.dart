@@ -5,6 +5,7 @@ import '../models/app_settings.dart';
 import '../models/thermal_frame.dart';
 import '../providers/connection_provider.dart';
 import '../providers/monitor_provider.dart';
+import '../providers/settings_provider.dart';
 import '../providers/thermal_provider.dart';
 import '../widgets/audio_meter.dart';
 import '../widgets/connection_indicator.dart';
@@ -102,6 +103,7 @@ class _ConnectionStrip extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final settings = ref.watch(settingsProvider);
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(14),
@@ -136,10 +138,7 @@ class _ConnectionStrip extends ConsumerWidget {
                   : () {
                       ref
                           .read(connectionProvider.notifier)
-                          .connect(
-                            host: AppSettings.defaultHost,
-                            port: AppSettings.defaultPort,
-                          );
+                          .connect(host: settings.host, port: settings.port);
                     },
               icon: Icon(
                 connection.isConnected

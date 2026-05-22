@@ -10,6 +10,6 @@ void main() {
     await tester.pump();
 
     expect(find.text('Monitor'), findsWidgets);
-    expect(find.textContaining('10.156.203.236'), findsOneWidget);
+    expect(find.textContaining('10.233.82.236'), findsOneWidget);
   });
 }
