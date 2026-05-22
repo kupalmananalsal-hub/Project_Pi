@@ -1,5 +1,5 @@
 [Unit]
-Description=Project Pi dual Vosk and Snowboy keyword spotting alert service
+Description=Project Pi Vosk, Snowboy, and openWakeWord alert service
 After=sound.target network-online.target thermal-backend.service
 Wants=network-online.target thermal-backend.service
 
@@ -25,7 +25,7 @@ Environment=NOISE_PROFILE_SECONDS=2.0
 Environment=NOISE_PROFILE_ADAPT_RATE=0.05
 Environment=NOISE_LOG_INTERVAL_SECONDS=5.0
 Environment=OPENWAKEWORD_ENABLED=1
-Environment="OPENWAKEWORD_MODELS=alexa,hey jarvis"
+Environment="OPENWAKEWORD_MODELS=/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/tulong.tflite,/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/help.tflite"
 Environment=OPENWAKEWORD_VAD_THRESHOLD=0.50
 Environment=OPENWAKEWORD_WAKE_THRESHOLD=0.50
 Environment=OPENWAKEWORD_SPEEX_NOISE_SUPPRESSION=1
@@ -44,7 +44,7 @@ Environment=SNOWBOY_AUDIO_GAIN=1.0
 Environment=SNOWBOY_CONFIDENCE=0.95
 Environment=SNOWBOY_HELP_CONFIRM_SECONDS=1.2
 Environment=SNOWBOY_SUPPRESS_AFTER_TULONG_SECONDS=2.2
-Environment=KWS_COOLDOWN_SECONDS=1.5
+Environment=KWS_COOLDOWN_SECONDS=2.0
 Environment=KWS_DEBUG=0
 ExecStart=/home/thesis/kws-env/bin/python /home/thesis/Project_Pi/raspberry_pi/kws/kws_alert_dual.py
 Restart=always

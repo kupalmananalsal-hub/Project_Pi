@@ -17,7 +17,7 @@ import pyaudio
 import requests
 from vosk import KaldiRecognizer, Model
 
-from audio_preprocessor import AudioPreprocessor
+from audio_preprocessor import AudioPreprocessor, DEFAULT_WAKE_WORD_MODELS
 from noise_suppressor import (
     DEFAULT_CONFIG_PATH,
     NoiseSuppressionConfigStore,
@@ -251,7 +251,10 @@ class DetectionDispatcher:
             self._publish_tulong(confidence, source, context)
             return
         if keyword == "help":
-            self._schedule_help(confidence, source, context)
+            if source == "snowboy":
+                self._schedule_help(confidence, source, context)
+            else:
+                self._publish_help_now(confidence, source, context)
             return
         self._publish_generic(keyword, confidence, source, context)
 
@@ -322,6 +325,30 @@ class DetectionDispatcher:
         if payload is None:
             return
         confidence, source, context = payload
+        if self.cooldown.allow("help"):
+            self.poster.publish(
+                "help",
+                confidence,
+                source,
+                direction=str(context.get("direction", "center")),
+                extra={k: v for k, v in context.items() if k != "direction"},
+            )
+
+    def _publish_help_now(
+        self,
+        confidence: float,
+        source: str,
+        context: dict[str, object],
+    ) -> None:
+        with self.lock:
+            tulong_recent = max(self.last_tulong_at, self.last_tulong_hint_at)
+            if (
+                time.monotonic() - tulong_recent
+                < self.help_suppress_after_tulong_seconds
+            ):
+                print(f"{source} help ignored near recent tulong detection", flush=True)
+                return
+
         if self.cooldown.allow("help"):
             self.poster.publish(
                 "help",
@@ -449,6 +476,7 @@ def write_audio_status(status_path: Path, packet: dict[str, object]) -> None:
             "openwakeword_wake_word_score",
             0.0,
         ),
+        "openwakeword_wake_words": packet.get("openwakeword_wake_words", []),
         "openwakeword_error": packet.get("openwakeword_error"),
         "source": "kws_shared_audio",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -622,6 +650,7 @@ def _event_context(data: dict[str, object]) -> dict[str, object]:
             "openwakeword_wake_word_score",
             0.0,
         ),
+        "openwakeword_wake_words": data.get("openwakeword_wake_words", []),
     }
     openwakeword_error = data.get("openwakeword_error")
     if openwakeword_error:
@@ -648,7 +677,7 @@ def main() -> None:
     sample_rate = int(os.getenv("KWS_SAMPLE_RATE", str(SAMPLE_RATE)))
     chunk_frames = int(os.getenv("KWS_CHUNK_FRAMES", str(CHUNK_FRAMES)))
     channels = int(os.getenv("KWS_CHANNELS", "2"))
-    cooldown_seconds = float(os.getenv("KWS_COOLDOWN_SECONDS", "1.5"))
+    cooldown_seconds = float(os.getenv("KWS_COOLDOWN_SECONDS", "2.0"))
     debug = _env_bool("KWS_DEBUG", False)
     noise_gate = NoiseGate(
         threshold_rms=float(os.getenv("NOISE_GATE_THRESHOLD", "0.02")),
@@ -669,7 +698,9 @@ def main() -> None:
     )
     noise_suppressor.apply_config(current_noise_config)
     openwakeword_enabled = _env_bool("OPENWAKEWORD_ENABLED", True)
-    openwakeword_models = _split_env(os.getenv("OPENWAKEWORD_MODELS", "alexa,hey jarvis"))
+    openwakeword_models = _split_env(
+        os.getenv("OPENWAKEWORD_MODELS", ",".join(DEFAULT_WAKE_WORD_MODELS))
+    )
     audio_preprocessor = AudioPreprocessor(
         wake_word_models=openwakeword_models,
         enabled=openwakeword_enabled,
@@ -855,35 +886,45 @@ def main() -> None:
             cleaned_samples, metrics = noise_suppressor.process(raw_samples)
             preprocessor_result = audio_preprocessor.process(cleaned_samples)
             preprocessed_samples = np.asarray(
-                preprocessor_result.cleaned_audio,
+                preprocessor_result["cleaned_audio"],
                 dtype=np.int16,
             )
             packet["mono_samples"] = preprocessed_samples
             packet["mono_bytes"] = preprocessed_samples.tobytes()
 
+            speech_active = bool(preprocessor_result["is_speech"])
             process_chunk = (
-                preprocessor_result.is_speech
+                speech_active
                 and noise_gate.should_process(preprocessed_samples)
             )
             noise_suppressor.update_noise_profile(raw_samples, is_speech=process_chunk)
             packet.update(metrics)
-            packet.update(preprocessor_result.to_metrics())
+            packet.update(audio_preprocessor.to_metrics(preprocessor_result))
             write_audio_status(audio_status_path, packet)
             adaptive_sensitivity.update_for_snr(float(packet.get("snr_db", 0.0)))
-
-            if preprocessor_result.wake_word:
-                context = _event_context(packet)
-                context["openwakeword_model"] = preprocessor_result.wake_word
-                dispatcher.submit(
-                    _friendly_keyword(preprocessor_result.wake_word),
-                    preprocessor_result.wake_word_score,
-                    "openwakeword",
-                    context=context,
-                )
 
             if process_chunk:
                 put_latest(vosk_queue, packet)
                 put_latest(snowboy_queue, packet)
+
+            if speech_active:
+                for wake_word in preprocessor_result["wake_words"]:
+                    if not isinstance(wake_word, dict):
+                        continue
+                    score = float(wake_word.get("score", 0.0))
+                    if score < audio_preprocessor.wake_word_threshold:
+                        continue
+                    keyword = _friendly_keyword(str(wake_word.get("name", "")))
+                    if not keyword:
+                        continue
+                    context = _event_context(packet)
+                    context["openwakeword_model"] = keyword
+                    dispatcher.submit(
+                        keyword,
+                        score,
+                        "openwakeword",
+                        context=context,
+                    )
 
             if now >= next_noise_log_at:
                 print(

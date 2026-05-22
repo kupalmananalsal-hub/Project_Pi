@@ -8,7 +8,7 @@ emergency alert system.
 - openWakeWord runs first as an optional preprocessor:
   - Speex noise suppression is enabled inside openWakeWord's inference path.
   - VAD gates whether Vosk/Snowboy should receive each audio chunk.
-  - Extra wake words such as `alexa` and `hey jarvis` can post alerts too.
+  - Custom `tulong` and `help` models can post alerts too.
 - Vosk detects `tulong` using the Tagalog model:
   `/home/thesis/vosk-models/vosk-model-tl-ph-generic-0.6`
 - Snowboy detects `help` using a personal model:
@@ -112,7 +112,7 @@ openWakeWord is configured through systemd environment variables:
 
 ```ini
 Environment=OPENWAKEWORD_ENABLED=1
-Environment="OPENWAKEWORD_MODELS=alexa,hey jarvis"
+Environment="OPENWAKEWORD_MODELS=/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/tulong.tflite,/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/help.tflite"
 Environment=OPENWAKEWORD_VAD_THRESHOLD=0.50
 Environment=OPENWAKEWORD_WAKE_THRESHOLD=0.50
 Environment=OPENWAKEWORD_SPEEX_NOISE_SUPPRESSION=1
@@ -137,6 +137,38 @@ Apply overrides:
 sudo systemctl daemon-reload
 sudo systemctl restart kws-alert.service
 ```
+
+## Train Custom openWakeWord Models
+
+Use the official automated openWakeWord Colab notebook to train one synthetic
+model per phrase:
+
+```text
+https://github.com/dscripka/openWakeWord/blob/main/notebooks/automatic_model_training.ipynb
+```
+
+Run it once with model name and target phrase `tulong`, then run it again with
+model name and target phrase `help`. Download the generated `.tflite` models
+and copy them to the Pi:
+
+```bash
+mkdir -p ~/Project_Pi/raspberry_pi/kws/openwakeword_models
+scp tulong.tflite thesis@<PI_IP>:/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/tulong.tflite
+scp help.tflite thesis@<PI_IP>:/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/help.tflite
+```
+
+If the files were downloaded on the Pi itself, move them into the same folder
+instead. Restart the keyword service after both files exist:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart kws-alert.service
+sudo journalctl -u kws-alert.service -f
+```
+
+The keyword service keeps Vosk and Snowboy active. A shared per-keyword
+cooldown prevents `tulong` or `help` from posting duplicate alerts when more
+than one engine hears the same utterance.
 
 ## Train `help.pmdl`
 
