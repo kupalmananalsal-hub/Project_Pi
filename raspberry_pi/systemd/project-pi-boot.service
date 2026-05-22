@@ -1,0 +1,15 @@
+[Unit]
+Description=Project Pi headless boot preparation (hotspot, units, apt, logs)
+After=NetworkManager-wait-online.service network-online.target
+Wants=network-online.target
+Before=thermal-backend.service kws-alert.service apk-server.service
+
+[Service]
+Type=oneshot
+User=root
+RemainAfterExit=yes
+ExecStart=/home/thesis/Project_Pi/raspberry_pi/scripts/headless_boot.sh
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

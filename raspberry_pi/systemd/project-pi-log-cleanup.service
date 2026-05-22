@@ -1,0 +1,11 @@
+[Unit]
+Description=Project Pi journal and temp log cleanup
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/home/thesis/Project_Pi/raspberry_pi/scripts/log_cleanup.sh
+
+[Install]
+WantedBy=multi-user.target

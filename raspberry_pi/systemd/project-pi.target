@@ -1,0 +1,7 @@
+[Unit]
+Description=Project Pi emergency alert stack
+After=project-pi-boot.service network-online.target
+Wants=project-pi-boot.service thermal-backend.service kws-alert.service apk-server.service
+
+[Install]
+WantedBy=multi-user.target

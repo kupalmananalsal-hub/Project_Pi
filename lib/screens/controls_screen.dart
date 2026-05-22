@@ -127,6 +127,74 @@ class ControlsScreen extends ConsumerWidget {
               : 'Last pressed ${_formatTimestamp(button!.lastPressedAt!)}',
         ),
         const SizedBox(height: 14),
+        FilledButton.tonalIcon(
+          onPressed: !connection.isConnected || controls.isBusy
+              ? null
+              : () => _confirm(
+                  context,
+                  title: 'Refresh keyword spotting?',
+                  message:
+                      'Reinstalls kws-alert.service from the repo and restarts the KWS service. Use this instead of SSH when detection needs a restart.',
+                  action: () async {
+                    final ok = await ref
+                        .read(controlsProvider.notifier)
+                        .refreshKws();
+                    if (!context.mounted) {
+                      return;
+                    }
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          ok
+                              ? 'KWS service refreshed successfully.'
+                              : ref.read(controlsProvider).error ??
+                                    'Refresh failed.',
+                        ),
+                      ),
+                    );
+                  },
+                ),
+          icon: controls.isBusy
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.refresh_rounded),
+          label: const Text('Refresh KWS Service'),
+        ),
+        const SizedBox(height: 10),
+        OutlinedButton.icon(
+          onPressed: !connection.isConnected || controls.isBusy
+              ? null
+              : () => _confirm(
+                  context,
+                  title: 'Pull code and refresh?',
+                  message:
+                      'Runs git pull on the Pi, updates kws-alert.service, and restarts keyword spotting. Requires git credentials on the Pi.',
+                  action: () async {
+                    final ok = await ref
+                        .read(controlsProvider.notifier)
+                        .refreshKws(gitPull: true);
+                    if (!context.mounted) {
+                      return;
+                    }
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          ok
+                              ? 'Code pulled and KWS refreshed.'
+                              : ref.read(controlsProvider).error ??
+                                    'Refresh failed.',
+                        ),
+                      ),
+                    );
+                  },
+                ),
+          icon: const Icon(Icons.cloud_download_rounded),
+          label: const Text('Pull GitHub + Refresh KWS'),
+        ),
+        const SizedBox(height: 14),
         Row(
           children: [
             Expanded(

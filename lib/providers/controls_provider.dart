@@ -156,6 +156,38 @@ class ControlsController extends Notifier<ControlsState> {
     await _postPowerAction((api) => api.reboot());
   }
 
+  Future<bool> refreshKws({bool gitPull = false}) async {
+    final connection = ref.read(connectionProvider);
+    if (!connection.isConnected) {
+      state = state.copyWith(error: 'Connect to the Pi first.');
+      return false;
+    }
+    state = state.copyWith(isBusy: true, error: null);
+    try {
+      final result = await PiApiService(
+        host: connection.host,
+        port: connection.port,
+      ).refreshServices(gitPull: gitPull);
+      final ok = result['ok'] == true;
+      if (!ok) {
+        final stderr = result['stderr']?.toString() ?? '';
+        final stdout = result['stdout']?.toString() ?? '';
+        state = state.copyWith(
+          isBusy: false,
+          error: stderr.isNotEmpty
+              ? stderr
+              : (stdout.isNotEmpty ? stdout : 'Refresh failed.'),
+        );
+        return false;
+      }
+      state = state.copyWith(isBusy: false, error: null);
+      return true;
+    } catch (error) {
+      state = state.copyWith(isBusy: false, error: error.toString());
+      return false;
+    }
+  }
+
   void _startButtonPolling() {
     _buttonTimer?.cancel();
     _buttonTimer = Timer.periodic(

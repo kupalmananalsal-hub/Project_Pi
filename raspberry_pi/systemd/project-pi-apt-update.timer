@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Project Pi apt update once per day
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=24h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+# Allow thesis user to manage Project Pi without a password (refresh from mobile app).
+Defaults:thesis !requiretty
+thesis ALL=(root) NOPASSWD: /home/thesis/Project_Pi/raspberry_pi/scripts/pi_refresh.sh
+thesis ALL=(root) NOPASSWD: /home/thesis/Project_Pi/raspberry_pi/scripts/headless_boot.sh
+thesis ALL=(root) NOPASSWD: /usr/bin/systemctl restart kws-alert.service
+thesis ALL=(root) NOPASSWD: /usr/bin/systemctl restart thermal-backend.service
+thesis ALL=(root) NOPASSWD: /usr/bin/systemctl restart apk-server.service
+thesis ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
+thesis ALL=(root) NOPASSWD: /usr/sbin/shutdown
+thesis ALL=(root) NOPASSWD: /usr/sbin/reboot

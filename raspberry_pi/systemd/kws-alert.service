@@ -1,8 +1,7 @@
-# Legacy filename — use kws-alert.service (installed automatically by headless_boot.sh).
 [Unit]
-Description=Project Pi Vosk, Snowboy, and openWakeWord alert service (legacy unit name)
-After=sound.target network-online.target thermal-backend.service
-Wants=network-online.target thermal-backend.service
+Description=Project Pi Vosk, Snowboy, and openWakeWord alert service
+After=sound.target network-online.target project-pi-boot.service thermal-backend.service
+Wants=network-online.target project-pi-boot.service thermal-backend.service
 
 [Service]
 Type=simple
@@ -50,6 +49,8 @@ Environment=KWS_DEBUG=0
 ExecStart=/home/thesis/kws-env/bin/python /home/thesis/Project_Pi/raspberry_pi/kws/kws_alert_dual.py
 Restart=always
 RestartSec=3
+StartLimitIntervalSec=120
+StartLimitBurst=10
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=multi-user.target project-pi.target

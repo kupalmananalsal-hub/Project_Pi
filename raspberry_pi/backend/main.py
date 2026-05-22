@@ -113,6 +113,11 @@ class AlertIn(BaseModel):
     decision_factors: dict[str, Any] | None = None
 
 
+class RefreshRequest(BaseModel):
+    git_pull: bool = False
+    restart_backend: bool = False
+
+
 class NoiseSuppressionRequest(BaseModel):
     strength: float = Field(default=0.5, ge=0.0, le=1.0)
     sensitivity: float = Field(default=0.5, ge=0.0, le=1.0)
@@ -1114,6 +1119,44 @@ async def api_alerts(event: AlertIn):
 @app.get("/api/alerts")
 async def api_alert_history():
     return {"history": list(alerts.history)}
+
+
+REFRESH_SCRIPT = RASPBERRY_PI_ROOT / "scripts" / "pi_refresh.sh"
+
+
+@app.post("/api/refresh")
+async def api_refresh(request: RefreshRequest):
+    if not REFRESH_SCRIPT.is_file():
+        raise HTTPException(status_code=500, detail="Refresh script is missing on the Pi.")
+
+    args = ["sudo", str(REFRESH_SCRIPT)]
+    if request.git_pull:
+        args.append("--git-pull")
+    if request.restart_backend:
+        args.append("--restart-backend")
+
+    try:
+        completed = await asyncio.to_thread(
+            subprocess.run,
+            args,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail="Refresh timed out.") from exc
+
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+    return {
+        "ok": completed.returncode == 0,
+        "git_pull": request.git_pull,
+        "restart_backend": request.restart_backend,
+        "returncode": completed.returncode,
+        "stdout": stdout[-4000:] if stdout else "",
+        "stderr": stderr[-2000:] if stderr else "",
+    }
 
 
 @app.post("/api/shutdown")

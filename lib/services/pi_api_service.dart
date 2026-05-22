@@ -81,4 +81,19 @@ class PiApiService {
   Future<void> reboot() async {
     await _dio.post<void>('/api/reboot');
   }
+
+  Future<Map<String, dynamic>> refreshServices({
+    bool gitPull = false,
+    bool restartBackend = false,
+  }) async {
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/api/refresh',
+      data: {
+        'git_pull': gitPull,
+        'restart_backend': restartBackend,
+      },
+      options: Options(receiveTimeout: const Duration(seconds: 130)),
+    );
+    return Map<String, dynamic>.from(response.data ?? const {});
+  }
 }
