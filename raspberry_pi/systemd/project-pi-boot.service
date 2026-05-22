@@ -2,7 +2,7 @@
 Description=Project Pi headless boot preparation (hotspot, units, apt, logs)
 After=NetworkManager-wait-online.service network-online.target
 Wants=network-online.target
-Before=thermal-backend.service kws-alert.service apk-server.service
+# Do not stop/restart app units here; they start via multi-user.target after this oneshot.
 
 [Service]
 Type=oneshot

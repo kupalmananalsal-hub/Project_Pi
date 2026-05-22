@@ -35,7 +35,9 @@ systemctl daemon-reload
 systemctl enable kws-alert.service
 
 log "Restarting kws-alert.service"
-systemctl restart kws-alert.service
+systemctl reset-failed kws-alert.service 2>/dev/null || true
+systemctl restart --no-block kws-alert.service
+sleep 2
 
 if [[ "${RESTART_BACKEND}" -eq 1 ]]; then
   log "Restarting thermal-backend.service"

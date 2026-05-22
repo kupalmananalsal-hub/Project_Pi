@@ -815,6 +815,8 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown_event():
     audio.close()
+    if hasattr(thermal, "close"):
+        thermal.close()
 
 
 @app.websocket("/ws/thermal")

@@ -112,14 +112,6 @@ maybe_apt_update() {
   fi
 }
 
-start_stack() {
-  log "Starting Project Pi services"
-  systemctl restart thermal-backend.service
-  sleep 2
-  systemctl restart kws-alert.service
-  systemctl restart apk-server.service || log "apk-server restart skipped or failed"
-}
-
 main() {
   log "Headless boot script started"
   wait_for_network || true
@@ -127,8 +119,7 @@ main() {
   sync_systemd_units
   maybe_apt_update
   bash "${REPO}/raspberry_pi/scripts/log_cleanup.sh" || log "Log cleanup failed (continuing)"
-  start_stack
-  log "Headless boot script finished"
+  log "Headless boot script finished (systemd will start enabled app units)"
 }
 
 main "$@"

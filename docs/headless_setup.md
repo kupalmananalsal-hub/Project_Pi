@@ -137,6 +137,8 @@ Or from the app: **Pull GitHub + Refresh KWS** (requires git remote access on th
 
 | Symptom | Check |
 |:---|:---|
+| `thermal-backend` stops right after start | Do not run `daemon-reload` while it is running. Kill stuck boot: `pgrep -af headless_boot`. Then `sudo systemctl start thermal-backend --no-block` |
+| `systemctl start` hangs | `sudo systemctl stop project-pi-boot; sudo systemctl cancel` |
 | No Wi-Fi | `cat /etc/project-pi/hotspot.env`, `nmcli dev wifi list`, `journalctl -u project-pi-boot` |
 | KWS not running | `systemctl status kws-alert`, `journalctl -u kws-alert -n 80` |
 | Refresh fails | `sudo visudo -cf /etc/sudoers.d/project-pi-thesis`, script executable |
