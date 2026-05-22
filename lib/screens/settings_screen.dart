@@ -59,12 +59,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _portController.text = portText;
     }
 
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        Text('Settings', style: Theme.of(context).textTheme.headlineSmall),
-        const SizedBox(height: 16),
-        TextField(
+    return Scaffold(
+      appBar: AppBar(title: const Text('Settings')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          TextField(
           controller: _hostController,
           decoration: const InputDecoration(
             labelText: 'Pi IP or hostname',
@@ -89,7 +89,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
         const SizedBox(height: 12),
         DropdownButtonFormField<AlertSound>(
-          initialValue: settings.alertSound,
+          value: settings.alertSound,
           decoration: const InputDecoration(
             labelText: 'Alert sound',
             prefixIcon: Icon(Icons.volume_up_rounded),
@@ -156,7 +156,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           subtitle:
               'MLX90640 thermal stream, ReSpeaker dual mic levels, keyword alerts, and Pi controls.',
         ),
-      ],
+        ],
+      ),
     );
   }
 }

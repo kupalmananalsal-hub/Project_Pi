@@ -47,7 +47,7 @@ class _AppShellState extends ConsumerState<AppShell> {
                 onPressed: () {
                   Navigator.of(context).push(
                     MaterialPageRoute<void>(
-                      builder: (_) => const SettingsScreen(),
+                      builder: (context) => const SettingsScreen(),
                     ),
                   );
                 },
