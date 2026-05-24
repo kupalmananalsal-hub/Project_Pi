@@ -7,10 +7,29 @@ from typing import Any
 import numpy as np
 
 
-MODEL_PATH = "/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/"
+MODEL_DIR = Path("/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models")
+MODEL_PATH = str(MODEL_DIR) + "/"
+DISTRESS_WAKE_WORD_MODEL_FILES = [
+    "tulong.tflite",
+    "help.tflite",
+    "save_me.tflite",
+    "help_me.tflite",
+    "please_help.tflite",
+    "i_need_help.tflite",
+    "somebody_help.tflite",
+    "call_ambulance.tflite",
+    "emergency.tflite",
+    "saklolo.tflite",
+    "tulungan_niyo_ako.tflite",
+    "tulungan_mo_ako.tflite",
+    "tulungan_ako.tflite",
+    "kailangan_ko_ng_tulong.tflite",
+    "iligtas_niyo_ako.tflite",
+    "may_emergency.tflite",
+]
 DEFAULT_WAKE_WORD_MODELS = [
-    MODEL_PATH + "tulong.tflite",
-    MODEL_PATH + "help.tflite",
+    str(MODEL_DIR / model_file)
+    for model_file in DISTRESS_WAKE_WORD_MODEL_FILES
 ]
 
 
@@ -32,16 +51,29 @@ class AudioPreprocessor:
         enabled: bool = True,
         vad_threshold: float = 0.5,
         wake_word_threshold: float = 0.5,
+        wake_word_thresholds: dict[str, float] | None = None,
         enable_speex_noise_suppression: bool = True,
     ) -> None:
         self.enabled = enabled
         self.vad_threshold = float(np.clip(vad_threshold, 0.0, 1.0))
         self.wake_word_threshold = float(np.clip(wake_word_threshold, 0.0, 1.0))
-        self.wake_word_models = (
+        self.wake_word_thresholds = {
+            self._keyword_name(keyword): float(np.clip(threshold, 0.0, 1.0))
+            for keyword, threshold in (wake_word_thresholds or {}).items()
+        }
+        self.configured_wake_word_models = (
             DEFAULT_WAKE_WORD_MODELS.copy()
             if wake_word_models is None
             else wake_word_models
         )
+        self.wake_word_models = self._existing_model_paths(
+            self.configured_wake_word_models
+        )
+        self.missing_wake_word_models = [
+            model_path
+            for model_path in self.configured_wake_word_models
+            if model_path not in self.wake_word_models
+        ]
         self.emit_wake_words = bool(self.wake_word_models)
         self.enable_speex_noise_suppression = enable_speex_noise_suppression
         self.model: Any | None = None
@@ -107,11 +139,13 @@ class AudioPreprocessor:
                 if model_name == "vad":
                     continue
                 score = self._as_float(raw_score)
-                if score >= self.wake_word_threshold:
+                threshold = self._threshold_for_model(str(model_name))
+                if score >= threshold:
                     wake_words.append(
                         {
                             "name": self._keyword_name(str(model_name)),
                             "score": score,
+                            "threshold": threshold,
                         }
                     )
 
@@ -137,6 +171,10 @@ class AudioPreprocessor:
                 4,
             ),
             "openwakeword_is_speech": bool(result.get("is_speech", False)),
+            "openwakeword_global_threshold": self.wake_word_threshold,
+            "openwakeword_model_thresholds": self.wake_word_thresholds,
+            "openwakeword_loaded_models": self.wake_word_models,
+            "openwakeword_missing_models": self.missing_wake_word_models,
             "openwakeword_wake_words": wake_words,
             "openwakeword_wake_word": (
                 top_wake_word.get("name") if top_wake_word else None
@@ -185,6 +223,18 @@ class AudioPreprocessor:
         return " ".join(
             keyword.replace("_", " ").replace("-", " ").strip().lower().split()
         )
+
+    def _threshold_for_model(self, model_name: str) -> float:
+        keyword = self._keyword_name(model_name)
+        return self.wake_word_thresholds.get(keyword, self.wake_word_threshold)
+
+    @staticmethod
+    def _existing_model_paths(model_paths: list[str]) -> list[str]:
+        return [
+            model_path
+            for model_path in model_paths
+            if Path(model_path).is_file()
+        ]
 
     @staticmethod
     def _score_from_prediction(prediction: dict[str, Any], key: str) -> float:

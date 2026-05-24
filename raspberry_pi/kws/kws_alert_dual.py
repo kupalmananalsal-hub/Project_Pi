@@ -49,6 +49,27 @@ def _friendly_keyword(value: str) -> str:
     return " ".join(keyword.split())
 
 
+def _split_threshold_env(value: str) -> dict[str, float]:
+    thresholds: dict[str, float] = {}
+    for item in _split_env(value):
+        if "=" in item:
+            name, raw_threshold = item.split("=", 1)
+        elif ":" in item:
+            name, raw_threshold = item.rsplit(":", 1)
+        else:
+            continue
+        keyword = _friendly_keyword(name)
+        try:
+            thresholds[keyword] = float(raw_threshold)
+        except ValueError:
+            print(
+                f"Ignoring invalid openWakeWord threshold '{item}'",
+                file=sys.stderr,
+                flush=True,
+            )
+    return thresholds
+
+
 def handle_signal(signum, frame):
     del signum, frame
     global RUNNING
@@ -706,19 +727,35 @@ def main() -> None:
         enabled=openwakeword_enabled,
         vad_threshold=float(os.getenv("OPENWAKEWORD_VAD_THRESHOLD", "0.50")),
         wake_word_threshold=float(os.getenv("OPENWAKEWORD_WAKE_THRESHOLD", "0.50")),
+        wake_word_thresholds=_split_threshold_env(
+            os.getenv("OPENWAKEWORD_MODEL_THRESHOLDS", "")
+        ),
         enable_speex_noise_suppression=_env_bool(
             "OPENWAKEWORD_SPEEX_NOISE_SUPPRESSION",
             True,
         ),
     )
     if audio_preprocessor.available:
+        loaded_openwakeword_models = audio_preprocessor.wake_word_models
         print(
             "openWakeWord ready: "
-            f"models={openwakeword_models or ['vad-only']}, "
+            f"models={loaded_openwakeword_models or ['vad-only']}, "
             f"vad={audio_preprocessor.vad_threshold:.2f}, "
             f"wake={audio_preprocessor.wake_word_threshold:.2f}",
             flush=True,
         )
+        if audio_preprocessor.wake_word_thresholds:
+            print(
+                "openWakeWord per-model thresholds: "
+                f"{audio_preprocessor.wake_word_thresholds}",
+                flush=True,
+            )
+        if audio_preprocessor.missing_wake_word_models:
+            print(
+                "openWakeWord model files not found; skipped: "
+                f"{audio_preprocessor.missing_wake_word_models}",
+                flush=True,
+            )
     elif openwakeword_enabled:
         print(
             "openWakeWord unavailable; continuing with Vosk/Snowboy only: "
@@ -849,8 +886,8 @@ def main() -> None:
         print(
             "Listening for: tulong via Vosk, help via Snowboy"
             + (
-                f", {', '.join(openwakeword_models)} via openWakeWord"
-                if audio_preprocessor.available and openwakeword_models
+                f", {', '.join(audio_preprocessor.wake_word_models)} via openWakeWord"
+                if audio_preprocessor.available and audio_preprocessor.wake_word_models
                 else ""
             ),
             flush=True,
@@ -912,7 +949,13 @@ def main() -> None:
                     if not isinstance(wake_word, dict):
                         continue
                     score = float(wake_word.get("score", 0.0))
-                    if score < audio_preprocessor.wake_word_threshold:
+                    threshold = float(
+                        wake_word.get(
+                            "threshold",
+                            audio_preprocessor.wake_word_threshold,
+                        )
+                    )
+                    if score < threshold:
                         continue
                     keyword = _friendly_keyword(str(wake_word.get("name", "")))
                     if not keyword:
