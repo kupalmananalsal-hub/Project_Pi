@@ -39,21 +39,14 @@ class SettingsController extends Notifier<AppSettings> {
     await _persist();
   }
 
-  static const _legacyHosts = {'10.156.203.236'};
-
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
     _prefs = prefs;
     if (!ref.mounted) {
       return;
     }
-    var host = prefs.getString('host') ?? AppSettings.defaultHost;
-    if (_legacyHosts.contains(host)) {
-      host = AppSettings.defaultHost;
-      await prefs.setString('host', host);
-    }
     state = AppSettings(
-      host: host,
+      host: prefs.getString('host') ?? AppSettings.defaultHost,
       port: prefs.getInt('port') ?? AppSettings.defaultPort,
       darkMode: prefs.getBool('darkMode') ?? true,
       alertSound: AlertSoundLabel.fromName(prefs.getString('alertSound')),

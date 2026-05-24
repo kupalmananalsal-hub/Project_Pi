@@ -1,10 +1,10 @@
 # Raspberry Pi 5 Emergency Alert System: From-Scratch Setup
 
-Target host: `THESIS`  
-Target user: `thesis`  
-Target static IP: `192.168.1.34`  
-Backend port: `8765`  
-OS target: Raspberry Pi OS Bookworm 64-bit
+- Target host: `THESIS`
+- Target user: `thesis`
+- Current hotspot IP: `10.118.136.32`
+- Backend port: `8765`
+- OS target: Raspberry Pi OS Bookworm 64-bit
 
 Important driver note: for ReSpeaker 2-Mics Pi HAT v2.0 with TLV320AIC3104 on current Raspberry Pi OS, Seeed's current documented path uses the `respeaker-2mic-v2_0` device-tree overlay from `seeed-linux-dtoverlays`. The older `seeed-voicecard` repo provides the legacy `seeed-2mic-voicecard` overlay for older ReSpeaker hardware and older kernels. Do not install the legacy driver on Pi 5 Bookworm unless the current v2 overlay fails and you have confirmed your board is not the TLV320AIC3104 v2.0 board.
 
@@ -49,28 +49,20 @@ sudo raspi-config nonint do_spi 0
 sudo hostnamectl set-hostname THESIS
 ```
 
-Set the Pi static IP with NetworkManager. Prefer a router DHCP reservation for `192.168.1.34`; if you need the Pi to force the static IP locally, run:
+Connect the Pi to the phone hotspot as a DHCP client. Keep the hotspot-client
+architecture; do not force a static IP on the Pi. After connecting, check the
+current address:
 
 ```bash
 ip route
 nmcli device status
 nmcli connection show --active
-
-CONNECTION_NAME="$(nmcli -t -f NAME,DEVICE connection show --active | awk -F: '$2=="eth0"{print $1; exit}')"
-if [ -z "$CONNECTION_NAME" ]; then
-  CONNECTION_NAME="$(nmcli -t -f NAME,DEVICE connection show --active | awk -F: '$2=="wlan0"{print $1; exit}')"
-fi
-echo "$CONNECTION_NAME"
-
-sudo nmcli connection modify "$CONNECTION_NAME" \
-  ipv4.method manual \
-  ipv4.addresses 192.168.1.34/24 \
-  ipv4.gateway 192.168.1.1 \
-  ipv4.dns "192.168.1.1 8.8.8.8"
-sudo nmcli connection up "$CONNECTION_NAME"
+hostname -I
+ip -4 addr show wlan0
 ```
 
-If your router is not `192.168.1.1`, replace `ipv4.gateway` and the first DNS address with the gateway shown by `ip route`.
+The current hotspot IP used by the app defaults is `10.118.136.32`. If the
+phone hotspot assigns a different IP later, update the Flutter app Settings.
 
 Update the OS:
 
@@ -84,7 +76,7 @@ sudo reboot
 After reboot:
 
 ```bash
-ssh thesis@192.168.1.34
+ssh thesis@10.118.136.32
 python3 --version
 uname -a
 ```
@@ -1210,7 +1202,7 @@ Backend service:
 ```bash
 systemctl status thermal-backend.service --no-pager
 journalctl -u thermal-backend.service -n 80 --no-pager
-curl http://192.168.1.34:8765/api/status
+curl http://10.118.136.32:8765/api/status
 ```
 
 Thermal WebSocket:
@@ -1222,7 +1214,7 @@ import json
 import websockets
 
 async def main():
-    async with websockets.connect("ws://192.168.1.34:8765/ws/thermal") as ws:
+    async with websockets.connect("ws://10.118.136.32:8765/ws/thermal") as ws:
         msg = json.loads(await ws.recv())
         print(msg.keys())
         print(len(msg.get("temperatures", [])))
@@ -1241,7 +1233,7 @@ import json
 import websockets
 
 async def main():
-    async with websockets.connect("ws://192.168.1.34:8765/ws/audio") as ws:
+    async with websockets.connect("ws://10.118.136.32:8765/ws/audio") as ws:
         for _ in range(5):
             print(json.loads(await ws.recv()))
 
@@ -1258,7 +1250,7 @@ import json
 import websockets
 
 async def main():
-    async with websockets.connect("ws://192.168.1.34:8765/ws/alerts") as ws:
+    async with websockets.connect("ws://10.118.136.32:8765/ws/alerts") as ws:
         print(json.loads(await ws.recv()))
 
 asyncio.run(main())
@@ -1268,7 +1260,7 @@ PY
 In another terminal:
 
 ```bash
-curl -X POST http://192.168.1.34:8765/api/alerts \
+curl -X POST http://10.118.136.32:8765/api/alerts \
   -H 'Content-Type: application/json' \
   -d '{"event":"keyword_detected","keyword":"tulong","confidence":0.95}'
 ```
@@ -1289,13 +1281,13 @@ Alert: Help/Tulong detected!
 LED test:
 
 ```bash
-curl -X POST http://192.168.1.34:8765/api/leds \
+curl -X POST http://10.118.136.32:8765/api/leds \
   -H 'Content-Type: application/json' \
   -d '{"led":0,"r":255,"g":0,"b":0}'
-curl -X POST http://192.168.1.34:8765/api/leds \
+curl -X POST http://10.118.136.32:8765/api/leds \
   -H 'Content-Type: application/json' \
   -d '{"led":1,"r":0,"g":255,"b":0}'
-curl -X POST http://192.168.1.34:8765/api/leds \
+curl -X POST http://10.118.136.32:8765/api/leds \
   -H 'Content-Type: application/json' \
   -d '{"led":2,"r":0,"g":0,"b":255}'
 ```
@@ -1303,14 +1295,14 @@ curl -X POST http://192.168.1.34:8765/api/leds \
 Button test:
 
 ```bash
-watch -n 0.5 curl -s http://192.168.1.34:8765/api/button
+watch -n 0.5 curl -s http://10.118.136.32:8765/api/button
 ```
 
 Flutter app endpoints:
 
 ```text
-REST:    http://192.168.1.34:8765/api/
-Thermal: ws://192.168.1.34:8765/ws/thermal
-Audio:   ws://192.168.1.34:8765/ws/audio
-Alerts:  ws://192.168.1.34:8765/ws/alerts
+REST:    http://10.118.136.32:8765/api/
+Thermal: ws://10.118.136.32:8765/ws/thermal
+Audio:   ws://10.118.136.32:8765/ws/audio
+Alerts:  ws://10.118.136.32:8765/ws/alerts
 ```

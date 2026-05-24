@@ -28,8 +28,8 @@ class AppSettings {
     this.alertSound = AlertSound.alarm,
   });
 
-  static const defaultHost = '10.233.82.236';
-  static const fallbackHost = '192.168.1.34';
+  static const defaultHost = '10.118.136.32';
+  static const fallbackHost = '10.118.136.32';
   static const mdnsFallbackHost = 'raspberrypi.local';
   static const defaultPort = 8765;
 
