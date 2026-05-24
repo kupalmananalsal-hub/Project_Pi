@@ -192,6 +192,25 @@ if "info" not in globals():
 patch_deep_phonemizer_torch_load()
 patch_torchaudio_info()
 
+feature_downloads = {
+    "validation_set_features.npy": (
+        "https://huggingface.co/datasets/davidscripka/openwakeword_features/"
+        "resolve/main/validation_set_features.npy"
+    ),
+    "openwakeword_features_ACAV100M_2000_hrs_16bit.npy": (
+        "https://huggingface.co/datasets/davidscripka/openwakeword_features/"
+        "resolve/main/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
+    ),
+}
+
+for output_path, url in feature_downloads.items():
+    if not Path(output_path).exists():
+        print(f"Downloading missing feature file: {output_path}")
+        subprocess.run(
+            ["wget", "-q", "--show-progress", "-O", output_path, url],
+            check=True,
+        )
+
 required_paths = [
     "openwakeword/openwakeword/train.py",
     "openwakeword/examples/custom_model.yml",

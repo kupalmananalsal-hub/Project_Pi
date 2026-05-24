@@ -9,27 +9,9 @@ import numpy as np
 
 MODEL_DIR = Path("/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models")
 MODEL_PATH = str(MODEL_DIR) + "/"
-DISTRESS_WAKE_WORD_MODEL_FILES = [
-    "tulong.tflite",
-    "help.tflite",
-    "save_me.tflite",
-    "help_me.tflite",
-    "please_help.tflite",
-    "i_need_help.tflite",
-    "somebody_help.tflite",
-    "call_ambulance.tflite",
-    "emergency.tflite",
-    "saklolo.tflite",
-    "tulungan_niyo_ako.tflite",
-    "tulungan_mo_ako.tflite",
-    "tulungan_ako.tflite",
-    "kailangan_ko_ng_tulong.tflite",
-    "iligtas_niyo_ako.tflite",
-    "may_emergency.tflite",
-]
 DEFAULT_WAKE_WORD_MODELS = [
-    str(MODEL_DIR / model_file)
-    for model_file in DISTRESS_WAKE_WORD_MODEL_FILES
+    str(model_path)
+    for model_path in sorted(MODEL_DIR.glob("*.onnx"))
 ]
 
 
@@ -62,11 +44,12 @@ class AudioPreprocessor:
             for keyword, threshold in (wake_word_thresholds or {}).items()
         }
         self.configured_wake_word_models = (
-            DEFAULT_WAKE_WORD_MODELS.copy()
+            self._discover_onnx_model_paths()
             if wake_word_models is None
             else wake_word_models
         )
-        self.wake_word_models = self._existing_model_paths(
+        self.skipped_wake_word_models: dict[str, str] = {}
+        self.wake_word_models = self._valid_model_paths(
             self.configured_wake_word_models
         )
         self.missing_wake_word_models = [
@@ -87,12 +70,15 @@ class AudioPreprocessor:
         try:
             from openwakeword.model import Model
 
-            self.model = Model(
-                wakeword_models=self.wake_word_models,
-                enable_speex_noise_suppression=enable_speex_noise_suppression,
-                vad_threshold=self.vad_threshold,
+            self.model = self._load_model(
+                Model,
+                self.wake_word_models,
+                enable_speex_noise_suppression,
             )
-            self.available = True
+            self.available = self.model is not None
+            self.emit_wake_words = self.available and bool(self.wake_word_models)
+            if not self.available:
+                self.error = "no openWakeWord models loaded"
         except Exception as exc:  # pragma: no cover - optional Pi dependency
             self.error = str(exc)
 
@@ -175,6 +161,7 @@ class AudioPreprocessor:
             "openwakeword_model_thresholds": self.wake_word_thresholds,
             "openwakeword_loaded_models": self.wake_word_models,
             "openwakeword_missing_models": self.missing_wake_word_models,
+            "openwakeword_skipped_models": self.skipped_wake_word_models,
             "openwakeword_wake_words": wake_words,
             "openwakeword_wake_word": (
                 top_wake_word.get("name") if top_wake_word else None
@@ -229,12 +216,73 @@ class AudioPreprocessor:
         return self.wake_word_thresholds.get(keyword, self.wake_word_threshold)
 
     @staticmethod
-    def _existing_model_paths(model_paths: list[str]) -> list[str]:
+    def _discover_onnx_model_paths() -> list[str]:
         return [
-            model_path
-            for model_path in model_paths
-            if Path(model_path).is_file()
+            str(model_path)
+            for model_path in sorted(MODEL_DIR.glob("*.onnx"))
+            if model_path.is_file()
         ]
+
+    def _valid_model_paths(self, model_paths: list[str]) -> list[str]:
+        valid_paths: list[str] = []
+        for model_path in model_paths:
+            path = Path(model_path)
+            if not path.is_file():
+                self.skipped_wake_word_models[model_path] = "model file not found"
+                continue
+            if str(path).lower().endswith(".onnx.data"):
+                self.skipped_wake_word_models[model_path] = (
+                    "external data file is loaded by its .onnx model"
+                )
+                continue
+            data_path = Path(str(path) + ".data")
+            if path.suffix.lower() == ".onnx" and not data_path.is_file():
+                self.skipped_wake_word_models[model_path] = (
+                    f"missing companion data file: {data_path}"
+                )
+                continue
+            valid_paths.append(str(path))
+        return valid_paths
+
+    def _load_model(
+        self,
+        model_cls: Any,
+        model_paths: list[str],
+        enable_speex_noise_suppression: bool,
+    ) -> Any | None:
+        if not model_paths:
+            return None
+
+        try:
+            return model_cls(
+                wakeword_models=model_paths,
+                enable_speex_noise_suppression=enable_speex_noise_suppression,
+                vad_threshold=self.vad_threshold,
+            )
+        except Exception as exc:
+            self.skipped_wake_word_models["all_models_first_attempt"] = str(exc)
+
+        loadable_paths: list[str] = []
+        for model_path in model_paths:
+            try:
+                model_cls(
+                    wakeword_models=[model_path],
+                    enable_speex_noise_suppression=enable_speex_noise_suppression,
+                    vad_threshold=self.vad_threshold,
+                )
+                loadable_paths.append(model_path)
+            except Exception as exc:
+                self.skipped_wake_word_models[model_path] = str(exc)
+
+        self.wake_word_models = loadable_paths
+        if not loadable_paths:
+            return None
+
+        return model_cls(
+            wakeword_models=loadable_paths,
+            enable_speex_noise_suppression=enable_speex_noise_suppression,
+            vad_threshold=self.vad_threshold,
+        )
 
     @staticmethod
     def _score_from_prediction(prediction: dict[str, Any], key: str) -> float:

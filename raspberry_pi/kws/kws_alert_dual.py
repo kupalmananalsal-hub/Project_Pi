@@ -17,7 +17,7 @@ import pyaudio
 import requests
 from vosk import KaldiRecognizer, Model
 
-from audio_preprocessor import AudioPreprocessor, DEFAULT_WAKE_WORD_MODELS
+from audio_preprocessor import AudioPreprocessor
 from noise_suppressor import (
     DEFAULT_CONFIG_PATH,
     NoiseSuppressionConfigStore,
@@ -719,14 +719,17 @@ def main() -> None:
     )
     noise_suppressor.apply_config(current_noise_config)
     openwakeword_enabled = _env_bool("OPENWAKEWORD_ENABLED", True)
-    openwakeword_models = _split_env(
-        os.getenv("OPENWAKEWORD_MODELS", ",".join(DEFAULT_WAKE_WORD_MODELS))
+    openwakeword_models_env = os.getenv("OPENWAKEWORD_MODELS")
+    openwakeword_models = (
+        _split_env(openwakeword_models_env)
+        if openwakeword_models_env is not None
+        else None
     )
     audio_preprocessor = AudioPreprocessor(
         wake_word_models=openwakeword_models,
         enabled=openwakeword_enabled,
         vad_threshold=float(os.getenv("OPENWAKEWORD_VAD_THRESHOLD", "0.50")),
-        wake_word_threshold=float(os.getenv("OPENWAKEWORD_WAKE_THRESHOLD", "0.50")),
+        wake_word_threshold=float(os.getenv("OPENWAKEWORD_WAKE_THRESHOLD", "0.65")),
         wake_word_thresholds=_split_threshold_env(
             os.getenv("OPENWAKEWORD_MODEL_THRESHOLDS", "")
         ),
@@ -754,6 +757,13 @@ def main() -> None:
             print(
                 "openWakeWord model files not found; skipped: "
                 f"{audio_preprocessor.missing_wake_word_models}",
+                flush=True,
+            )
+        if audio_preprocessor.skipped_wake_word_models:
+            print(
+                "openWakeWord model load warnings: "
+                f"{audio_preprocessor.skipped_wake_word_models}",
+                file=sys.stderr,
                 flush=True,
             )
     elif openwakeword_enabled:

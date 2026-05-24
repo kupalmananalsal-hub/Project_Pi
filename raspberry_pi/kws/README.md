@@ -112,14 +112,20 @@ openWakeWord is configured through systemd environment variables:
 
 ```ini
 Environment=OPENWAKEWORD_ENABLED=1
-Environment="OPENWAKEWORD_MODELS=/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/tulong.tflite,/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/help.tflite"
 Environment=OPENWAKEWORD_VAD_THRESHOLD=0.50
-Environment=OPENWAKEWORD_WAKE_THRESHOLD=0.50
+Environment=OPENWAKEWORD_WAKE_THRESHOLD=0.65
+Environment="OPENWAKEWORD_MODEL_THRESHOLDS=tulong=0.55,help=0.65,save_me=0.65,help_me=0.65,please_help=0.65"
 Environment=OPENWAKEWORD_SPEEX_NOISE_SUPPRESSION=1
 ```
 
-To use VAD gating without posting openWakeWord wake-word alerts, leave the
-model list blank:
+The service automatically loads every `.onnx` model in:
+
+```text
+/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/
+```
+
+Keep each model's `.onnx.data` file in the same directory. To use VAD gating
+without posting openWakeWord wake-word alerts, leave the model list blank:
 
 ```ini
 Environment=OPENWAKEWORD_MODELS=
@@ -147,18 +153,17 @@ model per phrase:
 https://github.com/dscripka/openWakeWord/blob/main/notebooks/automatic_model_training.ipynb
 ```
 
-Run it once with model name and target phrase `tulong`, then run it again with
-model name and target phrase `help`. Download the generated `.tflite` models
-and copy them to the Pi:
+Train one model per distress phrase. Download each generated `.onnx` file and
+its `.onnx.data` companion, then copy both files to the Pi:
 
 ```bash
 mkdir -p ~/Project_Pi/raspberry_pi/kws/openwakeword_models
-scp tulong.tflite thesis@<PI_IP>:/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/tulong.tflite
-scp help.tflite thesis@<PI_IP>:/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/help.tflite
+scp tulong.onnx tulong.onnx.data thesis@<PI_IP>:/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/
+scp help.onnx help.onnx.data thesis@<PI_IP>:/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/
 ```
 
 If the files were downloaded on the Pi itself, move them into the same folder
-instead. Restart the keyword service after both files exist:
+instead. Restart the keyword service after the model files exist:
 
 ```bash
 sudo systemctl daemon-reload
