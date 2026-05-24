@@ -2,7 +2,7 @@
 
 - Target host: `THESIS`
 - Target user: `thesis`
-- Current hotspot IP: `172.20.10.8`
+- Current hotspot IP: `10.159.83.236`
 - Backend port: `8765`
 - OS target: Raspberry Pi OS Bookworm 64-bit
 
@@ -61,7 +61,7 @@ hostname -I
 ip -4 addr show wlan0
 ```
 
-The current hotspot IP used by the app defaults is `172.20.10.8`. If the
+The current hotspot IP used by the app defaults is `10.159.83.236`. If the
 phone hotspot assigns a different IP later, update the Flutter app Settings.
 
 Update the OS:
@@ -76,7 +76,7 @@ sudo reboot
 After reboot:
 
 ```bash
-ssh thesis@172.20.10.8
+ssh thesis@10.159.83.236
 python3 --version
 uname -a
 ```
@@ -1033,7 +1033,8 @@ Allow only safe power commands without a sudo password:
 
 ```bash
 sudo tee /etc/sudoers.d/project-pi-power >/dev/null <<'EOF'
-thesis ALL=NOPASSWD: /usr/sbin/shutdown, /usr/sbin/reboot, /sbin/shutdown, /sbin/reboot
+Defaults:thesis !requiretty
+thesis ALL=(root) NOPASSWD: /usr/sbin/shutdown -h now, /usr/sbin/reboot, /sbin/shutdown -h now, /sbin/reboot, /usr/bin/systemctl poweroff, /usr/bin/systemctl reboot
 EOF
 sudo chmod 440 /etc/sudoers.d/project-pi-power
 sudo visudo -cf /etc/sudoers.d/project-pi-power
@@ -1202,7 +1203,7 @@ Backend service:
 ```bash
 systemctl status thermal-backend.service --no-pager
 journalctl -u thermal-backend.service -n 80 --no-pager
-curl http://172.20.10.8:8765/api/status
+curl http://10.159.83.236:8765/api/status
 ```
 
 Thermal WebSocket:
@@ -1214,7 +1215,7 @@ import json
 import websockets
 
 async def main():
-    async with websockets.connect("ws://172.20.10.8:8765/ws/thermal") as ws:
+    async with websockets.connect("ws://10.159.83.236:8765/ws/thermal") as ws:
         msg = json.loads(await ws.recv())
         print(msg.keys())
         print(len(msg.get("temperatures", [])))
@@ -1233,7 +1234,7 @@ import json
 import websockets
 
 async def main():
-    async with websockets.connect("ws://172.20.10.8:8765/ws/audio") as ws:
+    async with websockets.connect("ws://10.159.83.236:8765/ws/audio") as ws:
         for _ in range(5):
             print(json.loads(await ws.recv()))
 
@@ -1250,7 +1251,7 @@ import json
 import websockets
 
 async def main():
-    async with websockets.connect("ws://172.20.10.8:8765/ws/alerts") as ws:
+    async with websockets.connect("ws://10.159.83.236:8765/ws/alerts") as ws:
         print(json.loads(await ws.recv()))
 
 asyncio.run(main())
@@ -1260,7 +1261,7 @@ PY
 In another terminal:
 
 ```bash
-curl -X POST http://172.20.10.8:8765/api/alerts \
+curl -X POST http://10.159.83.236:8765/api/alerts \
   -H 'Content-Type: application/json' \
   -d '{"event":"keyword_detected","keyword":"tulong","confidence":0.95}'
 ```
@@ -1281,13 +1282,13 @@ Alert: Help/Tulong detected!
 LED test:
 
 ```bash
-curl -X POST http://172.20.10.8:8765/api/leds \
+curl -X POST http://10.159.83.236:8765/api/leds \
   -H 'Content-Type: application/json' \
   -d '{"led":0,"r":255,"g":0,"b":0}'
-curl -X POST http://172.20.10.8:8765/api/leds \
+curl -X POST http://10.159.83.236:8765/api/leds \
   -H 'Content-Type: application/json' \
   -d '{"led":1,"r":0,"g":255,"b":0}'
-curl -X POST http://172.20.10.8:8765/api/leds \
+curl -X POST http://10.159.83.236:8765/api/leds \
   -H 'Content-Type: application/json' \
   -d '{"led":2,"r":0,"g":0,"b":255}'
 ```
@@ -1295,14 +1296,14 @@ curl -X POST http://172.20.10.8:8765/api/leds \
 Button test:
 
 ```bash
-watch -n 0.5 curl -s http://172.20.10.8:8765/api/button
+watch -n 0.5 curl -s http://10.159.83.236:8765/api/button
 ```
 
 Flutter app endpoints:
 
 ```text
-REST:    http://172.20.10.8:8765/api/
-Thermal: ws://172.20.10.8:8765/ws/thermal
-Audio:   ws://172.20.10.8:8765/ws/audio
-Alerts:  ws://172.20.10.8:8765/ws/alerts
+REST:    http://10.159.83.236:8765/api/
+Thermal: ws://10.159.83.236:8765/ws/thermal
+Audio:   ws://10.159.83.236:8765/ws/audio
+Alerts:  ws://10.159.83.236:8765/ws/alerts
 ```

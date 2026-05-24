@@ -148,12 +148,12 @@ class ControlsController extends Notifier<ControlsState> {
     }
   }
 
-  Future<void> shutdown() async {
-    await _postPowerAction((api) => api.shutdown());
+  Future<bool> shutdown() async {
+    return _postPowerAction((api) => api.shutdown());
   }
 
-  Future<void> reboot() async {
-    await _postPowerAction((api) => api.reboot());
+  Future<bool> reboot() async {
+    return _postPowerAction((api) => api.reboot());
   }
 
   Future<bool> refreshKws({bool gitPull = false}) async {
@@ -202,20 +202,22 @@ class ControlsController extends Notifier<ControlsState> {
     _buttonTimer = null;
   }
 
-  Future<void> _postPowerAction(
+  Future<bool> _postPowerAction(
     Future<void> Function(PiApiService api) action,
   ) async {
     final connection = ref.read(connectionProvider);
     if (!connection.isConnected) {
       state = state.copyWith(error: 'Connect to the Pi first.');
-      return;
+      return false;
     }
     state = state.copyWith(isBusy: true, error: null);
     try {
       await action(PiApiService(host: connection.host, port: connection.port));
       state = state.copyWith(isBusy: false);
+      return true;
     } catch (error) {
       state = state.copyWith(isBusy: false, error: error.toString());
+      return false;
     }
   }
 

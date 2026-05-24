@@ -6,5 +6,4 @@ thesis ALL=(root) NOPASSWD: /usr/bin/systemctl restart kws-alert.service
 thesis ALL=(root) NOPASSWD: /usr/bin/systemctl restart thermal-backend.service
 thesis ALL=(root) NOPASSWD: /usr/bin/systemctl restart apk-server.service
 thesis ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
-thesis ALL=(root) NOPASSWD: /usr/sbin/shutdown
-thesis ALL=(root) NOPASSWD: /usr/sbin/reboot
+thesis ALL=(root) NOPASSWD: /usr/sbin/shutdown -h now, /usr/sbin/reboot, /sbin/shutdown -h now, /sbin/reboot, /usr/bin/systemctl poweroff, /usr/bin/systemctl reboot

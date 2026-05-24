@@ -131,7 +131,7 @@ cd ~/Project_Pi && git pull
 sudo bash raspberry_pi/scripts/install_headless.sh
 ```
 
-Or from the app: **Pull GitHub + Refresh KWS** (requires git remote access on the Pi).
+Or from the app: **Refresh KWS Service**.
 
 ## Troubleshooting
 

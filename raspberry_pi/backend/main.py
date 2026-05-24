@@ -1124,6 +1124,53 @@ async def api_alert_history():
 
 
 REFRESH_SCRIPT = RASPBERRY_PI_ROOT / "scripts" / "pi_refresh.sh"
+POWER_COMMAND_DELAY_SECONDS = 0.75
+
+
+def verify_passwordless_sudo() -> None:
+    try:
+        completed = subprocess.run(
+            ["sudo", "-n", "-l"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=500, detail="sudo power check timed out.") from exc
+
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Passwordless sudo is not configured for power commands. "
+                "Run sudo bash raspberry_pi/scripts/install_headless.sh. "
+                f"{detail}"
+            ).strip(),
+        )
+
+
+async def run_delayed_power_command(action: str, command: list[str]) -> None:
+    await asyncio.sleep(POWER_COMMAND_DELAY_SECONDS)
+    completed = await asyncio.to_thread(
+        subprocess.run,
+        ["sudo", "-n", *command],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").strip()
+        stdout = (completed.stdout or "").strip()
+        print(
+            f"Power command failed action={action} returncode={completed.returncode} "
+            f"stdout={stdout!r} stderr={stderr!r}",
+            flush=True,
+        )
 
 
 @app.post("/api/refresh")
@@ -1163,11 +1210,20 @@ async def api_refresh(request: RefreshRequest):
 
 @app.post("/api/shutdown")
 async def api_shutdown():
-    subprocess.Popen(["sudo", "/usr/sbin/shutdown", "-h", "now"])
-    return {"ok": True, "action": "shutdown"}
+    verify_passwordless_sudo()
+    asyncio.create_task(
+        run_delayed_power_command(
+            "shutdown",
+            ["/usr/sbin/shutdown", "-h", "now"],
+        )
+    )
+    return {"ok": True, "action": "shutdown", "scheduled": True}
 
 
 @app.post("/api/reboot")
 async def api_reboot():
-    subprocess.Popen(["sudo", "/usr/sbin/reboot"])
-    return {"ok": True, "action": "reboot"}
+    verify_passwordless_sudo()
+    asyncio.create_task(
+        run_delayed_power_command("reboot", ["/usr/sbin/reboot"])
+    )
+    return {"ok": True, "action": "reboot", "scheduled": True}

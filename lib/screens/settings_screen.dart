@@ -3,8 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/app_settings.dart';
 import '../providers/settings_provider.dart';
-import 'voice_calibration_screen.dart';
-import 'voice_training_screen.dart';
 import '../widgets/status_card.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -65,97 +63,73 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         padding: const EdgeInsets.all(16),
         children: [
           TextField(
-          controller: _hostController,
-          decoration: const InputDecoration(
-            labelText: 'Pi IP or hostname',
-            prefixIcon: Icon(Icons.lan_rounded),
-            border: OutlineInputBorder(),
+            controller: _hostController,
+            decoration: const InputDecoration(
+              labelText: 'Pi IP or hostname',
+              prefixIcon: Icon(Icons.lan_rounded),
+              border: OutlineInputBorder(),
+            ),
+            onSubmitted: (value) => _applyConnection(ref, host: value),
           ),
-          onSubmitted: (value) => _applyConnection(ref, host: value),
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _portController,
-          keyboardType: TextInputType.number,
-          decoration: const InputDecoration(
-            labelText: 'Port',
-            prefixIcon: Icon(Icons.numbers_rounded),
-            border: OutlineInputBorder(),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _portController,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(
+              labelText: 'Port',
+              prefixIcon: Icon(Icons.numbers_rounded),
+              border: OutlineInputBorder(),
+            ),
+            onSubmitted: (value) => _applyConnection(
+              ref,
+              port: int.tryParse(value) ?? AppSettings.defaultPort,
+            ),
           ),
-          onSubmitted: (value) => _applyConnection(
-            ref,
-            port: int.tryParse(value) ?? AppSettings.defaultPort,
+          const SizedBox(height: 12),
+          DropdownButtonFormField<AlertSound>(
+            value: settings.alertSound,
+            decoration: const InputDecoration(
+              labelText: 'Alert sound',
+              prefixIcon: Icon(Icons.volume_up_rounded),
+              border: OutlineInputBorder(),
+            ),
+            items: [
+              for (final sound in AlertSound.values)
+                DropdownMenuItem(value: sound, child: Text(sound.label)),
+            ],
+            onChanged: (value) {
+              if (value != null) {
+                ref.read(settingsProvider.notifier).setAlertSound(value);
+              }
+            },
           ),
-        ),
-        const SizedBox(height: 12),
-        DropdownButtonFormField<AlertSound>(
-          value: settings.alertSound,
-          decoration: const InputDecoration(
-            labelText: 'Alert sound',
-            prefixIcon: Icon(Icons.volume_up_rounded),
-            border: OutlineInputBorder(),
+          const SizedBox(height: 8),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            secondary: const Icon(Icons.dark_mode_rounded),
+            title: const Text('Dark theme'),
+            value: settings.darkMode,
+            onChanged: (value) {
+              ref.read(settingsProvider.notifier).setDarkMode(value);
+            },
           ),
-          items: [
-            for (final sound in AlertSound.values)
-              DropdownMenuItem(value: sound, child: Text(sound.label)),
-          ],
-          onChanged: (value) {
-            if (value != null) {
-              ref.read(settingsProvider.notifier).setAlertSound(value);
-            }
-          },
-        ),
-        const SizedBox(height: 8),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          secondary: const Icon(Icons.dark_mode_rounded),
-          title: const Text('Dark theme'),
-          value: settings.darkMode,
-          onChanged: (value) {
-            ref.read(settingsProvider.notifier).setDarkMode(value);
-          },
-        ),
-        const SizedBox(height: 12),
-        FilledButton.tonalIcon(
-          onPressed: () {
-            Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => const VoiceCalibrationScreen(),
-              ),
-            );
-          },
-          icon: const Icon(Icons.record_voice_over_rounded),
-          label: const Text('Voice Calibration'),
-        ),
-        const SizedBox(height: 10),
-        FilledButton.tonalIcon(
-          onPressed: () {
-            Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => const VoiceTrainingScreen(),
-              ),
-            );
-          },
-          icon: const Icon(Icons.mic_external_on_rounded),
-          label: const Text('Voice Training Samples'),
-        ),
-        const SizedBox(height: 18),
-        StatusCard(
-          title: 'Default Pi',
-          value: '${AppSettings.defaultHost}:${AppSettings.defaultPort}',
-          icon: Icons.router_rounded,
-          accentColor: Colors.lightBlueAccent,
-          subtitle:
-              'Fallbacks: ${AppSettings.fallbackHost}, ${AppSettings.mdnsFallbackHost}',
-        ),
-        const StatusCard(
-          title: 'About',
-          value: 'Raspberry Pi 5 thermal and voice alert monitor',
-          icon: Icons.info_outline_rounded,
-          accentColor: Colors.greenAccent,
-          subtitle:
-              'MLX90640 thermal stream, ReSpeaker dual mic levels, keyword alerts, and Pi controls.',
-        ),
+          const SizedBox(height: 18),
+          StatusCard(
+            title: 'Default Pi',
+            value: '${AppSettings.defaultHost}:${AppSettings.defaultPort}',
+            icon: Icons.router_rounded,
+            accentColor: Colors.lightBlueAccent,
+            subtitle:
+                'Fallbacks: ${AppSettings.fallbackHost}, ${AppSettings.mdnsFallbackHost}',
+          ),
+          const StatusCard(
+            title: 'About',
+            value: 'Raspberry Pi 5 thermal and voice alert monitor',
+            icon: Icons.info_outline_rounded,
+            accentColor: Colors.greenAccent,
+            subtitle:
+                'MLX90640 thermal stream, ReSpeaker dual mic levels, keyword alerts, and Pi controls.',
+          ),
         ],
       ),
     );

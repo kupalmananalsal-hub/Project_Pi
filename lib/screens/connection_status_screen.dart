@@ -202,9 +202,10 @@ class _ConnectionStatusScreenState
                 onPressed: connection.isConnected
                     ? () => _confirmPowerAction(
                         context,
-                        title: 'Reboot Pi?',
+                        title: 'Restart Pi?',
                         message:
                             'The app will disconnect while the Pi restarts.',
+                        successMessage: 'Restart command sent.',
                         action: () => PiApiService(
                           host: connection.host,
                           port: connection.port,
@@ -212,7 +213,7 @@ class _ConnectionStatusScreenState
                       )
                     : null,
                 icon: const Icon(Icons.restart_alt_rounded),
-                label: const Text('Reboot'),
+                label: const Text('Restart'),
               ),
             ),
             const SizedBox(width: 12),
@@ -224,6 +225,7 @@ class _ConnectionStatusScreenState
                         title: 'Shutdown Pi?',
                         message:
                             'You will need physical access or power cycling to start it again.',
+                        successMessage: 'Shutdown command sent.',
                         action: () => PiApiService(
                           host: connection.host,
                           port: connection.port,
@@ -244,6 +246,7 @@ class _ConnectionStatusScreenState
     BuildContext context, {
     required String title,
     required String message,
+    required String successMessage,
     required Future<void> Function() action,
   }) async {
     final confirmed = await showDialog<bool>(
@@ -266,7 +269,20 @@ class _ConnectionStatusScreenState
       },
     );
     if (confirmed == true) {
-      await action();
+      try {
+        await action();
+        if (context.mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text(successMessage)));
+        }
+      } catch (error) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Power command failed: $error')),
+          );
+        }
+      }
     }
   }
 

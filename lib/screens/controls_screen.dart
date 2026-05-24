@@ -163,37 +163,6 @@ class ControlsScreen extends ConsumerWidget {
               : const Icon(Icons.refresh_rounded),
           label: const Text('Refresh KWS Service'),
         ),
-        const SizedBox(height: 10),
-        OutlinedButton.icon(
-          onPressed: !connection.isConnected || controls.isBusy
-              ? null
-              : () => _confirm(
-                  context,
-                  title: 'Pull code and refresh?',
-                  message:
-                      'Runs git pull on the Pi, updates kws-alert.service, and restarts keyword spotting. Requires git credentials on the Pi.',
-                  action: () async {
-                    final ok = await ref
-                        .read(controlsProvider.notifier)
-                        .refreshKws(gitPull: true);
-                    if (!context.mounted) {
-                      return;
-                    }
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          ok
-                              ? 'Code pulled and KWS refreshed.'
-                              : ref.read(controlsProvider).error ??
-                                    'Refresh failed.',
-                        ),
-                      ),
-                    );
-                  },
-                ),
-          icon: const Icon(Icons.cloud_download_rounded),
-          label: const Text('Pull GitHub + Refresh KWS'),
-        ),
         const SizedBox(height: 14),
         Row(
           children: [
@@ -203,14 +172,18 @@ class ControlsScreen extends ConsumerWidget {
                     ? null
                     : () => _confirm(
                         context,
-                        title: 'Reboot Pi?',
+                        title: 'Restart Pi?',
                         message:
                             'The backend will disconnect while the Pi restarts.',
-                        action: () =>
-                            ref.read(controlsProvider.notifier).reboot(),
+                        action: () => _runPowerAction(
+                          context,
+                          ref,
+                          actionName: 'Restart',
+                          action: ref.read(controlsProvider.notifier).reboot,
+                        ),
                       ),
                 icon: const Icon(Icons.restart_alt_rounded),
-                label: const Text('Reboot Pi'),
+                label: const Text('Restart'),
               ),
             ),
             const SizedBox(width: 12),
@@ -226,8 +199,12 @@ class ControlsScreen extends ConsumerWidget {
                         title: 'Shutdown Pi?',
                         message:
                             'You will need physical access or power cycling to start it again.',
-                        action: () =>
-                            ref.read(controlsProvider.notifier).shutdown(),
+                        action: () => _runPowerAction(
+                          context,
+                          ref,
+                          actionName: 'Shutdown',
+                          action: ref.read(controlsProvider.notifier).shutdown,
+                        ),
                       ),
                 icon: const Icon(Icons.power_settings_new_rounded),
                 label: const Text('Shutdown'),
@@ -267,6 +244,26 @@ class ControlsScreen extends ConsumerWidget {
     if (confirmed == true) {
       await action();
     }
+  }
+
+  Future<void> _runPowerAction(
+    BuildContext context,
+    WidgetRef ref, {
+    required String actionName,
+    required Future<bool> Function() action,
+  }) async {
+    final ok = await action();
+    if (!context.mounted) {
+      return;
+    }
+    final error = ref.read(controlsProvider).error;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok ? '$actionName command sent.' : error ?? '$actionName failed.',
+        ),
+      ),
+    );
   }
 
   String _formatTimestamp(DateTime value) {
