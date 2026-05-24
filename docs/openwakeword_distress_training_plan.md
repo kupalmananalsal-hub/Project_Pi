@@ -95,59 +95,341 @@ config["custom_negative_phrases"] = []
 
 Only add custom negatives after Pi testing shows a repeat false activation.
 
-## Colab Notebook Changes
+## Stable Colab Workflow
 
-In the setup cell, make the model-resource directory rerunnable:
+Use this workflow instead of the older direct `!python train.py ...` cells. It
+prevents the notebook from continuing after a failed stage and removes stale
+feature caches before augmentation.
+
+Start from a fresh runtime when a phrase has already failed:
+
+1. In Colab, choose **Runtime > Disconnect and delete runtime**.
+2. Reconnect with a GPU runtime.
+3. Run the notebook environment setup and data download cells.
+4. Do not run `--augment_clips` unless `--generate_clips` finishes without a
+   traceback.
+
+In the setup cell, keep the model-resource directory rerunnable:
 
 ```python
 os.makedirs("./openwakeword/openwakeword/resources/models", exist_ok=True)
 ```
 
-If a training command using `{sys.executable}` fails in Colab, replace:
+After the environment setup cell, run this single compatibility/preflight cell:
 
 ```python
-!{sys.executable} openwakeword/openwakeword/train.py --training_config my_model.yaml --generate_clips
+!pip install -q soundfile
+
+import importlib
+import inspect
+import subprocess
+import sys
+from pathlib import Path
+
+def patch_deep_phonemizer_torch_load():
+    import dp.model.model as dp_model
+
+    path = Path(inspect.getfile(dp_model))
+    text = path.read_text()
+    old = "checkpoint = torch.load(checkpoint_path, map_location=device)"
+    new = "checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)"
+
+    if old in text and new not in text:
+        path.write_text(text.replace(old, new))
+        print(f"Patched deep-phonemizer torch.load: {path}")
+    else:
+        print(f"deep-phonemizer patch already present or not needed: {path}")
+
+def patch_torchaudio_info():
+    import torchaudio
+
+    path = Path(inspect.getfile(torchaudio))
+    text = path.read_text()
+    marker = "# Project Pi torchaudio.info compatibility patch"
+    patch = r'''
+
+# Project Pi torchaudio.info compatibility patch
+if "info" not in globals():
+    class AudioMetaData:
+        def __init__(
+            self,
+            sample_rate,
+            num_frames,
+            num_channels=1,
+            bits_per_sample=0,
+            encoding="UNKNOWN",
+        ):
+            self.sample_rate = sample_rate
+            self.num_frames = num_frames
+            self.num_channels = num_channels
+            self.bits_per_sample = bits_per_sample
+            self.encoding = encoding
+
+    def info(uri, format=None, buffer_size=4096, backend=None):
+        del format, buffer_size, backend
+        import soundfile as _sf
+
+        metadata = _sf.info(str(uri))
+        return AudioMetaData(
+            sample_rate=int(metadata.samplerate),
+            num_frames=int(metadata.frames),
+            num_channels=int(metadata.channels),
+            bits_per_sample=0,
+            encoding=str(metadata.format or "UNKNOWN"),
+        )
+'''
+
+    if marker not in text:
+        path.write_text(text + patch)
+        print(f"Patched torchaudio.info fallback: {path}")
+    else:
+        print(f"torchaudio.info patch already present: {path}")
+
+    importlib.reload(torchaudio)
+    if not hasattr(torchaudio, "info"):
+        raise RuntimeError("torchaudio.info patch failed in current process")
+
+patch_deep_phonemizer_torch_load()
+patch_torchaudio_info()
+
+required_paths = [
+    "openwakeword/openwakeword/train.py",
+    "openwakeword/examples/custom_model.yml",
+    "piper-sample-generator/models/en_US-libritts_r-medium.pt",
+    "validation_set_features.npy",
+    "openwakeword_features_ACAV100M_2000_hrs_16bit.npy",
+]
+missing = [path for path in required_paths if not Path(path).exists()]
+if missing:
+    raise FileNotFoundError(f"Missing setup/data files: {missing}")
+
+subprocess.run(
+    [
+        sys.executable,
+        "-c",
+        "import torchaudio; assert hasattr(torchaudio, 'info'); print('subprocess torchaudio.info OK')",
+    ],
+    check=True,
+)
+print("Colab preflight OK.")
 ```
 
-with:
+Then create `my_model.yaml` for exactly one phrase. Use smoke-test settings
+first. After one phrase successfully exports `.tflite`, switch
+`SMOKE_TEST = False` for high-accuracy training.
 
 ```python
-!python openwakeword/openwakeword/train.py --training_config my_model.yaml --generate_clips
-```
+import yaml
 
-Do the same for `--augment_clips` and `--train_model`.
+PHRASE = ["help"]
+MODEL_NAME = "help"
+SMOKE_TEST = True
 
-## Single-Phrase Manual Run
+def build_overrides(smoke_test):
+    return {
+        "n_samples": 1000 if smoke_test else 50000,
+        "n_samples_val": 1000 if smoke_test else 5000,
+        "steps": 10000 if smoke_test else 50000,
+        "target_accuracy": 0.60 if smoke_test else 0.80,
+        "target_recall": 0.25 if smoke_test else 0.60,
+        "target_false_positives_per_hour": 0.20 if smoke_test else 0.05,
+        "max_negative_weight": 1000 if smoke_test else 2500,
+        "augmentation_rounds": 1 if smoke_test else 2,
+        "background_paths": ["./audioset_16k", "./fma"],
+        "background_paths_duplication_rate": [2, 1],
+        "rir_paths": ["./mit_rirs"],
+        "false_positive_validation_data_path": "validation_set_features.npy",
+        "feature_data_files": {
+            "ACAV100M_sample": "openwakeword_features_ACAV100M_2000_hrs_16bit.npy",
+        },
+    }
 
-For one phrase, edit the notebook's config cell like this:
+COMMON_OVERRIDES = build_overrides(SMOKE_TEST)
 
-```python
 config = yaml.safe_load(open("openwakeword/examples/custom_model.yml", "r").read())
-
 config.update(COMMON_OVERRIDES)
-config["target_phrase"] = ["save me"]
-config["model_name"] = "save_me"
+config["target_phrase"] = PHRASE
+config["model_name"] = MODEL_NAME
 config["custom_negative_phrases"] = []
 
 with open("my_model.yaml", "w") as file:
     yaml.safe_dump(config, file, sort_keys=False)
+
+print(f"Configured {MODEL_NAME}: {PHRASE}, smoke_test={SMOKE_TEST}")
 ```
 
-Then run:
+Run this helper cell once. It reads `model_name` from `my_model.yaml`, so it
+works for `tulong`, `help`, `save_me`, and every other phrase without editing
+hard-coded paths.
 
 ```python
-!python openwakeword/openwakeword/train.py --training_config my_model.yaml --generate_clips
-!python openwakeword/openwakeword/train.py --training_config my_model.yaml --augment_clips
-!python openwakeword/openwakeword/train.py --training_config my_model.yaml --train_model
+import shutil
+import subprocess
+import sys
+from math import gcd
+from pathlib import Path
+
+import numpy as np
+import yaml
+from scipy.io import wavfile
+from scipy.signal import resample_poly
+
+MODEL_ROOT = Path("/content/my_custom_model")
+
+def load_training_config():
+    return yaml.safe_load(open("my_model.yaml", "r").read())
+
+def model_name():
+    return load_training_config()["model_name"]
+
+def model_dir():
+    return MODEL_ROOT / model_name()
+
+def reset_model_outputs():
+    name = model_name()
+    for path in [
+        MODEL_ROOT / name,
+        MODEL_ROOT / f"{name}.onnx",
+        MODEL_ROOT / f"{name}.tflite",
+        MODEL_ROOT / f"{name}.pt",
+    ]:
+        if path.is_dir():
+            shutil.rmtree(path)
+            print(f"Removed folder: {path}")
+        elif path.exists():
+            path.unlink()
+            print(f"Removed file: {path}")
+    model_dir().mkdir(parents=True, exist_ok=True)
+    print(f"Reset model output folder: {model_dir()}")
+
+def clear_feature_cache():
+    for file in model_dir().glob("*features*.npy"):
+        file.unlink()
+        print(f"Removed feature cache: {file.name}")
+
+def run_stage(stage):
+    print(f"Running stage: {stage} for {model_name()}")
+    subprocess.run(
+        [
+            sys.executable,
+            "openwakeword/openwakeword/train.py",
+            "--training_config",
+            "my_model.yaml",
+            f"--{stage}",
+        ],
+        check=True,
+    )
+
+def check_and_fix_sample_rate(target_sr=16000):
+    wavs = list(model_dir().rglob("*.wav"))
+    if not wavs:
+        raise FileNotFoundError(f"No WAV clips found in {model_dir()}")
+
+    fixed = 0
+    bad = []
+    for wav_path in wavs:
+        sr, audio = wavfile.read(str(wav_path))
+        if sr != target_sr:
+            divisor = gcd(sr, target_sr)
+            audio_f32 = audio.astype(np.float32)
+            audio_16k = resample_poly(
+                audio_f32,
+                target_sr // divisor,
+                sr // divisor,
+                axis=0,
+            )
+            audio_16k = np.clip(audio_16k, -32768, 32767).astype(np.int16)
+            wavfile.write(str(wav_path), target_sr, audio_16k)
+            fixed += 1
+
+        verify_sr, _ = wavfile.read(str(wav_path))
+        if verify_sr != target_sr:
+            bad.append(str(wav_path))
+
+    print(f"WAV files checked={len(wavs)}, fixed={fixed}, remaining_bad={len(bad)}")
+    if bad:
+        raise ValueError("Some WAV files are still not 16 kHz:\n" + "\n".join(bad[:10]))
+
+def verify_generated_clips():
+    wavs = list(model_dir().rglob("*.wav"))
+    if not wavs:
+        raise FileNotFoundError(f"Generation failed: no WAV files in {model_dir()}")
+    print(f"Generated WAV clips: {len(wavs)}")
+
+def verify_feature_files():
+    required = [
+        "positive_features_train.npy",
+        "positive_features_test.npy",
+    ]
+    missing = [name for name in required if not (model_dir() / name).exists()]
+    if missing:
+        existing = sorted(path.name for path in model_dir().glob("*features*.npy"))
+        raise FileNotFoundError(
+            f"Augmentation did not finish. Missing: {missing}. Existing: {existing}"
+        )
+
+    for name in required:
+        data = np.load(model_dir() / name, mmap_mode="r")
+        print(f"{name}: shape={data.shape}")
+
+def verify_exported_model():
+    name = model_name()
+    exported = [
+        MODEL_ROOT / f"{name}.tflite",
+        MODEL_ROOT / f"{name}.onnx",
+    ]
+    found = [path for path in exported if path.exists()]
+    if not found:
+        raise FileNotFoundError(f"No exported .tflite or .onnx found for {name}")
+    for path in found:
+        print(f"Exported: {path} ({path.stat().st_size / 1024:.1f} KB)")
+
+def run_full_pipeline():
+    reset_model_outputs()
+    run_stage("generate_clips")
+    verify_generated_clips()
+    check_and_fix_sample_rate()
+    clear_feature_cache()
+    run_stage("augment_clips")
+    verify_feature_files()
+    run_stage("train_model")
+    verify_exported_model()
 ```
 
-If `my_custom_model/save_me.tflite` is missing after training, run the notebook's
-manual ONNX-to-TFLite conversion cell.
+Run the full phrase pipeline with one command:
+
+```python
+run_full_pipeline()
+```
+
+If this cell fails, fix the exact error shown before running the next stage. Do
+not manually continue to augmentation or training after a failed stage.
+
+## Single-Phrase Run
+
+For each phrase, edit only these values in the config cell:
+
+```python
+PHRASE = ["save me"]
+MODEL_NAME = "save_me"
+SMOKE_TEST = True
+```
+
+Run `run_full_pipeline()`. After the smoke test exports a model, run the same
+phrase again with:
+
+```python
+SMOKE_TEST = False
+```
+
+Then recreate `my_model.yaml` and run `run_full_pipeline()` again for the final
+high-accuracy model.
 
 ## Batch Training Cell
 
-After the data download cells finish once, replace the config/training section
-with this batch cell:
+Batch training can consume many Colab hours. Use it only after one phrase has
+completed successfully with the stable workflow. It reuses `build_overrides()`
+and `run_full_pipeline()` from the cells above.
 
 ```python
 DISTRESS_CONFIGS = [
@@ -169,27 +451,25 @@ DISTRESS_CONFIGS = [
     {"target_phrase": ["emergency"], "model_name": "emergency"},
 ]
 
-def write_config(item):
+def configure_phrase(item, smoke_test=True):
     config = yaml.safe_load(open("openwakeword/examples/custom_model.yml", "r").read())
-    config.update(COMMON_OVERRIDES)
+    config.update(build_overrides(smoke_test))
     config["target_phrase"] = item["target_phrase"]
     config["model_name"] = item["model_name"]
     config["custom_negative_phrases"] = []
-    yaml_path = f"{item['model_name']}.yaml"
-    with open(yaml_path, "w") as file:
+
+    with open("my_model.yaml", "w") as file:
         yaml.safe_dump(config, file, sort_keys=False)
-    return yaml_path
+
+    print(f"Configured {item['model_name']}: {item['target_phrase']}")
 
 for item in DISTRESS_CONFIGS:
-    yaml_path = write_config(item)
-    print(f"Training {item['model_name']} from {item['target_phrase']}")
-    !python openwakeword/openwakeword/train.py --training_config "{yaml_path}" --generate_clips
-    !python openwakeword/openwakeword/train.py --training_config "{yaml_path}" --augment_clips
-    !python openwakeword/openwakeword/train.py --training_config "{yaml_path}" --train_model
+    configure_phrase(item, smoke_test=True)
+    run_full_pipeline()
 ```
 
 Run the core models first. Train the extended models after the core models pass
-basic Pi testing.
+basic Pi testing. For final models, rerun the loop with `smoke_test=False`.
 
 ## Optional Broad Safety-Net Models
 
