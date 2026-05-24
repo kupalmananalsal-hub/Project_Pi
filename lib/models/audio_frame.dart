@@ -100,6 +100,10 @@ class AudioFrame {
 
   double get normalizedRight => _normalize(rightRms);
 
+  double get normalizedLevel => _normalize(
+    leftRms >= rightRms ? leftRms : rightRms,
+  );
+
   VoiceDirection get voiceDirection {
     return VoiceDirection.fromPayload(
       direction: direction,

@@ -69,6 +69,10 @@ class PiApiService {
         .toList(growable: false);
   }
 
+  Future<void> clearAlerts() async {
+    await _dio.delete<void>('/api/alerts');
+  }
+
   Future<ButtonEvent> fetchButton() async {
     final response = await _dio.get<Map<String, dynamic>>('/api/button');
     return ButtonEvent.fromJson(response.data ?? const {});

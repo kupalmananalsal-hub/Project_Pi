@@ -33,15 +33,9 @@ class AudioAlertsScreen extends ConsumerWidget {
             child: Column(
               children: [
                 AudioMeter(
-                  label: 'Mic Left',
-                  value: latest?.normalizedLeft ?? 0,
+                  label: 'Audio Level',
+                  value: latest?.normalizedLevel ?? 0,
                   color: Colors.cyanAccent,
-                ),
-                const SizedBox(height: 18),
-                AudioMeter(
-                  label: 'Mic Right',
-                  value: latest?.normalizedRight ?? 0,
-                  color: Colors.orangeAccent,
                 ),
                 const SizedBox(height: 12),
                 DirectionIndicator(direction: latest?.direction ?? 'center'),
@@ -50,11 +44,6 @@ class AudioAlertsScreen extends ConsumerWidget {
                   noiseLevelDb: latest?.noiseLevelDb ?? -90,
                   snrDb: latest?.snrDb ?? 0,
                   suppressionActive: latest?.noiseSuppressionActive ?? false,
-                ),
-                const SizedBox(height: 18),
-                SizedBox(
-                  height: 180,
-                  child: AudioHistoryChart(history: audio.history),
                 ),
               ],
             ),

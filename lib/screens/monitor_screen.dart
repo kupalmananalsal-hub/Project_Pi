@@ -43,15 +43,9 @@ class MonitorScreen extends ConsumerWidget {
                 ),
                 const SizedBox(height: 12),
                 AudioMeter(
-                  label: 'Left Mic',
-                  value: audio?.normalizedLeft ?? 0,
+                  label: 'Audio Level',
+                  value: audio?.normalizedLevel ?? 0,
                   color: Colors.cyanAccent,
-                ),
-                const SizedBox(height: 14),
-                AudioMeter(
-                  label: 'Right Mic',
-                  value: audio?.normalizedRight ?? 0,
-                  color: Colors.orangeAccent,
                 ),
                 const SizedBox(height: 14),
                 LayoutBuilder(
@@ -79,11 +73,6 @@ class MonitorScreen extends ConsumerWidget {
                     }
                     return Column(children: [compass, facts]);
                   },
-                ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  height: 130,
-                  child: AudioHistoryChart(history: monitor.audioHistory),
                 ),
               ],
             ),

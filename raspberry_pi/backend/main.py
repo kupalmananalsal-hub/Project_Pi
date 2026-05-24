@@ -5,11 +5,11 @@ import asyncio
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
-from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -67,6 +67,7 @@ MLX_ADDRS = [0x10, 0x33]
 DEFAULT_AUDIO_SAMPLE_RATE = 16000
 VOICE_SAMPLES_DIR = Path.home() / "voice_samples"
 AUDIO_STATUS_PATH = Path(os.getenv("PROJECT_PI_AUDIO_STATUS_PATH", "/tmp/project_pi_audio_status.json"))
+ALERT_DB_PATH = Path(os.getenv("ALERT_DB_PATH", str(CURRENT_DIR / "alerts.db")))
 
 app = FastAPI(title="Project Pi Thermal Backend", version="1.0.0")
 app.add_middleware(
@@ -136,15 +137,117 @@ class VoiceSampleResponse(BaseModel):
     message: str
 
 
+class AlertStore:
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def _init_db(self) -> None:
+        with self.lock, self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    keyword TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    direction TEXT,
+                    human_detected INTEGER DEFAULT 0,
+                    source TEXT DEFAULT 'openwakeword'
+                )
+                """
+            )
+
+    def insert(self, event: dict[str, Any]) -> dict[str, Any]:
+        stored = dict(event)
+        stored["timestamp"] = (
+            str(stored.get("timestamp") or datetime.now(timezone.utc).isoformat())
+        )
+        stored["keyword"] = str(stored.get("keyword") or "unknown")
+        stored["confidence"] = _as_float(stored.get("confidence"), 0.0)
+        stored["direction"] = str(stored.get("direction") or "front")
+        stored["human_detected"] = bool(stored.get("human_detected", False))
+        stored["source"] = str(stored.get("source") or "openwakeword")
+
+        with self.lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO alerts (
+                    timestamp,
+                    keyword,
+                    confidence,
+                    direction,
+                    human_detected,
+                    source
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stored["timestamp"],
+                    stored["keyword"],
+                    stored["confidence"],
+                    stored["direction"],
+                    1 if stored["human_detected"] else 0,
+                    stored["source"],
+                ),
+            )
+            stored["id"] = cursor.lastrowid
+        return stored
+
+    def list_recent(self, limit: int = 100) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 500))
+        with self.lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, timestamp, keyword, confidence, direction, human_detected, source
+                FROM alerts
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+
+        return [
+            {
+                "id": row["id"],
+                "event": "keyword_detected",
+                "timestamp": row["timestamp"],
+                "keyword": row["keyword"],
+                "confidence": row["confidence"],
+                "direction": row["direction"] or "front",
+                "human_detected": bool(row["human_detected"]),
+                "source": row["source"] or "openwakeword",
+            }
+            for row in rows
+        ]
+
+    def clear(self) -> int:
+        with self.lock:
+            with self._connect() as connection:
+                row = connection.execute("SELECT COUNT(*) AS count FROM alerts").fetchone()
+                deleted = int(row["count"] if row else 0)
+                connection.execute("DELETE FROM alerts")
+                connection.commit()
+
+            with self._connect() as connection:
+                connection.execute("VACUUM")
+            return deleted
+
+
 class AlertHub:
     def __init__(self):
         self.clients: set[asyncio.Queue[dict[str, Any]]] = set()
-        self.history: deque[dict[str, Any]] = deque(maxlen=100)
 
     async def publish(self, event: dict[str, Any]):
         if not event.get("timestamp"):
             event["timestamp"] = datetime.now(timezone.utc).isoformat()
-        self.history.appendleft(event)
         for client_queue in list(self.clients):
             await client_queue.put(event)
 
@@ -157,6 +260,7 @@ class AlertHub:
         self.clients.discard(client_queue)
 
 
+alert_store = AlertStore(ALERT_DB_PATH)
 alerts = AlertHub()
 decision_engine = AlertDecisionEngine()
 noise_config_store = NoiseSuppressionConfigStore(
@@ -586,6 +690,13 @@ def sanitize_token(value: str, fallback: str = "unknown") -> str:
     return cleaned or fallback
 
 
+def _as_float(value: object, fallback: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
 def alert_with_type(event: dict[str, Any], event_type: str) -> dict[str, Any]:
     payload = dict(event)
     payload["type"] = event_type
@@ -874,7 +985,7 @@ async def ws_alerts(websocket: WebSocket):
     await websocket.accept()
     client_queue = await alerts.connect()
     try:
-        for event in list(alerts.history)[:10]:
+        for event in alert_store.list_recent(10):
             await websocket.send_json(alert_with_type(event, "historical"))
         await websocket.send_json(
             {
@@ -972,6 +1083,17 @@ async def audio_status():
             "sample_rate": DEFAULT_AUDIO_SAMPLE_RATE,
             "channels": 2,
         }
+
+
+@app.get("/api/alerts")
+async def api_alert_history(limit: int = 100):
+    return {"history": alert_store.list_recent(limit)}
+
+
+@app.delete("/api/alerts")
+async def api_clear_alert_history():
+    deleted = await asyncio.to_thread(alert_store.clear)
+    return {"ok": True, "deleted": deleted}
 
 
 @app.post("/api/voice/sample", response_model=VoiceSampleResponse)
@@ -1112,15 +1234,11 @@ async def api_alerts(event: AlertIn):
         thermal_payload = None
 
     payload = enrich_alert_payload(payload, thermal_payload)
+    stored_payload = await asyncio.to_thread(alert_store.insert, payload)
     if payload["should_alert"]:
-        await alerts.publish(payload)
-        return {"ok": True, "event": payload}
-    return {"ok": True, "suppressed": True, "event": payload}
-
-
-@app.get("/api/alerts")
-async def api_alert_history():
-    return {"history": list(alerts.history)}
+        await alerts.publish(stored_payload)
+        return {"ok": True, "event": stored_payload}
+    return {"ok": True, "suppressed": True, "event": stored_payload}
 
 
 REFRESH_SCRIPT = RASPBERRY_PI_ROOT / "scripts" / "pi_refresh.sh"

@@ -175,24 +175,6 @@ class CooldownGate:
             return True
 
 
-class NoiseGate:
-    def __init__(self, threshold_rms: float = 0.02, hold_ms: int = 100, sample_rate: int = 16000):
-        self.threshold = threshold_rms
-        self.hold_samples = int(sample_rate * hold_ms / 1000)
-        self.below_counter = 0
-
-    def should_process(self, mono_samples: np.ndarray) -> bool:
-        if mono_samples.size == 0:
-            return False
-        rms = float(np.sqrt(np.mean(np.square(mono_samples.astype(np.float32)))) / 32768.0)
-        if rms > self.threshold:
-            self.below_counter = 0
-            return True
-
-        self.below_counter += mono_samples.size
-        return self.below_counter < self.hold_samples
-
-
 class AdaptiveSnowboySensitivity:
     def __init__(
         self,
@@ -700,11 +682,6 @@ def main() -> None:
     channels = int(os.getenv("KWS_CHANNELS", "2"))
     cooldown_seconds = float(os.getenv("KWS_COOLDOWN_SECONDS", "2.0"))
     debug = _env_bool("KWS_DEBUG", False)
-    noise_gate = NoiseGate(
-        threshold_rms=float(os.getenv("NOISE_GATE_THRESHOLD", "0.02")),
-        hold_ms=int(os.getenv("NOISE_GATE_HOLD_MS", "100")),
-        sample_rate=sample_rate,
-    )
     config_store = NoiseSuppressionConfigStore(
         Path(os.getenv("NOISE_SUPPRESSION_CONFIG_PATH", str(DEFAULT_CONFIG_PATH)))
     )
@@ -894,7 +871,8 @@ def main() -> None:
         vosk_thread.start()
         snowboy_thread.start()
         print(
-            "Listening for: tulong via Vosk, help via Snowboy"
+            "Listening with openWakeWord as primary VAD/keyword engine; "
+            "Vosk/Snowboy run only as speech fallback"
             + (
                 f", {', '.join(audio_preprocessor.wake_word_models)} via openWakeWord"
                 if audio_preprocessor.available and audio_preprocessor.wake_word_models
@@ -930,30 +908,23 @@ def main() -> None:
             data = stream.read(chunk_frames, exception_on_overflow=False)
             packet = split_audio_chunk(data, channels)
             raw_samples = packet["raw_mono_samples"]
+            preprocessor_result = audio_preprocessor.process(raw_samples)
+            speech_active = bool(preprocessor_result["is_speech"])
             cleaned_samples, metrics = noise_suppressor.process(raw_samples)
-            preprocessor_result = audio_preprocessor.process(cleaned_samples)
             preprocessed_samples = np.asarray(
-                preprocessor_result["cleaned_audio"],
+                cleaned_samples,
                 dtype=np.int16,
             )
             packet["mono_samples"] = preprocessed_samples
             packet["mono_bytes"] = preprocessed_samples.tobytes()
 
-            speech_active = bool(preprocessor_result["is_speech"])
-            process_chunk = (
-                speech_active
-                and noise_gate.should_process(preprocessed_samples)
-            )
-            noise_suppressor.update_noise_profile(raw_samples, is_speech=process_chunk)
+            noise_suppressor.update_noise_profile(raw_samples, is_speech=speech_active)
             packet.update(metrics)
             packet.update(audio_preprocessor.to_metrics(preprocessor_result))
             write_audio_status(audio_status_path, packet)
             adaptive_sensitivity.update_for_snr(float(packet.get("snr_db", 0.0)))
 
-            if process_chunk:
-                put_latest(vosk_queue, packet)
-                put_latest(snowboy_queue, packet)
-
+            openwakeword_match: dict[str, object] | None = None
             if speech_active:
                 for wake_word in preprocessor_result["wake_words"]:
                     if not isinstance(wake_word, dict):
@@ -967,17 +938,30 @@ def main() -> None:
                     )
                     if score < threshold:
                         continue
-                    keyword = _friendly_keyword(str(wake_word.get("name", "")))
-                    if not keyword:
-                        continue
-                    context = _event_context(packet)
-                    context["openwakeword_model"] = keyword
-                    dispatcher.submit(
-                        keyword,
-                        score,
-                        "openwakeword",
-                        context=context,
+                    if openwakeword_match is None or score > float(
+                        openwakeword_match.get("score", 0.0)
+                    ):
+                        openwakeword_match = wake_word
+
+                openwakeword_posted = False
+                if openwakeword_match is not None:
+                    keyword = _friendly_keyword(
+                        str(openwakeword_match.get("name", ""))
                     )
+                    if keyword:
+                        context = _event_context(packet)
+                        context["openwakeword_model"] = keyword
+                        dispatcher.submit(
+                            keyword,
+                            float(openwakeword_match.get("score", 0.0)),
+                            "openwakeword",
+                            context=context,
+                        )
+                        openwakeword_posted = True
+
+                if not openwakeword_posted:
+                    put_latest(vosk_queue, packet)
+                    put_latest(snowboy_queue, packet)
 
             if now >= next_noise_log_at:
                 print(
