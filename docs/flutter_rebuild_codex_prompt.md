@@ -41,7 +41,7 @@ The Pi server runs on port 8765 and provides these endpoints.
 ## Flutter App Requirements
 
 ### Screen 1: Connection and Status
-- Manual IP entry field, pre-filled with `10.118.136.32`
+- Manual IP entry field, pre-filled with `172.20.10.8`
 - Port field, default `8765`
 - Connect and Disconnect buttons
 - Connection status indicator: green dot when connected, red dot when disconnected
@@ -96,7 +96,7 @@ The Pi server runs on port 8765 and provides these endpoints.
 - Navigation: bottom navigation bar with 5 tabs
 
 ## Pi Connection Info
-- IP: `10.118.136.32`
+- IP: `172.20.10.8`
 - Port: `8765`
 - Hostname fallback: `raspberrypi.local`
 

@@ -533,7 +533,7 @@ Copy each finished `.tflite` file to:
 Example:
 
 ```bash
-scp my_custom_model/save_me.tflite thesis@10.118.136.32:/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/
+scp my_custom_model/save_me.tflite thesis@172.20.10.8:/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/
 ```
 
 Then restart:
