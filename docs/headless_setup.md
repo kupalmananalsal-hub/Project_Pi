@@ -120,7 +120,10 @@ flutter build apk --debug
 cp raspberry_pi/apk_server/index.html build/app/outputs/flutter-apk/index.html
 ```
 
-Phone browser: `http://<PI_IP>:8080/`
+Phone browser: `http://10.159.83.236:8080/`
+
+If the hotspot gives the Pi a different address, check `hostname -I` and use
+`http://<PI_IP>:8080/` instead.
 
 ## Updating the Pi After Git Push
 
