@@ -25,6 +25,12 @@ chmod +x "${REPO}/raspberry_pi/scripts/"*.sh
 install -m 0440 "${REPO}/raspberry_pi/sudoers/project-pi-thesis" /etc/sudoers.d/project-pi-thesis
 visudo -cf /etc/sudoers.d/project-pi-thesis
 
+if [[ -x /home/thesis/kws-env/bin/python ]]; then
+  bash "${REPO}/raspberry_pi/scripts/install_kws_openwakeword_deps.sh"
+else
+  echo "Skipping openWakeWord dependency install; /home/thesis/kws-env is not ready."
+fi
+
 bash "${REPO}/raspberry_pi/scripts/headless_boot.sh"
 
 systemctl enable project-pi.target

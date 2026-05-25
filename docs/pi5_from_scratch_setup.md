@@ -346,13 +346,27 @@ Create the Vosk keyword-spotting environment:
 
 ```bash
 sudo apt update
-sudo apt install -y portaudio19-dev libasound2-dev python3-pyaudio ffmpeg curl
+sudo apt install -y \
+  portaudio19-dev libasound2-dev python3-pyaudio ffmpeg curl \
+  libspeexdsp-dev
 
 python3 -m venv --system-site-packages ~/kws-env
 source ~/kws-env/bin/activate
 python -m pip install --upgrade pip wheel setuptools
-python -m pip install vosk pyaudio numpy requests
+python -m pip install vosk pyaudio numpy requests openwakeword onnxruntime soundfile
 deactivate
+```
+
+Install and verify the Speex noise suppression Python wrapper:
+
+```bash
+PY_TAG="$(~/kws-env/bin/python -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
+~/kws-env/bin/pip install \
+  "https://github.com/dscripka/openWakeWord/releases/download/v0.1.1/speexdsp_ns-0.1.2-${PY_TAG}-${PY_TAG}-linux_aarch64.whl" \
+  || ~/kws-env/bin/pip install speexdsp-ns
+
+~/kws-env/bin/python -c "import speexdsp_ns; print('Speex OK')"
+~/kws-env/bin/python -c "import onnxruntime; print('ONNX Runtime OK')"
 ```
 
 If you already downloaded and unzipped the models, confirm the paths:

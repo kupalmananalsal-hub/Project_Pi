@@ -66,26 +66,39 @@ pipeline running while dependencies are installed.
 Install the optional third engine inside the same KWS virtual environment:
 
 ```bash
-source ~/kws-env/bin/activate
-pip install openwakeword
-sudo apt-get update
-sudo apt-get install -y libspeexdsp-dev
-python3 -c "import openwakeword; openwakeword.utils.download_models()"
+cd ~/Project_Pi
+bash raspberry_pi/scripts/install_kws_openwakeword_deps.sh
+~/kws-env/bin/python -c "import openwakeword; openwakeword.utils.download_models()"
 ```
 
-Smoke test VAD and Speex noise suppression:
+Manual dependency install, if you are not using the helper script:
 
 ```bash
-source ~/kws-env/bin/activate
-python3 - <<'PY'
+sudo apt-get update
+sudo apt-get install -y libspeexdsp-dev
+~/kws-env/bin/pip install --upgrade openwakeword onnxruntime soundfile
+
+PY_TAG="$(~/kws-env/bin/python -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
+~/kws-env/bin/pip install \
+  "https://github.com/dscripka/openWakeWord/releases/download/v0.1.1/speexdsp_ns-0.1.2-${PY_TAG}-${PY_TAG}-linux_aarch64.whl" \
+  || ~/kws-env/bin/pip install speexdsp-ns
+```
+
+Smoke test ONNX Runtime, Speex noise suppression, and VAD:
+
+```bash
+~/kws-env/bin/python - <<'PY'
+import onnxruntime
+import speexdsp_ns
 from openwakeword.model import Model
 
 model = Model(
     wakeword_models=[],
     enable_speex_noise_suppression=True,
     vad_threshold=0.5,
+    inference_framework="onnx",
 )
-print("openWakeWord noise suppression + VAD ready")
+print("openWakeWord ONNX + Speex + VAD ready")
 PY
 ```
 

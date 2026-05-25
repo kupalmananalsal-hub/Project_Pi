@@ -71,6 +71,7 @@ class AudioPreprocessor:
         ]
         self.emit_wake_words = bool(self.wake_word_models)
         self.enable_speex_noise_suppression = enable_speex_noise_suppression
+        self.speex_noise_suppression_active = False
         self.model: Any | None = None
         self.available = False
         self.error: str | None = None
@@ -188,6 +189,12 @@ class AudioPreprocessor:
             "openwakeword_loaded_models": self.wake_word_models,
             "openwakeword_missing_models": self.missing_wake_word_models,
             "openwakeword_skipped_models": self.skipped_wake_word_models,
+            "openwakeword_speex_noise_suppression_requested": (
+                self.enable_speex_noise_suppression
+            ),
+            "openwakeword_speex_noise_suppression_active": (
+                self.speex_noise_suppression_active
+            ),
             "openwakeword_scores": self._scores_from_result(result),
             "openwakeword_wake_words": wake_words,
             "openwakeword_wake_word": (
@@ -301,23 +308,30 @@ class AudioPreprocessor:
             return None
 
         try:
-            return model_cls(
-                wakeword_models=model_paths,
-                enable_speex_noise_suppression=enable_speex_noise_suppression,
-                vad_threshold=self.vad_threshold,
-                inference_framework="onnx",
+            return self._create_model(
+                model_cls,
+                model_paths,
+                enable_speex_noise_suppression,
             )
         except Exception as exc:
             self.skipped_wake_word_models["all_models_first_attempt"] = str(exc)
+            if (
+                enable_speex_noise_suppression
+                and self._is_missing_speex_error(exc)
+            ):
+                self.skipped_wake_word_models["speex_noise_suppression"] = (
+                    "speexdsp_ns is missing; retried openWakeWord with Speex "
+                    "noise suppression disabled"
+                )
+                return self._load_model(model_cls, model_paths, False)
 
         loadable_paths: list[str] = []
         for model_path in model_paths:
             try:
-                model_cls(
-                    wakeword_models=[model_path],
-                    enable_speex_noise_suppression=enable_speex_noise_suppression,
-                    vad_threshold=self.vad_threshold,
-                    inference_framework="onnx",
+                self._create_model(
+                    model_cls,
+                    [model_path],
+                    enable_speex_noise_suppression,
                 )
                 loadable_paths.append(model_path)
             except Exception as exc:
@@ -327,11 +341,32 @@ class AudioPreprocessor:
         if not loadable_paths:
             return None
 
-        return model_cls(
+        return self._create_model(
+            model_cls,
             wakeword_models=loadable_paths,
+            enable_speex_noise_suppression=enable_speex_noise_suppression,
+        )
+
+    def _create_model(
+        self,
+        model_cls: Any,
+        wakeword_models: list[str],
+        enable_speex_noise_suppression: bool,
+    ) -> Any:
+        model = model_cls(
+            wakeword_models=wakeword_models,
             enable_speex_noise_suppression=enable_speex_noise_suppression,
             vad_threshold=self.vad_threshold,
             inference_framework="onnx",
+        )
+        self.speex_noise_suppression_active = enable_speex_noise_suppression
+        return model
+
+    @staticmethod
+    def _is_missing_speex_error(exc: Exception) -> bool:
+        return (
+            getattr(exc, "name", None) == "speexdsp_ns"
+            or "speexdsp_ns" in str(exc)
         )
 
     @staticmethod
@@ -349,7 +384,7 @@ class AudioPreprocessor:
             return 0.0
 
     def _prediction_frame(self, frame: np.ndarray) -> np.ndarray:
-        if not self.enable_speex_noise_suppression or frame.size % 160 == 0:
+        if not self.speex_noise_suppression_active or frame.size % 160 == 0:
             return frame
         next_size = ((frame.size // 160) + 1) * 160
         padded = np.zeros(next_size, dtype=np.int16)
