@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import numpy as np
+
+
+DEFAULT_MODEL_PATH = Path(
+    "/home/thesis/Project_Pi/raspberry_pi/thermal/models/thermal_human_detector.tflite"
+)
 
 
 @dataclass(frozen=True)
@@ -57,14 +65,34 @@ class ThermalConfidenceScorer:
         height: int = 24,
         *,
         temporal_required: bool = False,
+        model_path: str | Path | None = None,
+        model_threshold: float | None = None,
     ) -> None:
         self.width = width
         self.height = height
         self.temporal_required = temporal_required
+        self.model_path = Path(
+            model_path
+            or os.getenv("THERMAL_HUMAN_MODEL_PATH", str(DEFAULT_MODEL_PATH))
+        ).expanduser()
+        self.model_threshold = float(
+            np.clip(
+                model_threshold
+                if model_threshold is not None
+                else float(os.getenv("THERMAL_HUMAN_MODEL_THRESHOLD", "0.55")),
+                0.0,
+                1.0,
+            )
+        )
         self.consecutive_human_frames = 0
         self.consecutive_empty_frames = 0
         self.last_human_state = False
         self.frame = self._reshape(thermal_frame) if thermal_frame is not None else None
+        self.model_error: str | None = None
+        self._interpreter: Any | None = None
+        self._input_details: list[dict[str, Any]] = []
+        self._output_details: list[dict[str, Any]] = []
+        self._load_model()
 
     def set_frame(self, thermal_frame: list[float] | np.ndarray) -> None:
         self.frame = self._reshape(thermal_frame)
@@ -108,6 +136,26 @@ class ThermalConfidenceScorer:
     ) -> dict[str, object]:
         if thermal_frame is not None:
             self.set_frame(thermal_frame)
+        if self.frame is None:
+            return self._no_human("missing_frame")
+
+        heuristic = self._analyze_heuristic()
+        if self._interpreter is None:
+            heuristic["thermal_model_available"] = False
+            heuristic["thermal_model_error"] = self.model_error
+            return heuristic
+
+        try:
+            model_result = self._predict_with_model(self.frame)
+        except Exception as exc:  # pragma: no cover - Pi runtime path
+            self.model_error = str(exc)
+            heuristic["thermal_model_available"] = False
+            heuristic["thermal_model_error"] = self.model_error
+            return heuristic
+
+        return self._merge_model_and_heuristic(heuristic, model_result)
+
+    def _analyze_heuristic(self) -> dict[str, object]:
         if self.frame is None:
             return self._no_human("missing_frame")
 
@@ -175,6 +223,177 @@ class ThermalConfidenceScorer:
                 "consecutive_frames": self.consecutive_human_frames,
             },
         }
+
+    def _load_model(self) -> None:
+        if not self.model_path.exists():
+            self.model_error = f"model not found: {self.model_path}"
+            return
+
+        try:
+            try:
+                from tflite_runtime.interpreter import Interpreter
+            except Exception:
+                from tensorflow.lite import Interpreter  # type: ignore
+
+            interpreter = Interpreter(model_path=str(self.model_path))
+            interpreter.allocate_tensors()
+            self._interpreter = interpreter
+            self._input_details = interpreter.get_input_details()
+            self._output_details = interpreter.get_output_details()
+            self.model_error = None
+        except Exception as exc:  # pragma: no cover - optional runtime dependency
+            self._interpreter = None
+            self.model_error = str(exc)
+
+    def _predict_with_model(self, frame: np.ndarray) -> dict[str, object]:
+        if self._interpreter is None or not self._input_details:
+            raise RuntimeError(self.model_error or "thermal model unavailable")
+
+        input_detail = self._input_details[0]
+        input_tensor = self._prepare_model_input(frame, input_detail)
+        self._interpreter.set_tensor(input_detail["index"], input_tensor)
+        self._interpreter.invoke()
+
+        outputs = [
+            self._dequantize_output(
+                self._interpreter.get_tensor(output_detail["index"]),
+                output_detail,
+            )
+            for output_detail in self._output_details
+        ]
+        confidence = self._extract_confidence(outputs)
+        mask = self._extract_mask(outputs)
+        coverage = float(np.mean(mask >= 0.5)) if mask is not None else 0.0
+
+        return {
+            "thermal_model_available": True,
+            "thermal_model_path": str(self.model_path),
+            "thermal_model_confidence": round(confidence, 4),
+            "thermal_model_threshold": self.model_threshold,
+            "thermal_model_mask": mask,
+            "thermal_model_coverage": round(coverage, 4),
+        }
+
+    def _prepare_model_input(
+        self,
+        frame: np.ndarray,
+        input_detail: dict[str, Any],
+    ) -> np.ndarray:
+        normalized = np.clip(frame.astype(np.float32), 0.0, 80.0) / 80.0
+        shape = [int(size) for size in input_detail["shape"]]
+        dtype = input_detail["dtype"]
+
+        if len(shape) == 4:
+            if shape[1:3] == [self.height, self.width]:
+                tensor = normalized[None, ..., None]
+            elif shape[2:4] == [self.height, self.width]:
+                tensor = normalized[None, None, ...]
+            else:
+                tensor = normalized.reshape(shape)
+        elif len(shape) == 3:
+            tensor = normalized[..., None] if shape[-1] == 1 else normalized[None, ...]
+        else:
+            tensor = normalized.reshape(shape)
+
+        tensor = tensor.astype(np.float32)
+        if np.issubdtype(dtype, np.integer):
+            scale, zero_point = input_detail.get("quantization", (0.0, 0))
+            if scale:
+                tensor = np.round(tensor / scale + zero_point)
+            tensor = np.clip(tensor, np.iinfo(dtype).min, np.iinfo(dtype).max)
+        return tensor.astype(dtype)
+
+    @staticmethod
+    def _dequantize_output(
+        output: np.ndarray,
+        output_detail: dict[str, Any],
+    ) -> np.ndarray:
+        array = np.asarray(output)
+        if np.issubdtype(array.dtype, np.integer):
+            scale, zero_point = output_detail.get("quantization", (0.0, 0))
+            if scale:
+                array = (array.astype(np.float32) - zero_point) * scale
+        return array.astype(np.float32)
+
+    def _extract_confidence(self, outputs: list[np.ndarray]) -> float:
+        scalar_candidates = [
+            output
+            for output in outputs
+            if output.size <= 4
+        ]
+        candidate = scalar_candidates[0] if scalar_candidates else outputs[0]
+        value = float(np.asarray(candidate).reshape(-1)[-1])
+        if value < 0.0 or value > 1.0:
+            value = 1.0 / (1.0 + np.exp(-value))
+        return float(np.clip(value, 0.0, 1.0))
+
+    def _extract_mask(self, outputs: list[np.ndarray]) -> np.ndarray | None:
+        mask_candidates = [
+            output
+            for output in outputs
+            if output.size >= self.width * self.height
+        ]
+        if not mask_candidates:
+            return None
+
+        mask = np.asarray(mask_candidates[-1], dtype=np.float32).reshape(-1)
+        mask = mask[: self.width * self.height].reshape(self.height, self.width)
+        return np.clip(mask, 0.0, 1.0)
+
+    def _merge_model_and_heuristic(
+        self,
+        heuristic: dict[str, object],
+        model_result: dict[str, object],
+    ) -> dict[str, object]:
+        confidence = float(model_result["thermal_model_confidence"])
+        model_detected = confidence >= self.model_threshold
+        model_coverage = float(model_result.get("thermal_model_coverage") or 0.0)
+        heuristic_coverage = float(heuristic.get("body_coverage") or 0.0)
+        body_coverage = max(model_coverage, heuristic_coverage)
+        detected_part = self._classify_body_part(body_coverage)
+        confidence_boost = self._calculate_model_boost(confidence, body_coverage)
+        estimated_pixels = int(round(body_coverage * self.width * self.height))
+
+        merged = dict(heuristic)
+        merged.update(
+            {
+                "human_detected": bool(model_detected),
+                "confidence_boost": confidence_boost,
+                "body_coverage": round(body_coverage, 4),
+                "detected_part": detected_part if model_detected else "none",
+                "human_pixel_count": estimated_pixels if model_detected else 0,
+                "cluster_size": max(
+                    int(heuristic.get("cluster_size") or 0),
+                    estimated_pixels if model_detected else 0,
+                ),
+                "thermal_model_available": True,
+                "thermal_model_path": str(self.model_path),
+                "thermal_model_confidence": round(confidence, 4),
+                "thermal_model_threshold": self.model_threshold,
+                "thermal_model_coverage": round(model_coverage, 4),
+                "thermal_model_error": None,
+            }
+        )
+
+        details = dict(merged.get("details") or {})
+        details.update(
+            {
+                "heuristic_human_detected": bool(heuristic.get("human_detected")),
+                "heuristic_confidence_boost": heuristic.get("confidence_boost", 0.0),
+                "heuristic_body_coverage": heuristic_coverage,
+                "thermal_model_confidence": round(confidence, 4),
+                "thermal_model_threshold": self.model_threshold,
+            }
+        )
+        merged["details"] = details
+        return merged
+
+    @staticmethod
+    def _calculate_model_boost(confidence: float, coverage: float) -> float:
+        if confidence < 0.5:
+            return 0.0
+        coverage_bonus = min(max(coverage, 0.0), 0.25)
+        return round(min(0.25, 0.08 + confidence * 0.12 + coverage_bonus * 0.2), 4)
 
     def _no_human(self, reason: str, *, reset_human_counter: bool = True) -> dict[str, object]:
         if reset_human_counter:

@@ -52,3 +52,8 @@ raspberry_pi/kws/snowboy_training/recordings/
 raspberry_pi/kws/snowboy_training/models/
 raspberry_pi/kws/openwakeword_models/*.onnx
 raspberry_pi/kws/openwakeword_models/*.onnx.data
+raspberry_pi/thermal/models/*.tflite
+raspberry_pi/thermal/models/*.onnx
+raspberry_pi/thermal/models/*.keras
+raspberry_pi/thermal/models/*_metrics.json
+!raspberry_pi/thermal/models/.gitkeep
