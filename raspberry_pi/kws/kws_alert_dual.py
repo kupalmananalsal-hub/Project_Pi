@@ -30,6 +30,14 @@ SAMPLE_RATE = 16000
 CHUNK_FRAMES = 1024
 ALERT_FLUSH_INTERVAL_SECONDS = 2.0
 DEFAULT_AUDIO_STATUS_PATH = Path("/tmp/project_pi_audio_status.json")
+TAGALOG_KEYWORD_ALIASES: dict[str, set[str]] = {
+    "tulong": {"tulong", "tolong", "tulon", "tulom", "tulungan"},
+    "saklolo": {"saklolo", "sakolo", "saglolo"},
+    "ang sakit": {"ang sakit", "sakit", "masakit"},
+    "aray": {"aray", "aray ko"},
+    "agai": {"agai", "agay"},
+    "sunog": {"sunog"},
+}
 
 
 def _split_env(value: str) -> list[str]:
@@ -262,7 +270,7 @@ class DetectionDispatcher:
         self._publish_generic(keyword, confidence, source, context)
 
     def note_vosk_text(self, text: str) -> None:
-        if not looks_like_tulong(text):
+        if detect_tagalog_keyword(text) is None:
             return
         with self.lock:
             self.last_tulong_hint_at = time.monotonic()
@@ -401,31 +409,49 @@ def create_vosk_recognizer(model_path: Path, sample_rate: int) -> KaldiRecognize
     model = Model(str(model_path))
     recognizer = KaldiRecognizer(model, sample_rate)
     recognizer.SetWords(True)
+    if hasattr(recognizer, "SetPartialWords"):
+        recognizer.SetPartialWords(True)
     return recognizer
 
 
-def looks_like_tulong(text: str) -> bool:
-    normalized = " ".join(
+def _normalize_vosk_text(text: str) -> str:
+    return " ".join(
         "".join(char for char in token.lower() if char.isalpha())
         for token in text.split()
     ).strip()
+
+
+def detect_tagalog_keyword(text: str) -> str | None:
+    normalized = _normalize_vosk_text(text)
     if not normalized:
-        return False
+        return None
 
     tokens = [token for token in normalized.split() if token]
     if not tokens:
         tokens = [normalized]
 
+    for keyword, aliases in TAGALOG_KEYWORD_ALIASES.items():
+        for alias in aliases:
+            if " " in alias and alias in normalized:
+                return keyword
+            if alias in tokens:
+                return keyword
+
     for token in tokens:
-        if token == "tulong":
-            return True
-        if len(token) >= 3 and "tulong".startswith(token):
-            return True
-        if token in {"tolong", "tulon", "tulom", "tulungan"}:
-            return True
-        if len(token) >= 4 and SequenceMatcher(None, token, "tulong").ratio() >= 0.72:
-            return True
-    return False
+        for keyword in ("tulong", "saklolo", "sunog", "aray", "agai"):
+            minimum_length = 3 if keyword in {"tulong", "aray", "agai"} else 4
+            if len(token) >= minimum_length and keyword.startswith(token):
+                return keyword
+            if (
+                len(token) >= minimum_length
+                and SequenceMatcher(None, token, keyword).ratio() >= 0.72
+            ):
+                return keyword
+    return None
+
+
+def looks_like_tulong(text: str) -> bool:
+    return detect_tagalog_keyword(text) == "tulong"
 
 
 def read_vosk_text(recognizer: KaldiRecognizer, data: bytes) -> str:
@@ -553,7 +579,7 @@ def vosk_worker(
     recognizer = create_vosk_recognizer(config["model_path"], config["sample_rate"])
     debug = bool(config["debug"])
     last_debug_text = ""
-    print(f"Vosk ready for tulong: {config['model_path']}", flush=True)
+    print(f"Vosk ready for Tagalog distress keywords: {config['model_path']}", flush=True)
 
     while RUNNING:
         try:
@@ -569,9 +595,10 @@ def vosk_worker(
         if text:
             dispatcher.note_vosk_text(text)
 
-        if "tulong" in text:
+        tagalog_keyword = detect_tagalog_keyword(text)
+        if tagalog_keyword is not None:
             dispatcher.submit(
-                "tulong",
+                tagalog_keyword,
                 float(config["confidence"]),
                 "vosk",
                 context=_event_context(data),
@@ -724,7 +751,7 @@ def main() -> None:
         wake_word_models=openwakeword_models,
         enabled=openwakeword_enabled,
         vad_threshold=float(os.getenv("OPENWAKEWORD_VAD_THRESHOLD", "0.40")),
-        wake_word_threshold=float(os.getenv("OPENWAKEWORD_WAKE_THRESHOLD", "0.45")),
+        wake_word_threshold=float(os.getenv("OPENWAKEWORD_WAKE_THRESHOLD", "0.40")),
         wake_word_thresholds=_split_threshold_env(
             os.getenv("OPENWAKEWORD_MODEL_THRESHOLDS", "")
         ),

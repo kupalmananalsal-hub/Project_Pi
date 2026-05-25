@@ -72,6 +72,8 @@ def main():
     model = Model(str(model_path))
     recognizer = KaldiRecognizer(model, 16000)
     recognizer.SetWords(True)
+    if hasattr(recognizer, "SetPartialWords"):
+        recognizer.SetPartialWords(True)
 
     pa = pyaudio.PyAudio()
     stream = None
