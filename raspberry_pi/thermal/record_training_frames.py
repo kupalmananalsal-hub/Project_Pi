@@ -28,7 +28,11 @@ def main() -> None:
     parser.add_argument("--duration", type=float, default=300.0)
     parser.add_argument("--interval", type=float, default=0.5)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument("--address", default="0x10")
+    parser.add_argument(
+        "--address",
+        default="0x33",
+        help="MLX90640 I2C address. Default: 0x33.",
+    )
     parser.add_argument("--refresh-rate-hz", type=int, default=4)
     parser.add_argument("--note", default="")
     args = parser.parse_args()
@@ -38,6 +42,10 @@ def main() -> None:
 
     output_dir = make_session_dir(args)
     camera = Mlx90640Reader(address=int(str(args.address), 16), refresh_rate_hz=args.refresh_rate_hz)
+    print(f"Initialised MLX90640 at address {format_i2c_address(camera.address)}.")
+    print("Waiting 1.0s for the I2C bus and camera to stabilise...")
+    time.sleep(1.0)
+    warm_up_camera(camera)
 
     metadata = {
         "label": args.label,
@@ -54,8 +62,15 @@ def main() -> None:
     index = 0
     print(f"Recording {args.label} frames to {output_dir}")
     print("Press Ctrl+C to stop early.")
+    read_error = None
     while RUNNING and (time.monotonic() - start) < args.duration:
-        frame = camera.read()
+        try:
+            frame = camera.read()
+        except RuntimeError as exc:
+            read_error = exc
+            print(f"Camera read failed during recording: {exc}")
+            print_camera_troubleshooting(camera.address)
+            break
         timestamp = datetime.now(timezone.utc).isoformat()
         frame_path = output_dir / f"frame_{index:06d}.npy"
         np.save(frame_path, frame.astype(np.float32))
@@ -79,6 +94,8 @@ def main() -> None:
     )
     print(f"Recorded {metadata['frame_count']} frames.")
     print(f"Metadata: {output_dir / 'metadata.json'}")
+    if read_error is not None:
+        raise SystemExit(1)
 
 
 def stop(signum, frame) -> None:
@@ -99,6 +116,39 @@ def make_session_dir(args: argparse.Namespace) -> Path:
     return output_dir
 
 
+def format_i2c_address(address: int) -> str:
+    return f"0x{address:02x}"
+
+
+def warm_up_camera(camera: "Mlx90640Reader", attempts: int = 5) -> None:
+    failures = 0
+    print(f"Warming up camera with {attempts} frame reads...")
+    for attempt in range(1, attempts + 1):
+        try:
+            camera.read()
+            print(f"Warm-up frame {attempt}/{attempts} OK.")
+        except RuntimeError as exc:
+            failures += 1
+            print(f"Warm-up frame {attempt}/{attempts} failed: {exc}")
+            time.sleep(0.2)
+
+    if failures == attempts:
+        print("Camera not responding. Check I2C connection and power.")
+        print_camera_troubleshooting(camera.address)
+        raise SystemExit(1)
+
+
+def print_camera_troubleshooting(address: int) -> None:
+    address_text = format_i2c_address(address)
+    print(f"Expected MLX90640 address: {address_text}")
+    print("Run `i2cdetect -y 1` and verify the camera appears at that address.")
+    print("Troubleshooting:")
+    print("- Check that the Grove connector is firmly seated on the ReSpeaker HAT.")
+    print("- Check that the jumper wires are securely connected to the camera.")
+    print("- Try powering the ReSpeaker HAT with an external Micro USB cable.")
+    print(f"- Run `i2cdetect -y 1` to verify the camera is detected at address {address_text}.")
+
+
 class Mlx90640Reader:
     def __init__(self, *, address: int, refresh_rate_hz: int) -> None:
         try:
@@ -111,6 +161,7 @@ class Mlx90640Reader:
                 "inside ~/thermal-env-sys first."
             ) from exc
 
+        self.address = address
         i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
         self.mlx = adafruit_mlx90640.MLX90640(i2c, address=address)
         refresh_name = f"REFRESH_{refresh_rate_hz}_HZ"
@@ -121,12 +172,24 @@ class Mlx90640Reader:
         )
         self.buffer = [0.0] * 768
 
-    def read(self) -> np.ndarray:
+    def read(self, max_consecutive_failures: int = 100) -> np.ndarray:
+        failures = 0
         while RUNNING:
             try:
                 self.mlx.getFrame(self.buffer)
                 return np.asarray(self.buffer, dtype=np.float32).reshape(24, 32)
-            except ValueError:
+            except (ValueError, RuntimeError, OSError) as exc:
+                failures += 1
+                if failures % 10 == 0:
+                    print(
+                        "Warning: MLX90640 read failed "
+                        f"{failures}/{max_consecutive_failures} consecutive times: {exc}"
+                    )
+                if failures >= max_consecutive_failures:
+                    raise RuntimeError(
+                        "MLX90640 did not return a frame after "
+                        f"{failures} consecutive read failures."
+                    ) from exc
                 time.sleep(0.02)
         return np.asarray(self.buffer, dtype=np.float32).reshape(24, 32)
 
