@@ -61,3 +61,10 @@ raspberry_pi/thermal/models/*_pr_curve.png
 raspberry_pi/thermal/models/*_pr_curve.csv
 raspberry_pi/thermal/models/split.json
 !raspberry_pi/thermal/models/.gitkeep
+copilot.py
+thermal_models_backup_*/
+raspberry_pi/*.onnx
+raspberry_pi/*.onnx.data
+
+# Local editor settings
+.vscode/
