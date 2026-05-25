@@ -64,6 +64,7 @@ class AudioPreprocessor:
         self.wake_word_models = self._valid_model_paths(
             self.configured_wake_word_models
         )
+        self.phrase_map = self._build_phrase_map(self.wake_word_models)
         self.missing_wake_word_models = [
             model_path
             for model_path in self.configured_wake_word_models
@@ -139,7 +140,7 @@ class AudioPreprocessor:
                 if model_name == "vad":
                     continue
                 score = self._as_float(raw_score)
-                keyword = self._keyword_name(str(model_name))
+                keyword = self._phrase_for_model(str(model_name))
                 threshold = self._threshold_for_model(str(model_name))
                 scores.append(
                     {
@@ -185,6 +186,7 @@ class AudioPreprocessor:
             "openwakeword_global_threshold": self.wake_word_threshold,
             "openwakeword_model_thresholds": self.wake_word_thresholds,
             "openwakeword_model_dir": str(self.model_dir),
+            "openwakeword_phrase_map": self.phrase_map,
             "openwakeword_discovered_models": self.discovered_wake_word_models,
             "openwakeword_loaded_models": self.wake_word_models,
             "openwakeword_missing_models": self.missing_wake_word_models,
@@ -254,8 +256,22 @@ class AudioPreprocessor:
             keyword.replace("_", " ").replace("-", " ").strip().lower().split()
         )
 
+    def _phrase_for_model(self, model_name: str) -> str:
+        return self.phrase_map.get(model_name, self._keyword_name(model_name))
+
+    @classmethod
+    def _build_phrase_map(cls, model_paths: list[str]) -> dict[str, str]:
+        phrase_map: dict[str, str] = {}
+        for model_path in model_paths:
+            path = Path(model_path)
+            phrase = cls._keyword_name(str(path))
+            phrase_map[str(path)] = phrase
+            phrase_map[path.name] = phrase
+            phrase_map[path.stem] = phrase
+        return phrase_map
+
     def _threshold_for_model(self, model_name: str) -> float:
-        keyword = self._keyword_name(model_name)
+        keyword = self._phrase_for_model(model_name)
         return self.wake_word_thresholds.get(keyword, self.wake_word_threshold)
 
     def _discover_onnx_model_paths(self) -> list[str]:

@@ -30,7 +30,7 @@ Environment=OPENWAKEWORD_ENABLED=1
 Environment="OPENWAKEWORD_MODEL_DIR=/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models"
 Environment=OPENWAKEWORD_VAD_THRESHOLD=0.50
 Environment=OPENWAKEWORD_WAKE_THRESHOLD=0.65
-Environment="OPENWAKEWORD_MODEL_THRESHOLDS=tulong=0.55,help=0.65,save me=0.45,help me=0.45,please help=0.45"
+Environment="OPENWAKEWORD_MODEL_THRESHOLDS=tulong=0.55,help=0.65,save me=0.65,help me=0.65,please help=0.65,rescue=0.65,emergency=0.65,over here=0.65,ang sakit=0.65,agai=0.65,aray=0.65,ouch=0.65,sunog=0.65"
 Environment=OPENWAKEWORD_SCORE_LOG_THRESHOLD=0.30
 Environment=OPENWAKEWORD_SPEEX_NOISE_SUPPRESSION=1
 Environment=DIRECTION_THRESHOLD_SECONDS=0.00003

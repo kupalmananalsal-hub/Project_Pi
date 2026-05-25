@@ -962,7 +962,7 @@ def main() -> None:
             write_audio_status(audio_status_path, packet)
             adaptive_sensitivity.update_for_snr(float(packet.get("snr_db", 0.0)))
 
-            openwakeword_match: dict[str, object] | None = None
+            openwakeword_matches: list[dict[str, object]] = []
             if speech_active:
                 for wake_word in preprocessor_result["wake_words"]:
                     if not isinstance(wake_word, dict):
@@ -976,33 +976,35 @@ def main() -> None:
                     )
                     if score < threshold:
                         continue
-                    if openwakeword_match is None or score > float(
-                        openwakeword_match.get("score", 0.0)
-                    ):
-                        openwakeword_match = wake_word
+                    openwakeword_matches.append(wake_word)
 
                 openwakeword_posted = False
-                if openwakeword_match is not None:
+                openwakeword_matches.sort(
+                    key=lambda wake_word: float(wake_word.get("score", 0.0)),
+                    reverse=True,
+                )
+                for openwakeword_match in openwakeword_matches:
                     keyword = _friendly_keyword(
                         str(openwakeword_match.get("name", ""))
                     )
-                    if keyword:
-                        context = _event_context(packet)
-                        context["openwakeword_model"] = keyword
-                        print(
-                            "openWakeWord detection: "
-                            f"{keyword} "
-                            f"score={float(openwakeword_match.get('score', 0.0)):.3f} "
-                            f"threshold={float(openwakeword_match.get('threshold', 0.0)):.3f}",
-                            flush=True,
-                        )
-                        dispatcher.submit(
-                            keyword,
-                            float(openwakeword_match.get("score", 0.0)),
-                            "openwakeword",
-                            context=context,
-                        )
-                        openwakeword_posted = True
+                    if not keyword:
+                        continue
+                    context = _event_context(packet)
+                    context["openwakeword_model"] = keyword
+                    print(
+                        "openWakeWord detection: "
+                        f"{keyword} "
+                        f"score={float(openwakeword_match.get('score', 0.0)):.3f} "
+                        f"threshold={float(openwakeword_match.get('threshold', 0.0)):.3f}",
+                        flush=True,
+                    )
+                    dispatcher.submit(
+                        keyword,
+                        float(openwakeword_match.get("score", 0.0)),
+                        "openwakeword",
+                        context=context,
+                    )
+                    openwakeword_posted = True
 
                 if not openwakeword_posted:
                     if now >= next_openwakeword_score_log_at:

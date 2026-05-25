@@ -1,0 +1,90 @@
+{
+  "git_commit": "812ca0f8db3483d7928f0c7ec8fcd8124b4392dc",
+  "data_path": "/root/thesis_dataset/thermal/processed/thermal_human_detection.npz",
+  "dataset_sample_counts": {
+    "yolo": 15486
+  },
+  "input_domain_counts": {
+    "image_domain": 15486
+  },
+  "source_units_counts": {
+    "normalized_image": 15486
+  },
+  "annotation_type_counts": {
+    "yolo_box": 15486
+  },
+  "split_method": "source_id",
+  "split_summary": {
+    "train": {
+      "sample_count": 10842,
+      "positive_count": 10839,
+      "negative_count": 3,
+      "datasets": {
+        "yolo": 10842
+      },
+      "input_domains": {
+        "image_domain": 10842
+      }
+    },
+    "val": {
+      "sample_count": 2322,
+      "positive_count": 2322,
+      "negative_count": 0,
+      "datasets": {
+        "yolo": 2322
+      },
+      "input_domains": {
+        "image_domain": 2322
+      }
+    },
+    "test": {
+      "sample_count": 2322,
+      "positive_count": 2322,
+      "negative_count": 0,
+      "datasets": {
+        "yolo": 2322
+      },
+      "input_domains": {
+        "image_domain": 2322
+      }
+    }
+  },
+  "normalization": {
+    "celsius": "clip 0-80 C then divide by 80",
+    "image_domain": "robust percentile-normalized to 0-1 during preprocessing"
+  },
+  "optimal_threshold": 0.05,
+  "optimal_threshold_metrics": {
+    "threshold": 0.05,
+    "accuracy": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "false_positive_rate": 0.0,
+    "tp": 2322,
+    "tn": 0,
+    "fp": 0,
+    "fn": 0
+  },
+  "test_metrics_at_optimal_threshold": {
+    "threshold": 0.05,
+    "accuracy": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "false_positive_rate": 0.0,
+    "tp": 2322,
+    "tn": 0,
+    "fp": 0,
+    "fn": 0
+  },
+  "input_shape": [
+    24,
+    32,
+    1
+  ],
+  "outputs": {
+    "presence": "sigmoid confidence 0-1",
+    "mask": "32x24 sigmoid segmentation mask"
+  }
+}

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import os
 import logging
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_MODEL_PATH = Path(
     "/home/thesis/Project_Pi/raspberry_pi/thermal/models/thermal_human_detector.tflite"
 )
+DEFAULT_MODEL_THRESHOLD = 0.55
 
 
 @dataclass(frozen=True)
@@ -77,13 +79,21 @@ class ThermalConfidenceScorer:
             model_path
             or os.getenv("THERMAL_HUMAN_MODEL_PATH", str(DEFAULT_MODEL_PATH))
         ).expanduser()
-        self.model_threshold = float(
-            np.clip(
-                model_threshold
-                if model_threshold is not None
-                else float(os.getenv("THERMAL_HUMAN_MODEL_THRESHOLD", "0.55")),
-                0.0,
-                1.0,
+        self.metadata_path = Path(
+            os.getenv(
+                "THERMAL_HUMAN_MODEL_METADATA_PATH",
+                str(self.model_path.with_suffix(".metadata.json")),
+            )
+        ).expanduser()
+        self.model_metadata: dict[str, Any] = {}
+        self.model_threshold = self._clipped_threshold(
+            model_threshold
+            if model_threshold is not None
+            else float(
+                os.getenv(
+                    "THERMAL_HUMAN_MODEL_THRESHOLD",
+                    str(DEFAULT_MODEL_THRESHOLD),
+                )
             )
         )
         self.consecutive_human_frames = 0
@@ -145,6 +155,8 @@ class ThermalConfidenceScorer:
             "thermal_model_error": self.model_error,
             "thermal_model_path": str(self.model_path),
             "thermal_model_threshold": self.model_threshold,
+            "thermal_model_metadata_path": str(self.metadata_path),
+            "thermal_model_metadata_available": bool(self.model_metadata),
         }
 
     def analyze(
@@ -162,6 +174,8 @@ class ThermalConfidenceScorer:
             heuristic["thermal_model_error"] = self.model_error
             heuristic["thermal_model_path"] = str(self.model_path)
             heuristic["thermal_model_threshold"] = self.model_threshold
+            heuristic["thermal_model_metadata_path"] = str(self.metadata_path)
+            heuristic["thermal_model_metadata_available"] = bool(self.model_metadata)
             return heuristic
 
         try:
@@ -172,6 +186,8 @@ class ThermalConfidenceScorer:
             heuristic["thermal_model_error"] = self.model_error
             heuristic["thermal_model_path"] = str(self.model_path)
             heuristic["thermal_model_threshold"] = self.model_threshold
+            heuristic["thermal_model_metadata_path"] = str(self.metadata_path)
+            heuristic["thermal_model_metadata_available"] = bool(self.model_metadata)
             return heuristic
 
         return self._merge_model_and_heuristic(heuristic, model_result)
@@ -261,10 +277,51 @@ class ThermalConfidenceScorer:
             self._interpreter = interpreter
             self._input_details = interpreter.get_input_details()
             self._output_details = interpreter.get_output_details()
+            self._load_model_metadata()
             self.model_error = None
         except Exception as exc:  # pragma: no cover - optional runtime dependency
             self._interpreter = None
             self.model_error = str(exc)
+
+    def _load_model_metadata(self) -> None:
+        if not self.metadata_path.exists():
+            self.model_threshold = DEFAULT_MODEL_THRESHOLD
+            LOGGER.warning(
+                "Thermal model metadata missing at %s; using fallback threshold %.2f",
+                self.metadata_path,
+                self.model_threshold,
+            )
+            return
+
+        try:
+            metadata = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            self.model_threshold = DEFAULT_MODEL_THRESHOLD
+            LOGGER.warning(
+                "Thermal model metadata could not be read from %s (%s); "
+                "using fallback threshold %.2f",
+                self.metadata_path,
+                exc,
+                self.model_threshold,
+            )
+            return
+
+        if not isinstance(metadata, dict) or "optimal_threshold" not in metadata:
+            self.model_threshold = DEFAULT_MODEL_THRESHOLD
+            LOGGER.warning(
+                "Thermal model metadata at %s has no optimal_threshold; "
+                "using fallback threshold %.2f",
+                self.metadata_path,
+                self.model_threshold,
+            )
+            return
+
+        self.model_metadata = metadata
+        self.model_threshold = self._clipped_threshold(metadata["optimal_threshold"])
+        LOGGER.info(
+            "Thermal model optimal threshold loaded from metadata: %.4f",
+            self.model_threshold,
+        )
 
     def _predict_with_model(self, frame: np.ndarray) -> dict[str, object]:
         if self._interpreter is None or not self._input_details:
@@ -291,6 +348,8 @@ class ThermalConfidenceScorer:
             "thermal_model_path": str(self.model_path),
             "thermal_model_confidence": round(confidence, 4),
             "thermal_model_threshold": self.model_threshold,
+            "thermal_model_metadata_path": str(self.metadata_path),
+            "thermal_model_metadata_available": bool(self.model_metadata),
             "thermal_model_mask": mask,
             "thermal_model_coverage": round(coverage, 4),
         }
@@ -391,6 +450,8 @@ class ThermalConfidenceScorer:
                 "thermal_model_path": str(self.model_path),
                 "thermal_model_confidence": round(confidence, 4),
                 "thermal_model_threshold": self.model_threshold,
+                "thermal_model_metadata_path": str(self.metadata_path),
+                "thermal_model_metadata_available": bool(self.model_metadata),
                 "thermal_model_coverage": round(model_coverage, 4),
                 "thermal_model_error": None,
             }
@@ -415,6 +476,14 @@ class ThermalConfidenceScorer:
             return 0.0
         coverage_bonus = min(max(coverage, 0.0), 0.25)
         return round(min(0.25, 0.08 + confidence * 0.12 + coverage_bonus * 0.2), 4)
+
+    @staticmethod
+    def _clipped_threshold(value: object) -> float:
+        try:
+            threshold = float(value)
+        except (TypeError, ValueError):
+            threshold = DEFAULT_MODEL_THRESHOLD
+        return float(np.clip(threshold, 0.0, 1.0))
 
     def _no_human(self, reason: str, *, reset_human_counter: bool = True) -> dict[str, object]:
         if reset_human_counter:
