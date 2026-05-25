@@ -305,6 +305,7 @@ class AudioPreprocessor:
                 wakeword_models=model_paths,
                 enable_speex_noise_suppression=enable_speex_noise_suppression,
                 vad_threshold=self.vad_threshold,
+                inference_framework="onnx",
             )
         except Exception as exc:
             self.skipped_wake_word_models["all_models_first_attempt"] = str(exc)
@@ -316,6 +317,7 @@ class AudioPreprocessor:
                     wakeword_models=[model_path],
                     enable_speex_noise_suppression=enable_speex_noise_suppression,
                     vad_threshold=self.vad_threshold,
+                    inference_framework="onnx",
                 )
                 loadable_paths.append(model_path)
             except Exception as exc:
@@ -329,6 +331,7 @@ class AudioPreprocessor:
             wakeword_models=loadable_paths,
             enable_speex_noise_suppression=enable_speex_noise_suppression,
             vad_threshold=self.vad_threshold,
+            inference_framework="onnx",
         )
 
     @staticmethod
