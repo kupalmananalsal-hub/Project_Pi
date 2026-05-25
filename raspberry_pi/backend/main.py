@@ -416,6 +416,16 @@ class ThermalCamera:
             return self._last_payload
         return self.read()
 
+    def model_status(self) -> dict[str, object]:
+        if hasattr(self._confidence_scorer, "status"):
+            return self._confidence_scorer.status()
+        return {
+            "thermal_model_available": False,
+            "thermal_model_error": "status unavailable",
+            "thermal_model_path": None,
+            "thermal_model_threshold": None,
+        }
+
     def _confidence_payload(self, temperatures: list[float]) -> dict[str, Any]:
         try:
             return self._confidence_scorer.analyze(temperatures)
@@ -1007,6 +1017,7 @@ async def api_status():
     disk = psutil.disk_usage("/")
     i2c = i2c_devices()
     latest_thermal = thermal._last_payload or {}
+    thermal_model_status = thermal.model_status()
     return {
         "cpu_temp_c": cpu_temp_c(),
         "ram_usage_percent": round(mem.percent, 2),
@@ -1023,6 +1034,7 @@ async def api_status():
             "body_coverage": latest_thermal.get("body_coverage", 0.0),
             "detected_part": latest_thermal.get("detected_part", "unknown"),
             "confidence_boost": latest_thermal.get("confidence_boost", 0.0),
+            **thermal_model_status,
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

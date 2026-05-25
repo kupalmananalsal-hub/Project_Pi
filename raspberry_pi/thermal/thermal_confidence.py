@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 import numpy as np
 
 
+LOGGER = logging.getLogger(__name__)
 DEFAULT_MODEL_PATH = Path(
     "/home/thesis/Project_Pi/raspberry_pi/thermal/models/thermal_human_detector.tflite"
 )
@@ -93,6 +95,13 @@ class ThermalConfidenceScorer:
         self._input_details: list[dict[str, Any]] = []
         self._output_details: list[dict[str, Any]] = []
         self._load_model()
+        if self._interpreter is not None:
+            LOGGER.info("Thermal human TFLite model loaded: %s", self.model_path)
+        else:
+            LOGGER.warning(
+                "Thermal human TFLite model unavailable; using heuristic fallback: %s",
+                self.model_error,
+            )
 
     def set_frame(self, thermal_frame: list[float] | np.ndarray) -> None:
         self.frame = self._reshape(thermal_frame)
@@ -130,6 +139,14 @@ class ThermalConfidenceScorer:
             return 0.10, "hand_or_partial_face"
         return 0.15, "torso_or_full_face"
 
+    def status(self) -> dict[str, object]:
+        return {
+            "thermal_model_available": self._interpreter is not None,
+            "thermal_model_error": self.model_error,
+            "thermal_model_path": str(self.model_path),
+            "thermal_model_threshold": self.model_threshold,
+        }
+
     def analyze(
         self,
         thermal_frame: list[float] | np.ndarray | None = None,
@@ -143,6 +160,8 @@ class ThermalConfidenceScorer:
         if self._interpreter is None:
             heuristic["thermal_model_available"] = False
             heuristic["thermal_model_error"] = self.model_error
+            heuristic["thermal_model_path"] = str(self.model_path)
+            heuristic["thermal_model_threshold"] = self.model_threshold
             return heuristic
 
         try:
@@ -151,6 +170,8 @@ class ThermalConfidenceScorer:
             self.model_error = str(exc)
             heuristic["thermal_model_available"] = False
             heuristic["thermal_model_error"] = self.model_error
+            heuristic["thermal_model_path"] = str(self.model_path)
+            heuristic["thermal_model_threshold"] = self.model_threshold
             return heuristic
 
         return self._merge_model_and_heuristic(heuristic, model_result)

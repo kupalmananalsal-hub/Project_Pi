@@ -39,7 +39,7 @@ python3 raspberry_pi/thermal/dataset_downloader.py --datasets yolov8_thermal
 
 ```bash
 python3 -m pip install numpy pillow h5py
-python3 raspberry_pi/thermal/preprocess_thermal_datasets.py
+python3 raspberry_pi/thermal/preprocess_thermal_datasets.py --dataset all
 ```
 
 Output:
@@ -55,23 +55,85 @@ The NPZ contains:
 - `presence`: `(N,)` binary frame labels
 - `coverage`: `(N,)` human mask coverage
 - `sources`: source file references
+- `source_ids`: source groups used to avoid train/test leakage
+- `source_units`: `celsius`, `normalized_image`, or `unknown`
+- `input_domains`: `celsius` or `image_domain`
+
+You can preprocess one source at a time:
+
+```bash
+python3 raspberry_pi/thermal/preprocess_thermal_datasets.py --dataset thermo_presence
+python3 raspberry_pi/thermal/preprocess_thermal_datasets.py --dataset mldetection
+python3 raspberry_pi/thermal/preprocess_thermal_datasets.py --dataset skku
+python3 raspberry_pi/thermal/preprocess_thermal_datasets.py --dataset yolo
+```
+
+## Record Pi-Side Training Frames
+
+Use real MLX90640 frames from the deployment room to reduce false positives.
+Record negative samples first: empty room, sun-warmed walls, laptops, chargers,
+and other normal heat sources.
+
+```bash
+source ~/thermal-env-sys/bin/activate
+python /home/thesis/Project_Pi/raspberry_pi/thermal/record_training_frames.py \
+  --label negative \
+  --duration 1800 \
+  --interval 0.5 \
+  --note empty_room_backgrounds
+deactivate
+```
+
+Record positives with a person at different distances, angles, and postures:
+
+```bash
+source ~/thermal-env-sys/bin/activate
+python /home/thesis/Project_Pi/raspberry_pi/thermal/record_training_frames.py \
+  --label positive \
+  --duration 600 \
+  --interval 0.5 \
+  --note person_near_far_angles
+deactivate
+```
+
+Recorded frames are saved under:
+
+```text
+~/thesis_dataset/thermal/recorded/
+```
+
+Include them in preprocessing:
+
+```bash
+python3 raspberry_pi/thermal/preprocess_thermal_datasets.py --dataset recorded
+```
 
 ## Train
 
 Train on Colab or a stronger machine:
 
 ```bash
-python3 -m pip install tensorflow numpy scikit-learn
+python3 -m pip install tensorflow numpy matplotlib
 python3 raspberry_pi/thermal/train_thermal_model.py \
   --data ~/thesis_dataset/thermal/processed/thermal_human_detection.npz \
   --epochs 40 \
-  --batch-size 64
+  --batch-size 64 \
+  --split-by source_id
 ```
 
 The exported model is:
 
 ```text
 raspberry_pi/thermal/models/thermal_human_detector.tflite
+```
+
+Training also writes:
+
+```text
+raspberry_pi/thermal/models/split.json
+raspberry_pi/thermal/models/thermal_human_detector.metadata.json
+raspberry_pi/thermal/models/thermal_human_detector_metrics.json
+raspberry_pi/thermal/models/thermal_human_detector_pr_curve.png
 ```
 
 Copy that file to the same path on the Raspberry Pi.
@@ -102,3 +164,5 @@ Runtime environment variables:
 Environment=THERMAL_HUMAN_MODEL_PATH=/home/thesis/Project_Pi/raspberry_pi/thermal/models/thermal_human_detector.tflite
 Environment=THERMAL_HUMAN_MODEL_THRESHOLD=0.55
 ```
+
+Use the threshold from `thermal_human_detector.metadata.json` after calibration.

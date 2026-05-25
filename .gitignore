@@ -56,4 +56,8 @@ raspberry_pi/thermal/models/*.tflite
 raspberry_pi/thermal/models/*.onnx
 raspberry_pi/thermal/models/*.keras
 raspberry_pi/thermal/models/*_metrics.json
+raspberry_pi/thermal/models/*.metadata.json
+raspberry_pi/thermal/models/*_pr_curve.png
+raspberry_pi/thermal/models/*_pr_curve.csv
+raspberry_pi/thermal/models/split.json
 !raspberry_pi/thermal/models/.gitkeep
