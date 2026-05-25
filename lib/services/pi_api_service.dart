@@ -24,6 +24,9 @@ class PiApiService {
   final int port;
   final Dio _dio;
 
+  String get _backendBaseUrl =>
+      'http://$host:${AppSettings.normalizeBackendPort(port)}';
+
   Future<SystemStatus> fetchStatus() async {
     final response = await _dio.get<Map<String, dynamic>>('/api/status');
     return SystemStatus.fromJson(response.data ?? const {});
@@ -82,11 +85,11 @@ class PiApiService {
   }
 
   Future<void> shutdown() async {
-    await _dio.post<void>('/api/shutdown');
+    await _dio.post<void>('$_backendBaseUrl/api/shutdown');
   }
 
   Future<void> reboot() async {
-    await _dio.post<void>('/api/reboot');
+    await _dio.post<void>('$_backendBaseUrl/api/reboot');
   }
 
   Future<Map<String, dynamic>> refreshServices({

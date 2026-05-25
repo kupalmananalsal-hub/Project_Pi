@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/alert_event.dart';
@@ -191,6 +192,15 @@ class AlertsController extends Notifier<AlertsState> {
     if (!event.shouldShowDirectionGuidance) {
       return;
     }
+
+    assert(() {
+      debugPrint(
+        'Alert WS live keyword=${event.keyword} '
+        'humanDetected=${event.humanDetected} '
+        'source=${event.source ?? "unknown"}',
+      );
+      return true;
+    }());
 
     if (event.humanDetected) {
       unawaited(
