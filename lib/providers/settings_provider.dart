@@ -25,7 +25,7 @@ class SettingsController extends Notifier<AppSettings> {
   }
 
   Future<void> updatePort(int port) async {
-    state = state.copyWith(port: port <= 0 ? AppSettings.defaultPort : port);
+    state = state.copyWith(port: AppSettings.normalizeBackendPort(port));
     await _persist();
   }
 
@@ -45,12 +45,17 @@ class SettingsController extends Notifier<AppSettings> {
     if (!ref.mounted) {
       return;
     }
+    final savedPort = prefs.getInt('port');
+    final normalizedPort = AppSettings.normalizeBackendPort(savedPort);
     state = AppSettings(
       host: prefs.getString('host') ?? AppSettings.defaultHost,
-      port: prefs.getInt('port') ?? AppSettings.defaultPort,
+      port: normalizedPort,
       darkMode: prefs.getBool('darkMode') ?? true,
       alertSound: AlertSoundLabel.fromName(prefs.getString('alertSound')),
     );
+    if (savedPort != normalizedPort) {
+      await prefs.setInt('port', normalizedPort);
+    }
   }
 
   Future<void> _persist() async {

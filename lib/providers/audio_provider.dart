@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/app_settings.dart';
 import '../models/audio_frame.dart';
 import '../services/reconnecting_web_socket_service.dart';
 
@@ -51,7 +52,12 @@ class AudioController extends Notifier<AudioState> {
   void connect(String host, int port) {
     disconnect();
     _socket = ReconnectingWebSocketService<AudioFrame>(
-      uri: Uri(scheme: 'ws', host: host, port: port, path: '/ws/audio'),
+      uri: Uri(
+        scheme: 'ws',
+        host: host,
+        port: AppSettings.normalizeBackendPort(port),
+        path: '/ws/audio',
+      ),
       parser: AudioFrame.fromMessage,
     );
     _audioSubscription = _socket!.messages.listen(

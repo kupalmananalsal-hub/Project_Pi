@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/alert_event.dart';
+import '../models/app_settings.dart';
 import '../providers/app_services_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/thermal_provider.dart';
@@ -72,7 +73,12 @@ class AlertsController extends Notifier<AlertsState> {
   void connect(String host, int port) {
     disconnect();
     _socket = ReconnectingWebSocketService<AlertEvent>(
-      uri: Uri(scheme: 'ws', host: host, port: port, path: '/ws/alerts'),
+      uri: Uri(
+        scheme: 'ws',
+        host: host,
+        port: AppSettings.normalizeBackendPort(port),
+        path: '/ws/alerts',
+      ),
       parser: AlertEvent.fromMessage,
     );
     _alertSubscription = _socket!.messages.listen(

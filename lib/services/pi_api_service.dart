@@ -1,16 +1,19 @@
 import 'package:dio/dio.dart';
 
 import '../models/alert_event.dart';
+import '../models/app_settings.dart';
 import '../models/button_event.dart';
 import '../models/system_status.dart';
 
 class PiApiService {
-  PiApiService({required this.host, required this.port, Dio? dio})
-    : _dio =
+  PiApiService({required this.host, required int port, Dio? dio})
+    : port = AppSettings.normalizeBackendPort(port),
+      _dio =
           dio ??
           Dio(
             BaseOptions(
-              baseUrl: 'http://$host:$port',
+              baseUrl:
+                  'http://$host:${AppSettings.normalizeBackendPort(port)}',
               connectTimeout: const Duration(seconds: 3),
               receiveTimeout: const Duration(seconds: 5),
               sendTimeout: const Duration(seconds: 3),

@@ -33,6 +33,13 @@ class AppSettings {
   static const mdnsFallbackHost = 'raspberrypi.local';
   static const defaultPort = 8765;
 
+  static int normalizeBackendPort(int? port) {
+    if (port == defaultPort) {
+      return port!;
+    }
+    return defaultPort;
+  }
+
   final String host;
   final int port;
   final bool darkMode;
@@ -42,7 +49,7 @@ class AppSettings {
     return Uri(
       scheme: 'http',
       host: hostOverride ?? host,
-      port: port,
+      port: normalizeBackendPort(port),
       path: path,
     );
   }
@@ -51,7 +58,7 @@ class AppSettings {
     return Uri(
       scheme: 'ws',
       host: hostOverride ?? host,
-      port: port,
+      port: normalizeBackendPort(port),
       path: path,
     );
   }
@@ -64,7 +71,7 @@ class AppSettings {
   }) {
     return AppSettings(
       host: host ?? this.host,
-      port: port ?? this.port,
+      port: normalizeBackendPort(port ?? this.port),
       darkMode: darkMode ?? this.darkMode,
       alertSound: alertSound ?? this.alertSound,
     );

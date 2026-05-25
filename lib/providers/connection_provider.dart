@@ -47,7 +47,7 @@ class PiConnectionState {
   }) {
     return PiConnectionState(
       host: host ?? this.host,
-      port: port ?? this.port,
+      port: AppSettings.normalizeBackendPort(port ?? this.port),
       isConnected: isConnected ?? this.isConnected,
       isConnecting: isConnecting ?? this.isConnecting,
       status: status == _unset ? this.status : status as SystemStatus?,
@@ -96,7 +96,9 @@ class ConnectionController extends Notifier<PiConnectionState> {
     final requestedHost = (host ?? settings.host).trim().isEmpty
         ? AppSettings.defaultHost
         : (host ?? settings.host).trim();
-    final requestedPort = port ?? settings.port;
+    final requestedPort = AppSettings.normalizeBackendPort(
+      port ?? settings.port,
+    );
 
     await ref.read(settingsProvider.notifier).updateHost(requestedHost);
     await ref.read(settingsProvider.notifier).updatePort(requestedPort);

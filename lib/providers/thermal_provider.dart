@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/app_settings.dart';
 import '../models/thermal_frame.dart';
 import '../services/reconnecting_web_socket_service.dart';
 import '../utils/human_detector.dart';
@@ -100,7 +101,12 @@ class ThermalController extends Notifier<ThermalState> {
   void connect(String host, int port) {
     disconnect();
     _socket = ReconnectingWebSocketService<ThermalFrame>(
-      uri: Uri(scheme: 'ws', host: host, port: port, path: '/ws/thermal'),
+      uri: Uri(
+        scheme: 'ws',
+        host: host,
+        port: AppSettings.normalizeBackendPort(port),
+        path: '/ws/thermal',
+      ),
       parser: ThermalFrame.fromMessage,
     );
     _frameSubscription = _socket!.messages.listen(

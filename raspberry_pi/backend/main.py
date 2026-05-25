@@ -1093,7 +1093,7 @@ async def api_alert_history(limit: int = 100):
 @app.delete("/api/alerts")
 async def api_clear_alert_history():
     deleted = await asyncio.to_thread(alert_store.clear)
-    return {"ok": True, "deleted": deleted}
+    return {"ok": True, "deleted_count": deleted}
 
 
 @app.post("/api/voice/sample", response_model=VoiceSampleResponse)

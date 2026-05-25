@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/app_settings.dart';
 import '../models/noise_suppression_settings.dart';
 import '../services/noise_suppression_service.dart';
 
@@ -57,8 +58,9 @@ class NoiseSuppressionController extends Notifier<NoiseSuppressionState> {
   }
 
   Future<void> connect(String host, int port) async {
+    final normalizedPort = AppSettings.normalizeBackendPort(port);
     if (state.connectedHost == host &&
-        state.connectedPort == port &&
+        state.connectedPort == normalizedPort &&
         !state.loading) {
       await refresh();
       return;
@@ -66,13 +68,13 @@ class NoiseSuppressionController extends Notifier<NoiseSuppressionState> {
 
     state = state.copyWith(
       connectedHost: host,
-      connectedPort: port,
+      connectedPort: normalizedPort,
       loading: true,
       error: null,
     );
 
     try {
-      final settings = await _service(host, port).fetchSettings();
+      final settings = await _service(host, normalizedPort).fetchSettings();
       if (!ref.mounted) {
         return;
       }
