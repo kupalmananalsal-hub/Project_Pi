@@ -63,7 +63,7 @@ def main():
     )
     backend_url = os.getenv("BACKEND_ALERT_URL", "http://127.0.0.1:8765/api/alerts")
     mic_hint = os.getenv("MIC_NAME_HINT", "seeed")
-    threshold_confidence = float(os.getenv("VOSK_KEYWORD_CONFIDENCE", "0.60"))
+    threshold_confidence = float(os.getenv("VOSK_KEYWORD_CONFIDENCE", "0.40"))
     cooldown_seconds = float(os.getenv("KWS_COOLDOWN_SECONDS", "1.5"))
 
     if not model_path.exists():

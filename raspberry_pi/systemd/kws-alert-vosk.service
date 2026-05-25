@@ -16,7 +16,7 @@ Environment=BACKEND_ALERT_URL=http://127.0.0.1:8765/api/alerts
 Environment=ALERT_QUEUE_PATH=/tmp/project_pi_alerts.jsonl
 Environment=PROJECT_PI_AUDIO_STATUS_PATH=/tmp/project_pi_audio_status.json
 Environment=MIC_NAME_HINT=seeed
-Environment=VOSK_KEYWORD_CONFIDENCE=0.60
+Environment=VOSK_KEYWORD_CONFIDENCE=0.40
 Environment=KWS_CHANNELS=2
 Environment=KWS_CHUNK_FRAMES=1280
 Environment=NOISE_GATE_THRESHOLD=0.015
@@ -27,9 +27,9 @@ Environment=NOISE_PROFILE_ADAPT_RATE=0.05
 Environment=NOISE_LOG_INTERVAL_SECONDS=5.0
 Environment=OPENWAKEWORD_ENABLED=1
 Environment="OPENWAKEWORD_MODEL_DIR=/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models"
-Environment=OPENWAKEWORD_VAD_THRESHOLD=0.50
-Environment=OPENWAKEWORD_WAKE_THRESHOLD=0.65
-Environment="OPENWAKEWORD_MODEL_THRESHOLDS=tulong=0.55,help=0.65,save me=0.65,help me=0.65,please help=0.65,rescue=0.65,emergency=0.65,over here=0.65,ang sakit=0.65,agai=0.65,aray=0.65,ouch=0.65,sunog=0.65"
+Environment=OPENWAKEWORD_VAD_THRESHOLD=0.40
+Environment=OPENWAKEWORD_WAKE_THRESHOLD=0.45
+Environment="OPENWAKEWORD_MODEL_THRESHOLDS=tulong=0.35,help=0.45,save me=0.45,help me=0.45,please help=0.45,rescue=0.45,emergency=0.45,over here=0.45,ang sakit=0.45,agai=0.45,aray=0.45,ouch=0.45,sunog=0.45"
 Environment=OPENWAKEWORD_SCORE_LOG_THRESHOLD=0.30
 Environment=OPENWAKEWORD_SPEEX_NOISE_SUPPRESSION=1
 Environment=DIRECTION_THRESHOLD_SECONDS=0.00003
@@ -39,10 +39,10 @@ Environment=SNOWBOY_RESOURCE_PATH=/home/thesis/snowboy/examples/Python3/resource
 Environment=SNOWBOY_MODEL_PATHS=/home/thesis/snowboy/examples/Python3/resources/models/help.pmdl
 Environment=SNOWBOY_KEYWORDS=help
 Environment=SNOWBOY_ALERT_KEYWORD=help
-Environment=SNOWBOY_SENSITIVITY=0.40
-Environment=SNOWBOY_SENSITIVITY_QUIET=0.50
-Environment=SNOWBOY_SENSITIVITY_MODERATE=0.40
-Environment=SNOWBOY_SENSITIVITY_NOISY=0.32
+Environment=SNOWBOY_SENSITIVITY=0.28
+Environment=SNOWBOY_SENSITIVITY_QUIET=0.38
+Environment=SNOWBOY_SENSITIVITY_MODERATE=0.28
+Environment=SNOWBOY_SENSITIVITY_NOISY=0.28
 Environment=SNOWBOY_AUDIO_GAIN=1.0
 Environment=SNOWBOY_CONFIDENCE=0.95
 Environment=SNOWBOY_HELP_CONFIRM_SECONDS=1.2

@@ -178,9 +178,9 @@ class CooldownGate:
 class AdaptiveSnowboySensitivity:
     def __init__(
         self,
-        quiet_value: float = 0.5,
-        moderate_value: float = 0.4,
-        noisy_value: float = 0.3,
+        quiet_value: float = 0.38,
+        moderate_value: float = 0.28,
+        noisy_value: float = 0.28,
     ) -> None:
         self.quiet_value = quiet_value
         self.moderate_value = moderate_value
@@ -723,8 +723,8 @@ def main() -> None:
     audio_preprocessor = AudioPreprocessor(
         wake_word_models=openwakeword_models,
         enabled=openwakeword_enabled,
-        vad_threshold=float(os.getenv("OPENWAKEWORD_VAD_THRESHOLD", "0.50")),
-        wake_word_threshold=float(os.getenv("OPENWAKEWORD_WAKE_THRESHOLD", "0.65")),
+        vad_threshold=float(os.getenv("OPENWAKEWORD_VAD_THRESHOLD", "0.40")),
+        wake_word_threshold=float(os.getenv("OPENWAKEWORD_WAKE_THRESHOLD", "0.45")),
         wake_word_thresholds=_split_threshold_env(
             os.getenv("OPENWAKEWORD_MODEL_THRESHOLDS", "")
         ),
@@ -791,9 +791,9 @@ def main() -> None:
         os.getenv("OPENWAKEWORD_SCORE_LOG_THRESHOLD", "0.30")
     )
     adaptive_sensitivity = AdaptiveSnowboySensitivity(
-        quiet_value=float(os.getenv("SNOWBOY_SENSITIVITY_QUIET", "0.50")),
-        moderate_value=float(os.getenv("SNOWBOY_SENSITIVITY_MODERATE", "0.40")),
-        noisy_value=float(os.getenv("SNOWBOY_SENSITIVITY_NOISY", "0.30")),
+        quiet_value=float(os.getenv("SNOWBOY_SENSITIVITY_QUIET", "0.38")),
+        moderate_value=float(os.getenv("SNOWBOY_SENSITIVITY_MODERATE", "0.28")),
+        noisy_value=float(os.getenv("SNOWBOY_SENSITIVITY_NOISY", "0.28")),
     )
     if current_noise_config.snowboy_sensitivity is not None:
         adaptive_sensitivity.apply_base_sensitivity(
@@ -853,7 +853,7 @@ def main() -> None:
             {
                 "model_path": vosk_model_path,
                 "sample_rate": sample_rate,
-                "confidence": float(os.getenv("VOSK_KEYWORD_CONFIDENCE", "0.95")),
+                "confidence": float(os.getenv("VOSK_KEYWORD_CONFIDENCE", "0.40")),
                 "debug": debug,
             },
         ),
