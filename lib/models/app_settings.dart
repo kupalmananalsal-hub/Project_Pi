@@ -21,12 +21,13 @@ extension AlertSoundLabel on AlertSound {
 }
 
 class AppSettings {
-  const AppSettings({
-    this.host = defaultHost,
-    this.port = defaultPort,
+  AppSettings({
+    String host = defaultHost,
+    int? port,
     this.darkMode = true,
     this.alertSound = AlertSound.alarm,
-  });
+  }) : host = host.trim().isEmpty ? defaultHost : host.trim(),
+       port = normalizeBackendPort(port);
 
   static const defaultHost = '10.159.83.236';
   static const fallbackHost = '10.159.83.236';
@@ -34,9 +35,8 @@ class AppSettings {
   static const defaultPort = 8765;
 
   static int normalizeBackendPort(int? port) {
-    if (port == defaultPort) {
-      return port!;
-    }
+    // The Pi backend is fixed on 8765. Normalize stale saved ports from older
+    // builds so actions like clear history, reboot, and shutdown cannot drift.
     return defaultPort;
   }
 

@@ -127,6 +127,10 @@ class AlertsController extends Notifier<AlertsState> {
     state = state.copyWith(history: const [], error: null);
   }
 
+  void replaceHistory(List<AlertEvent> history) {
+    state = state.copyWith(history: List.unmodifiable(history), error: null);
+  }
+
   void disconnect() {
     _alertSubscription?.cancel();
     _alertSubscription = null;

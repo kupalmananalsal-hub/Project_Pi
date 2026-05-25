@@ -13,7 +13,7 @@ class SettingsController extends Notifier<AppSettings> {
   @override
   AppSettings build() {
     Future.microtask(_load);
-    return const AppSettings();
+    return AppSettings();
   }
 
   Future<void> updateHost(String host) async {

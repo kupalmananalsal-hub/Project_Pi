@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../models/app_settings.dart';
 import '../models/thermal_frame.dart';
 import '../providers/connection_provider.dart';
 import '../providers/monitor_provider.dart';

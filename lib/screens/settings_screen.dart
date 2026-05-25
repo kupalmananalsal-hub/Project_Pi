@@ -12,11 +12,7 @@ class SettingsScreen extends ConsumerStatefulWidget {
   ConsumerState<SettingsScreen> createState() => _SettingsScreenState();
 }
 
-Future<void> _applyConnection(
-  WidgetRef ref, {
-  String? host,
-  int? port,
-}) async {
+Future<void> _applyConnection(WidgetRef ref, {String? host, int? port}) async {
   final notifier = ref.read(settingsProvider.notifier);
   if (host != null) {
     await notifier.updateHost(host);
@@ -87,7 +83,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           const SizedBox(height: 12),
           DropdownButtonFormField<AlertSound>(
-            value: settings.alertSound,
+            initialValue: settings.alertSound,
             decoration: const InputDecoration(
               labelText: 'Alert sound',
               prefixIcon: Icon(Icons.volume_up_rounded),

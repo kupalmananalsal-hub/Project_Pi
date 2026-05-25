@@ -18,15 +18,16 @@ final connectionProvider =
     );
 
 class PiConnectionState {
-  const PiConnectionState({
-    this.host = AppSettings.defaultHost,
-    this.port = AppSettings.defaultPort,
+  PiConnectionState({
+    String host = AppSettings.defaultHost,
+    int? port,
     this.isConnected = false,
     this.isConnecting = false,
     this.status,
     this.lastStatusAt,
     this.error,
-  });
+  }) : host = host.trim().isEmpty ? AppSettings.defaultHost : host.trim(),
+       port = AppSettings.normalizeBackendPort(port);
 
   final String host;
   final int port;

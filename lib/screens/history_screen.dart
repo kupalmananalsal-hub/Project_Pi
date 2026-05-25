@@ -26,9 +26,9 @@ class HistoryScreen extends ConsumerWidget {
               ),
             ),
             FilledButton.tonalIcon(
-              onPressed: alerts.history.isEmpty
-                  ? null
-                  : () => _confirmClearHistory(context, ref, connection),
+              onPressed: connection.isConnected
+                  ? () => _confirmClearHistory(context, ref, connection)
+                  : null,
               icon: const Icon(Icons.delete_sweep_rounded),
               label: const Text('Clear Detection History'),
             ),
@@ -113,7 +113,9 @@ class HistoryScreen extends ConsumerWidget {
       builder: (context) {
         return AlertDialog(
           title: const Text('Clear detection history?'),
-          content: const Text('This removes all stored alert records from the Pi.'),
+          content: const Text(
+            'This removes all stored alert records from the Pi.',
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(false),
@@ -133,11 +135,10 @@ class HistoryScreen extends ConsumerWidget {
     }
 
     try {
-      await PiApiService(
-        host: connection.host,
-        port: connection.port,
-      ).clearAlerts();
-      ref.read(alertsProvider.notifier).clearHistory();
+      final api = PiApiService(host: connection.host, port: connection.port);
+      await api.clearAlerts();
+      final refreshedHistory = await api.fetchAlerts();
+      ref.read(alertsProvider.notifier).replaceHistory(refreshedHistory);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Detection history cleared.')),
@@ -145,9 +146,9 @@ class HistoryScreen extends ConsumerWidget {
       }
     } catch (error) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Clear history failed: $error')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Clear history failed: $error')));
       }
     }
   }
