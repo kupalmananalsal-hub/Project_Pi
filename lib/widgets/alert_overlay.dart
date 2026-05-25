@@ -1,17 +1,27 @@
 import 'package:flutter/material.dart';
 
 import '../models/alert_event.dart';
+import '../models/thermal_frame.dart';
+import 'thermal_display.dart';
 
 class AlertOverlay extends StatefulWidget {
   const AlertOverlay({
     super.key,
     required this.event,
     required this.humanDetected,
+    this.thermalFrame,
+    this.thermalColorMap = ThermalColorMap.jet,
+    this.thermalMinTemp = 20,
+    this.thermalMaxTemp = 45,
     required this.onDismiss,
   });
 
   final AlertEvent event;
   final bool humanDetected;
+  final ThermalFrame? thermalFrame;
+  final ThermalColorMap thermalColorMap;
+  final double thermalMinTemp;
+  final double thermalMaxTemp;
   final VoidCallback onDismiss;
 
   @override
@@ -45,90 +55,108 @@ class _AlertOverlayState extends State<AlertOverlay>
       child: Material(
         color: Colors.red.shade900,
         child: SafeArea(
-          child: AnimatedBuilder(
-            animation: _controller,
-            builder: (context, child) {
-              return Transform.scale(scale: _controller.value, child: child);
-            },
-            child: Padding(
+          child: Center(
+            child: SingleChildScrollView(
               padding: const EdgeInsets.all(28),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(
-                    Icons.warning_rounded,
-                    color: Colors.white,
-                    size: 96,
+              child: AnimatedBuilder(
+                animation: _controller,
+                builder: (context, child) {
+                  return Transform.scale(
+                    scale: _controller.value,
+                    child: child,
+                  );
+                },
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 520),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(
+                        Icons.warning_rounded,
+                        color: Colors.white,
+                        size: 96,
+                      ),
+                      const SizedBox(height: 24),
+                      Text(
+                        widget.event.emergencyTitle,
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.headlineMedium
+                            ?.copyWith(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w800,
+                            ),
+                      ),
+                      const SizedBox(height: 18),
+                      Text(
+                        widget.event.displayKeyword,
+                        style: Theme.of(context).textTheme.displaySmall
+                            ?.copyWith(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w900,
+                            ),
+                      ),
+                      const SizedBox(height: 8),
+                      _AlertDirection(event: widget.event),
+                      const SizedBox(height: 12),
+                      Text(
+                        widget.humanDetected
+                            ? 'Thermal human detected - alarm active'
+                            : 'No thermal human detected',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(
+                          context,
+                        ).textTheme.titleMedium?.copyWith(color: Colors.white),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Final confidence ${(widget.event.displayedConfidence * 100).round()}%',
+                        style: Theme.of(
+                          context,
+                        ).textTheme.titleMedium?.copyWith(color: Colors.white),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        '${widget.event.detectedPartLabel} - '
+                        '${(widget.event.bodyCoverage * 100).toStringAsFixed(1)}% coverage - '
+                        'boost +${(widget.event.thermalConfidenceBoost * 100).round()}%',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(
+                          context,
+                        ).textTheme.bodyLarge?.copyWith(color: Colors.white),
+                      ),
+                      if (widget.thermalFrame != null) ...[
+                        const SizedBox(height: 14),
+                        _ThermalCapture(
+                          frame: widget.thermalFrame,
+                          colorMap: widget.thermalColorMap,
+                          minTemp: widget.thermalMinTemp,
+                          maxTemp: widget.thermalMaxTemp,
+                        ),
+                      ],
+                      if (widget.event.noiseLevelDb != null ||
+                          widget.event.snrDb != null) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          _noiseSummary(widget.event),
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.bodyMedium
+                              ?.copyWith(color: Colors.white70),
+                        ),
+                      ],
+                      const SizedBox(height: 36),
+                      FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.white,
+                          foregroundColor: Colors.red.shade900,
+                          minimumSize: const Size.fromHeight(54),
+                        ),
+                        onPressed: widget.onDismiss,
+                        icon: const Icon(Icons.close_rounded),
+                        label: const Text('Dismiss Alert'),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 24),
-                  Text(
-                    widget.event.emergencyTitle,
-                    textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  Text(
-                    widget.event.displayKeyword,
-                    style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  _AlertDirection(event: widget.event),
-                  const SizedBox(height: 12),
-                  Text(
-                    widget.event.shouldVibrate
-                        ? 'Thermal confidence supports vibration'
-                        : 'Visual alert only - vibration skipped',
-                    textAlign: TextAlign.center,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.titleMedium?.copyWith(color: Colors.white),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Final confidence ${(widget.event.displayedConfidence * 100).round()}%',
-                    style: Theme.of(
-                      context,
-                    ).textTheme.titleMedium?.copyWith(color: Colors.white),
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    '${widget.event.detectedPartLabel} - '
-                    '${(widget.event.bodyCoverage * 100).toStringAsFixed(1)}% coverage - '
-                    'boost +${(widget.event.thermalConfidenceBoost * 100).round()}%',
-                    textAlign: TextAlign.center,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodyLarge?.copyWith(color: Colors.white),
-                  ),
-                  if (widget.event.noiseLevelDb != null ||
-                      widget.event.snrDb != null) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      _noiseSummary(widget.event),
-                      textAlign: TextAlign.center,
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
-                    ),
-                  ],
-                  const SizedBox(height: 36),
-                  FilledButton.icon(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: Colors.white,
-                      foregroundColor: Colors.red.shade900,
-                      minimumSize: const Size.fromHeight(54),
-                    ),
-                    onPressed: widget.onDismiss,
-                    icon: const Icon(Icons.close_rounded),
-                    label: const Text('Dismiss Alert'),
-                  ),
-                ],
+                ),
               ),
             ),
           ),
@@ -148,6 +176,51 @@ class _AlertOverlayState extends State<AlertOverlay>
       parts.add('SNR ${snr.toStringAsFixed(1)} dB');
     }
     return parts.join(' - ');
+  }
+}
+
+class _ThermalCapture extends StatelessWidget {
+  const _ThermalCapture({
+    required this.frame,
+    required this.colorMap,
+    required this.minTemp,
+    required this.maxTemp,
+  });
+
+  final ThermalFrame? frame;
+  final ThermalColorMap colorMap;
+  final double minTemp;
+  final double maxTemp;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.24),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.36)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Column(
+          children: [
+            Text(
+              'Thermal frame at alert time',
+              style: Theme.of(
+                context,
+              ).textTheme.labelLarge?.copyWith(color: Colors.white),
+            ),
+            const SizedBox(height: 6),
+            ThermalDisplay(
+              frame: frame,
+              colorMap: colorMap,
+              minTemp: minTemp,
+              maxTemp: maxTemp,
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

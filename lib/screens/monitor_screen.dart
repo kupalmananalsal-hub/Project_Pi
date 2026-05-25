@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/alert_event.dart';
 import '../models/thermal_frame.dart';
+import '../providers/alerts_provider.dart';
 import '../providers/connection_provider.dart';
 import '../providers/monitor_provider.dart';
 import '../providers/settings_provider.dart';
@@ -22,6 +24,9 @@ class MonitorScreen extends ConsumerWidget {
     final thermal = ref.watch(thermalProvider);
     final audio = monitor.audioFrame;
     final connection = ref.watch(connectionProvider);
+    final keywordNotice = ref.watch(
+      alertsProvider.select((state) => state.keywordNotice),
+    );
 
     return ListView(
       padding: const EdgeInsets.all(14),
@@ -54,6 +59,14 @@ class MonitorScreen extends ConsumerWidget {
                       direction: monitor.direction,
                       size: wide ? 190 : 170,
                     );
+                    final compassStack = Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _KeywordNoticeBanner(event: keywordNotice),
+                        const SizedBox(height: 8),
+                        compass,
+                      ],
+                    );
                     final facts = _VoiceFacts(
                       directionLabel: monitor.direction.label,
                       distanceMeters: monitor.direction.distanceMeters,
@@ -64,13 +77,13 @@ class MonitorScreen extends ConsumerWidget {
                     if (wide) {
                       return Row(
                         children: [
-                          compass,
+                          compassStack,
                           const SizedBox(width: 16),
                           Expanded(child: facts),
                         ],
                       );
                     }
-                    return Column(children: [compass, facts]);
+                    return Column(children: [compassStack, facts]);
                   },
                 ),
               ],
@@ -80,6 +93,53 @@ class MonitorScreen extends ConsumerWidget {
         const SizedBox(height: 10),
         const NoiseSuppressionPanel(),
       ],
+    );
+  }
+}
+
+class _KeywordNoticeBanner extends StatelessWidget {
+  const _KeywordNoticeBanner({required this.event});
+
+  final AlertEvent? event;
+
+  @override
+  Widget build(BuildContext context) {
+    final currentEvent = event;
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 260),
+      child: currentEvent == null
+          ? const SizedBox(key: ValueKey('no-keyword'), height: 28)
+          : DecoratedBox(
+              key: ValueKey(
+                '${currentEvent.keyword}-${currentEvent.timestamp.toIso8601String()}',
+              ),
+              decoration: BoxDecoration(
+                color: Theme.of(
+                  context,
+                ).colorScheme.primaryContainer.withValues(alpha: 0.58),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.primary.withValues(alpha: 0.42),
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 5,
+                ),
+                child: Text(
+                  currentEvent.displayKeyword,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.onPrimaryContainer,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0,
+                  ),
+                ),
+              ),
+            ),
     );
   }
 }

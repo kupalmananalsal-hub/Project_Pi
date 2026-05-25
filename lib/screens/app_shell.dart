@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/alerts_provider.dart';
+import '../providers/thermal_provider.dart';
 import '../widgets/alert_overlay.dart';
 import 'controls_screen.dart';
-import 'direction_overlay.dart';
 import 'history_screen.dart';
 import 'monitor_screen.dart';
 import 'settings_screen.dart';
@@ -29,12 +29,14 @@ class _AppShellState extends ConsumerState<AppShell> {
     final activeAlertHumanDetected = ref.watch(
       alertsProvider.select((state) => state.activeAlertHumanDetected),
     );
-    final pendingGuidance = ref.watch(
-      alertsProvider.select((state) => state.pendingGuidance),
+    final activeAlertThermalFrame = ref.watch(
+      alertsProvider.select((state) => state.activeAlertThermalFrame),
     );
-    final pendingGuidanceHumanDetected = ref.watch(
-      alertsProvider.select((state) => state.pendingGuidanceHumanDetected),
-    );
+    final thermal = ref.watch(thermalProvider);
+
+    final thermalRange = activeAlertThermalFrame?.clippedTemperatureRange();
+    final alertThermalMin = thermalRange?.min ?? thermal.displayMinTemp;
+    final alertThermalMax = thermalRange?.max ?? thermal.displayMaxTemp;
 
     return Stack(
       children: [
@@ -77,21 +79,14 @@ class _AppShellState extends ConsumerState<AppShell> {
             ],
           ),
         ),
-        if (pendingGuidance != null && activeAlert == null)
-          DirectionOverlay(
-            event: pendingGuidance,
-            humanDetected: pendingGuidanceHumanDetected,
-            onConfirm: () {
-              ref.read(alertsProvider.notifier).confirmGuidanceAlert();
-            },
-            onDismiss: () {
-              ref.read(alertsProvider.notifier).dismissGuidance();
-            },
-          ),
         if (activeAlert != null)
           AlertOverlay(
             event: activeAlert,
             humanDetected: activeAlertHumanDetected,
+            thermalFrame: activeAlertThermalFrame,
+            thermalColorMap: thermal.colorMap,
+            thermalMinTemp: alertThermalMin,
+            thermalMaxTemp: alertThermalMax,
             onDismiss: () {
               ref.read(alertsProvider.notifier).dismissActiveAlert();
             },
