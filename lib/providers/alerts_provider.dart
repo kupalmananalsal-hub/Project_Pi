@@ -192,10 +192,10 @@ class AlertsController extends Notifier<AlertsState> {
       return;
     }
 
-    final thermal = ref.read(thermalProvider);
-    final humanDetected = event.humanDetected || thermal.humanDetected;
-    if (humanDetected) {
-      unawaited(_startThermalConfirmedAlert(event, thermal.frame));
+    if (event.humanDetected) {
+      unawaited(
+        _startThermalConfirmedAlert(event, ref.read(thermalProvider).frame),
+      );
       return;
     }
 
