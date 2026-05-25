@@ -77,6 +77,7 @@ def main() -> None:
         ),
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor="val_presence_loss",
+            mode="min",
             factor=0.5,
             patience=4,
         ),
