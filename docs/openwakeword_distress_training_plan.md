@@ -551,6 +551,7 @@ exists in the model directory.
 Start with:
 
 ```bash
+OPENWAKEWORD_MODEL_DIR=/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models
 OPENWAKEWORD_WAKE_THRESHOLD=0.65
 OPENWAKEWORD_VAD_THRESHOLD=0.50
 ```
@@ -572,7 +573,7 @@ OPENWAKEWORD_VAD_THRESHOLD=0.40
 Use per-phrase thresholds for phrases that are too sensitive or too strict:
 
 ```bash
-OPENWAKEWORD_MODEL_THRESHOLDS="tulong=0.55,help=0.70,save me=0.65,tulungan niyo ako=0.60,emergency=0.80"
+OPENWAKEWORD_MODEL_THRESHOLDS="tulong=0.55,help=0.65,save me=0.45,help me=0.45,please help=0.45,tulungan niyo ako=0.60,emergency=0.80"
 ```
 
 Recommended tuning procedure:

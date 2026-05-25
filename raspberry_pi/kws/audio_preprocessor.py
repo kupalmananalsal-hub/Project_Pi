@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 
-MODEL_DIR = Path("/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models")
+DEFAULT_MODEL_DIR = Path("/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models")
+
+
+def _model_dir_from_env() -> Path:
+    return Path(
+        os.getenv("OPENWAKEWORD_MODEL_DIR", str(DEFAULT_MODEL_DIR))
+    ).expanduser()
+
+
+MODEL_DIR = _model_dir_from_env()
 MODEL_PATH = str(MODEL_DIR) + "/"
 DEFAULT_WAKE_WORD_MODELS = [
     str(model_path)
@@ -43,12 +53,14 @@ class AudioPreprocessor:
             self._keyword_name(keyword): float(np.clip(threshold, 0.0, 1.0))
             for keyword, threshold in (wake_word_thresholds or {}).items()
         }
+        self.model_dir = _model_dir_from_env()
+        self.discovered_wake_word_models: list[str] = []
+        self.skipped_wake_word_models: dict[str, str] = {}
         self.configured_wake_word_models = (
             self._discover_onnx_model_paths()
             if wake_word_models is None
             else wake_word_models
         )
-        self.skipped_wake_word_models: dict[str, str] = {}
         self.wake_word_models = self._valid_model_paths(
             self.configured_wake_word_models
         )
@@ -119,17 +131,28 @@ class AudioPreprocessor:
             vad_score = self._latest_model_vad_score()
         is_speech = vad_score >= self.vad_threshold
         wake_words: list[dict[str, object]] = []
+        scores: list[dict[str, object]] = []
 
         if is_speech and self.emit_wake_words:
             for model_name, raw_score in prediction.items():
                 if model_name == "vad":
                     continue
                 score = self._as_float(raw_score)
+                keyword = self._keyword_name(str(model_name))
                 threshold = self._threshold_for_model(str(model_name))
+                scores.append(
+                    {
+                        "name": keyword,
+                        "raw_name": str(model_name),
+                        "score": score,
+                        "threshold": threshold,
+                    }
+                )
                 if score >= threshold:
                     wake_words.append(
                         {
-                            "name": self._keyword_name(str(model_name)),
+                            "name": keyword,
+                            "raw_name": str(model_name),
                             "score": score,
                             "threshold": threshold,
                         }
@@ -139,6 +162,7 @@ class AudioPreprocessor:
             frame,
             is_speech=is_speech,
             wake_words=wake_words,
+            scores=scores,
             vad_score=vad_score,
             available=True,
         )
@@ -159,9 +183,12 @@ class AudioPreprocessor:
             "openwakeword_is_speech": bool(result.get("is_speech", False)),
             "openwakeword_global_threshold": self.wake_word_threshold,
             "openwakeword_model_thresholds": self.wake_word_thresholds,
+            "openwakeword_model_dir": str(self.model_dir),
+            "openwakeword_discovered_models": self.discovered_wake_word_models,
             "openwakeword_loaded_models": self.wake_word_models,
             "openwakeword_missing_models": self.missing_wake_word_models,
             "openwakeword_skipped_models": self.skipped_wake_word_models,
+            "openwakeword_scores": self._scores_from_result(result),
             "openwakeword_wake_words": wake_words,
             "openwakeword_wake_word": (
                 top_wake_word.get("name") if top_wake_word else None
@@ -186,12 +213,14 @@ class AudioPreprocessor:
         vad_score: float,
         available: bool,
         wake_words: list[dict[str, object]] | None = None,
+        scores: list[dict[str, object]] | None = None,
         error: str | None = None,
     ) -> dict[str, object]:
         return {
             "cleaned_audio": cleaned_audio,
             "is_speech": is_speech,
             "wake_words": wake_words or [],
+            "scores": scores or [],
             "vad_score": vad_score,
             "available": available,
             "error": error,
@@ -205,6 +234,13 @@ class AudioPreprocessor:
         return [wake_word for wake_word in wake_words if isinstance(wake_word, dict)]
 
     @staticmethod
+    def _scores_from_result(result: dict[str, object]) -> list[dict[str, object]]:
+        scores = result.get("scores", [])
+        if not isinstance(scores, list):
+            return []
+        return [score for score in scores if isinstance(score, dict)]
+
+    @staticmethod
     def _keyword_name(model_name: str) -> str:
         keyword = Path(model_name).stem
         return " ".join(
@@ -215,13 +251,24 @@ class AudioPreprocessor:
         keyword = self._keyword_name(model_name)
         return self.wake_word_thresholds.get(keyword, self.wake_word_threshold)
 
-    @staticmethod
-    def _discover_onnx_model_paths() -> list[str]:
-        return [
+    def _discover_onnx_model_paths(self) -> list[str]:
+        if not self.model_dir.is_dir():
+            self.skipped_wake_word_models[str(self.model_dir)] = (
+                "model directory not found"
+            )
+            return []
+
+        discovered = [
             str(model_path)
-            for model_path in sorted(MODEL_DIR.glob("*.onnx"))
+            for model_path in sorted(self.model_dir.glob("*.onnx"))
             if model_path.is_file()
         ]
+        self.discovered_wake_word_models = discovered
+        if not discovered:
+            self.skipped_wake_word_models[str(self.model_dir)] = (
+                "no .onnx files found"
+            )
+        return discovered
 
     def _valid_model_paths(self, model_paths: list[str]) -> list[str]:
         valid_paths: list[str] = []

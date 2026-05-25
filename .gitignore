@@ -50,3 +50,5 @@ app.*.map.json
 *.umdl
 raspberry_pi/kws/snowboy_training/recordings/
 raspberry_pi/kws/snowboy_training/models/
+raspberry_pi/kws/openwakeword_models/*.onnx
+raspberry_pi/kws/openwakeword_models/*.onnx.data

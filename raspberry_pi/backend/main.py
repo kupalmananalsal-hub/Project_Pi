@@ -1235,8 +1235,13 @@ async def api_alerts(event: AlertIn):
 
     payload = enrich_alert_payload(payload, thermal_payload)
     stored_payload = await asyncio.to_thread(alert_store.insert, payload)
-    if payload["should_alert"]:
-        await alerts.publish(stored_payload)
+    openwakeword_detection = str(payload.get("source", "")).lower() == "openwakeword"
+    if payload["should_alert"] or openwakeword_detection:
+        broadcast_payload = dict(stored_payload)
+        if openwakeword_detection and not payload["should_alert"]:
+            broadcast_payload["alert_level"] = "visual_only"
+            broadcast_payload["ui_note"] = "openwakeword_detection_below_final_alert_threshold"
+        await alerts.publish(broadcast_payload)
         return {"ok": True, "event": stored_payload}
     return {"ok": True, "suppressed": True, "event": stored_payload}
 

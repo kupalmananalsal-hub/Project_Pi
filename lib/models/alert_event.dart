@@ -119,7 +119,16 @@ class AlertEvent {
   }
 
   bool get isEmergencyKeyword {
-    return isHelpKeyword || isTulongKeyword;
+    return _keywordWords.any(
+      const {
+        'help',
+        'tulong',
+        'save',
+        'saklolo',
+        'emergency',
+        'ambulance',
+      }.contains,
+    );
   }
 
   bool get isLive => streamType == 'live';

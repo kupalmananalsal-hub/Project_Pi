@@ -112,9 +112,11 @@ openWakeWord is configured through systemd environment variables:
 
 ```ini
 Environment=OPENWAKEWORD_ENABLED=1
+Environment="OPENWAKEWORD_MODEL_DIR=/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models"
 Environment=OPENWAKEWORD_VAD_THRESHOLD=0.50
 Environment=OPENWAKEWORD_WAKE_THRESHOLD=0.65
-Environment="OPENWAKEWORD_MODEL_THRESHOLDS=tulong=0.55,help=0.65,save_me=0.65,help_me=0.65,please_help=0.65"
+Environment="OPENWAKEWORD_MODEL_THRESHOLDS=tulong=0.55,help=0.65,save me=0.45,help me=0.45,please help=0.45"
+Environment=OPENWAKEWORD_SCORE_LOG_THRESHOLD=0.30
 Environment=OPENWAKEWORD_SPEEX_NOISE_SUPPRESSION=1
 ```
 

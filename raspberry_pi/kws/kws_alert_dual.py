@@ -474,12 +474,21 @@ def write_audio_status(status_path: Path, packet: dict[str, object]) -> None:
         "openwakeword_available": packet.get("openwakeword_available", False),
         "openwakeword_vad_score": packet.get("openwakeword_vad_score", 0.0),
         "openwakeword_is_speech": packet.get("openwakeword_is_speech", True),
+        "openwakeword_model_dir": packet.get("openwakeword_model_dir"),
+        "openwakeword_discovered_models": packet.get(
+            "openwakeword_discovered_models",
+            [],
+        ),
+        "openwakeword_loaded_models": packet.get("openwakeword_loaded_models", []),
+        "openwakeword_missing_models": packet.get("openwakeword_missing_models", []),
+        "openwakeword_skipped_models": packet.get("openwakeword_skipped_models", {}),
         "openwakeword_wake_word": packet.get("openwakeword_wake_word"),
         "openwakeword_wake_word_score": packet.get(
             "openwakeword_wake_word_score",
             0.0,
         ),
         "openwakeword_wake_words": packet.get("openwakeword_wake_words", []),
+        "openwakeword_scores": packet.get("openwakeword_scores", []),
         "openwakeword_error": packet.get("openwakeword_error"),
         "source": "kws_shared_audio",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -648,12 +657,21 @@ def _event_context(data: dict[str, object]) -> dict[str, object]:
         "openwakeword_available": data.get("openwakeword_available", False),
         "openwakeword_vad_score": data.get("openwakeword_vad_score", 0.0),
         "openwakeword_is_speech": data.get("openwakeword_is_speech", True),
+        "openwakeword_model_dir": data.get("openwakeword_model_dir"),
+        "openwakeword_discovered_models": data.get(
+            "openwakeword_discovered_models",
+            [],
+        ),
+        "openwakeword_loaded_models": data.get("openwakeword_loaded_models", []),
+        "openwakeword_missing_models": data.get("openwakeword_missing_models", []),
+        "openwakeword_skipped_models": data.get("openwakeword_skipped_models", {}),
         "openwakeword_wake_word": data.get("openwakeword_wake_word"),
         "openwakeword_wake_word_score": data.get(
             "openwakeword_wake_word_score",
             0.0,
         ),
         "openwakeword_wake_words": data.get("openwakeword_wake_words", []),
+        "openwakeword_scores": data.get("openwakeword_scores", []),
     }
     openwakeword_error = data.get("openwakeword_error")
     if openwakeword_error:
@@ -715,11 +733,27 @@ def main() -> None:
             True,
         ),
     )
+    print(
+        "openWakeWord model directory: "
+        f"{audio_preprocessor.model_dir}",
+        flush=True,
+    )
+    if audio_preprocessor.discovered_wake_word_models:
+        print(
+            "openWakeWord discovered .onnx files: "
+            f"{audio_preprocessor.discovered_wake_word_models}",
+            flush=True,
+        )
     if audio_preprocessor.available:
         loaded_openwakeword_models = audio_preprocessor.wake_word_models
+        loaded_openwakeword_phrases = [
+            _friendly_keyword(model_path)
+            for model_path in loaded_openwakeword_models
+        ]
         print(
             "openWakeWord ready: "
             f"models={loaded_openwakeword_models or ['vad-only']}, "
+            f"phrases={loaded_openwakeword_phrases or ['vad-only']}, "
             f"vad={audio_preprocessor.vad_threshold:.2f}, "
             f"wake={audio_preprocessor.wake_word_threshold:.2f}",
             flush=True,
@@ -753,6 +787,9 @@ def main() -> None:
     else:
         print("openWakeWord disabled; continuing with Vosk/Snowboy only", flush=True)
     noise_log_interval = float(os.getenv("NOISE_LOG_INTERVAL_SECONDS", "5.0"))
+    openwakeword_score_log_threshold = float(
+        os.getenv("OPENWAKEWORD_SCORE_LOG_THRESHOLD", "0.30")
+    )
     adaptive_sensitivity = AdaptiveSnowboySensitivity(
         quiet_value=float(os.getenv("SNOWBOY_SENSITIVITY_QUIET", "0.50")),
         moderate_value=float(os.getenv("SNOWBOY_SENSITIVITY_MODERATE", "0.40")),
@@ -883,6 +920,7 @@ def main() -> None:
 
         next_flush_at = 0.0
         next_noise_log_at = 0.0
+        next_openwakeword_score_log_at = 0.0
         next_config_poll_at = 0.0
         while RUNNING:
             now = time.monotonic()
@@ -951,6 +989,13 @@ def main() -> None:
                     if keyword:
                         context = _event_context(packet)
                         context["openwakeword_model"] = keyword
+                        print(
+                            "openWakeWord detection: "
+                            f"{keyword} "
+                            f"score={float(openwakeword_match.get('score', 0.0)):.3f} "
+                            f"threshold={float(openwakeword_match.get('threshold', 0.0)):.3f}",
+                            flush=True,
+                        )
                         dispatcher.submit(
                             keyword,
                             float(openwakeword_match.get("score", 0.0)),
@@ -960,6 +1005,31 @@ def main() -> None:
                         openwakeword_posted = True
 
                 if not openwakeword_posted:
+                    if now >= next_openwakeword_score_log_at:
+                        openwakeword_scores = [
+                            score
+                            for score in packet.get("openwakeword_scores", [])
+                            if isinstance(score, dict)
+                            and float(score.get("score", 0.0))
+                            >= openwakeword_score_log_threshold
+                        ]
+                        if openwakeword_scores:
+                            openwakeword_scores.sort(
+                                key=lambda score: float(score.get("score", 0.0)),
+                                reverse=True,
+                            )
+                            formatted_scores = ", ".join(
+                                f"{score.get('name')}="
+                                f"{float(score.get('score', 0.0)):.3f}/"
+                                f"{float(score.get('threshold', 0.0)):.3f}"
+                                for score in openwakeword_scores[:5]
+                            )
+                            print(
+                                "openWakeWord scores below threshold: "
+                                f"{formatted_scores}",
+                                flush=True,
+                            )
+                        next_openwakeword_score_log_at = now + 1.0
                     put_latest(vosk_queue, packet)
                     put_latest(snowboy_queue, packet)
 
