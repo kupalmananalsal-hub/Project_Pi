@@ -8,6 +8,7 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -23,6 +24,7 @@ from noise_suppressor import (
     NoiseSuppressionConfigStore,
     NoiseSuppressor,
 )
+from wav2vec2_verifier import Wav2Vec2Verifier
 
 
 RUNNING = True
@@ -38,6 +40,7 @@ TAGALOG_KEYWORD_ALIASES: dict[str, set[str]] = {
     "agai": {"agai", "agay"},
     "sunog": {"sunog"},
 }
+TAGALOG_KEYWORDS: tuple[str, ...] = tuple(TAGALOG_KEYWORD_ALIASES)
 
 
 def _split_env(value: str) -> list[str]:
@@ -548,6 +551,17 @@ def split_audio_chunk(data: bytes, channels: int) -> dict[str, object]:
     }
 
 
+def audio_samples_to_float32(samples: np.ndarray) -> np.ndarray:
+    audio = np.asarray(samples).reshape(-1)
+    if audio.size == 0:
+        return np.asarray([], dtype=np.float32)
+
+    audio = audio.astype(np.float32, copy=False)
+    if float(np.max(np.abs(audio))) > 1.5:
+        audio = audio / 32768.0
+    return np.clip(audio, -1.0, 1.0).astype(np.float32, copy=False)
+
+
 def estimate_direction(left_chunk: np.ndarray, right_chunk: np.ndarray, sample_rate: int = SAMPLE_RATE) -> str:
     left = np.asarray(left_chunk, dtype=np.float32)
     right = np.asarray(right_chunk, dtype=np.float32)
@@ -576,10 +590,30 @@ def vosk_worker(
     dispatcher: DetectionDispatcher,
     config: dict[str, object],
 ) -> None:
-    recognizer = create_vosk_recognizer(config["model_path"], config["sample_rate"])
+    sample_rate = int(config["sample_rate"])
+    recognizer = create_vosk_recognizer(config["model_path"], sample_rate)
     debug = bool(config["debug"])
     last_debug_text = ""
+    confidence = float(config["confidence"])
+    verify_below_confidence = float(config["wav2vec2_verify_below_confidence"])
+    context_seconds = max(0.1, float(config["wav2vec2_context_seconds"]))
+    max_context_samples = max(int(sample_rate * context_seconds), sample_rate)
+    recent_audio: deque[np.ndarray] = deque()
+    recent_audio_sample_count = 0
+    verifier = (
+        Wav2Vec2Verifier(sample_rate=sample_rate)
+        if bool(config["wav2vec2_enabled"])
+        else None
+    )
     print(f"Vosk ready for Tagalog distress keywords: {config['model_path']}", flush=True)
+    if verifier is not None:
+        print(
+            "wav2vec2 verifier "
+            f"backend={verifier.backend} available={verifier.available}",
+            flush=True,
+        )
+    else:
+        print("wav2vec2 verifier disabled by WAV2VEC2_VERIFIER_ENABLED=0", flush=True)
 
     while RUNNING:
         try:
@@ -587,23 +621,73 @@ def vosk_worker(
         except queue.Empty:
             continue
 
+        mono_samples = np.asarray(data["mono_samples"], dtype=np.int16)
+        recent_audio.append(mono_samples.copy())
+        recent_audio_sample_count += int(mono_samples.size)
+        while recent_audio_sample_count > max_context_samples and recent_audio:
+            removed_samples = recent_audio.popleft()
+            recent_audio_sample_count -= int(removed_samples.size)
+
         text = read_vosk_text(recognizer, data["mono_bytes"])
         if debug and text and text != last_debug_text:
             print(f"vosk heard: {text}", flush=True)
             last_debug_text = text
 
-        if text:
-            dispatcher.note_vosk_text(text)
-
         tagalog_keyword = detect_tagalog_keyword(text)
         if tagalog_keyword is not None:
+            final_confidence = confidence
+            context = _event_context(data)
+            context["vosk_text"] = text
+            print(
+                "Vosk detection: "
+                f"{tagalog_keyword} confidence={confidence:.2f} text='{text}'",
+                flush=True,
+            )
+            if (
+                verifier is not None
+                and tagalog_keyword in TAGALOG_KEYWORDS
+                and final_confidence < verify_below_confidence
+            ):
+                verification_samples = (
+                    np.concatenate(tuple(recent_audio))
+                    if recent_audio
+                    else mono_samples
+                )
+                verified, verified_confidence = verifier.verify(
+                    audio_samples_to_float32(verification_samples),
+                    tagalog_keyword,
+                )
+                if not verified:
+                    print(
+                        "wav2vec2 verifier rejected Vosk detection: "
+                        f"{tagalog_keyword}",
+                        flush=True,
+                    )
+                    recognizer.Reset()
+                    recent_audio.clear()
+                    recent_audio_sample_count = 0
+                    continue
+
+                print(
+                    "wav2vec2 verifier confirmed Vosk detection: "
+                    f"{tagalog_keyword} confidence={verified_confidence:.2f}",
+                    flush=True,
+                )
+                context["wav2vec2_verified"] = True
+                context["wav2vec2_backend"] = verifier.backend
+                context["vosk_original_confidence"] = final_confidence
+                final_confidence = verified_confidence
+
+            dispatcher.note_vosk_text(text)
             dispatcher.submit(
                 tagalog_keyword,
-                float(config["confidence"]),
+                final_confidence,
                 "vosk",
-                context=_event_context(data),
+                context=context,
             )
             recognizer.Reset()
+            recent_audio.clear()
+            recent_audio_sample_count = 0
 
 
 def snowboy_worker(
@@ -882,6 +966,13 @@ def main() -> None:
                 "sample_rate": sample_rate,
                 "confidence": float(os.getenv("VOSK_KEYWORD_CONFIDENCE", "0.40")),
                 "debug": debug,
+                "wav2vec2_enabled": _env_bool("WAV2VEC2_VERIFIER_ENABLED", True),
+                "wav2vec2_verify_below_confidence": float(
+                    os.getenv("WAV2VEC2_VERIFY_BELOW_CONFIDENCE", "0.70")
+                ),
+                "wav2vec2_context_seconds": float(
+                    os.getenv("WAV2VEC2_CONTEXT_SECONDS", "2.0")
+                ),
             },
         ),
         daemon=True,

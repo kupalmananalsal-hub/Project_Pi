@@ -18,6 +18,9 @@ Environment=ALERT_QUEUE_PATH=/tmp/project_pi_alerts.jsonl
 Environment=PROJECT_PI_AUDIO_STATUS_PATH=/tmp/project_pi_audio_status.json
 Environment=MIC_NAME_HINT=seeed
 Environment=VOSK_KEYWORD_CONFIDENCE=0.40
+Environment=WAV2VEC2_MODEL_PATH=Khalsuu/filipino-wav2vec2-l-xls-r-300m-official
+Environment=WAV2VEC2_VERIFY_BELOW_CONFIDENCE=0.70
+Environment=WAV2VEC2_CONTEXT_SECONDS=2.0
 Environment=KWS_CHANNELS=2
 Environment=KWS_CHUNK_FRAMES=1280
 Environment=NOISE_GATE_THRESHOLD=0.015
@@ -51,6 +54,7 @@ Environment=SNOWBOY_SUPPRESS_AFTER_TULONG_SECONDS=2.2
 Environment=KWS_COOLDOWN_SECONDS=2.0
 Environment=KWS_DEBUG=0
 ExecStart=/home/thesis/kws-env/bin/python /home/thesis/Project_Pi/raspberry_pi/kws/kws_alert_dual.py
+MemoryMax=3G
 Restart=always
 RestartSec=3
 TimeoutStopSec=15

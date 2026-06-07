@@ -22,9 +22,9 @@ echo "Installing system Speex library..."
 "${SUDO[@]}" apt-get update
 "${SUDO[@]}" apt-get install -y libspeexdsp-dev
 
-echo "Installing Python openWakeWord ONNX dependencies into ${KWS_VENV}..."
+echo "Installing Python openWakeWord and wav2vec2 dependencies into ${KWS_VENV}..."
 "${KWS_PIP}" install --upgrade pip wheel setuptools
-"${KWS_PIP}" install --upgrade openwakeword onnxruntime soundfile
+"${KWS_PIP}" install --upgrade openwakeword onnxruntime soundfile transformers torch
 
 PY_TAG="$("${KWS_PYTHON}" -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
 ARCH="$("${KWS_PYTHON}" -c 'import platform; print(platform.machine())')"
@@ -50,4 +50,4 @@ fi
 "${KWS_PYTHON}" -c "import speexdsp_ns; print('Speex OK')"
 "${KWS_PYTHON}" -c "import onnxruntime; print('ONNX Runtime OK')"
 
-echo "openWakeWord dependency install complete."
+echo "KWS dependency install complete."

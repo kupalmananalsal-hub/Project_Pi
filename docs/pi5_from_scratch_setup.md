@@ -353,7 +353,7 @@ sudo apt install -y \
 python3 -m venv --system-site-packages ~/kws-env
 source ~/kws-env/bin/activate
 python -m pip install --upgrade pip wheel setuptools
-python -m pip install vosk pyaudio numpy requests openwakeword onnxruntime soundfile
+python -m pip install vosk pyaudio numpy requests openwakeword onnxruntime soundfile transformers torch
 deactivate
 ```
 

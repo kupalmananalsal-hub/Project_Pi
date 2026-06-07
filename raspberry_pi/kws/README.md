@@ -11,6 +11,8 @@ emergency alert system.
   - Custom `tulong` and `help` models can post alerts too.
 - Vosk detects `tulong` using the Tagalog model:
   `/home/thesis/vosk-models/vosk-model-tl-ph-generic-0.6`
+- Low-confidence Tagalog Vosk detections are verified with the Filipino
+  wav2vec2 model `Khalsuu/filipino-wav2vec2-l-xls-r-300m-official`.
 - Snowboy detects `help` using a personal model:
   `/home/thesis/snowboy/examples/Python3/resources/models/help.pmdl`
 
@@ -53,6 +55,7 @@ Expected startup:
 ```text
 openWakeWord ready
 Vosk ready for tulong
+wav2vec2 verifier backend=transformers available=True
 Snowboy ready for help
 Listening for: tulong via Vosk, help via Snowboy
 ```
@@ -61,9 +64,10 @@ If openWakeWord is not installed yet, the service logs a warning and continues
 with the existing Vosk/Snowboy path. This keeps the current emergency alert
 pipeline running while dependencies are installed.
 
-## Install openWakeWord
+## Install openWakeWord and wav2vec2 verifier
 
-Install the optional third engine inside the same KWS virtual environment:
+Install the optional openWakeWord engine and Filipino wav2vec2 verifier inside
+the same KWS virtual environment:
 
 ```bash
 cd ~/Project_Pi
@@ -76,7 +80,7 @@ Manual dependency install, if you are not using the helper script:
 ```bash
 sudo apt-get update
 sudo apt-get install -y libspeexdsp-dev
-~/kws-env/bin/pip install --upgrade openwakeword onnxruntime soundfile
+~/kws-env/bin/pip install --upgrade openwakeword onnxruntime soundfile transformers torch
 
 PY_TAG="$(~/kws-env/bin/python -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
 ~/kws-env/bin/pip install \
