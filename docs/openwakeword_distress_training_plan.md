@@ -508,9 +508,7 @@ because they intentionally activate on more phrases.
 The initial Colab session downloads repositories, Python packages, Piper voices,
 background data, RIR data, and feature `.npy` files. After those files exist in
 the runtime or Google Drive, synthetic speech generation, augmentation, training,
-and ONNX export run locally without external APIs. TFLite conversion is optional
-and should only be enabled when the Colab TensorFlow/ONNX converter stack is
-working; Project Pi uses the exported ONNX models directly.
+ONNX export, and TFLite conversion run locally without external APIs.
 
 For repeatable offline reruns, copy these folders/files to Google Drive:
 
@@ -526,7 +524,7 @@ validation_set_features.npy
 
 ## Copy Models To The Pi
 
-Copy each finished `.onnx` file and its `.onnx.data` companion to:
+Copy each finished `.tflite` file to:
 
 ```text
 /home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/
@@ -535,8 +533,7 @@ Copy each finished `.onnx` file and its `.onnx.data` companion to:
 Example:
 
 ```bash
-scp my_custom_model/save_me.onnx my_custom_model/save_me.onnx.data \
-  thesis@<PI_IP>:/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/
+scp my_custom_model/save_me.tflite thesis@10.159.83.236:/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/
 ```
 
 Then restart:
@@ -548,42 +545,6 @@ sudo journalctl -u kws-alert.service -f
 
 The service skips missing files and loads every trained distress model that
 exists in the model directory.
-
-Confirm the service discovered and loaded the model:
-
-```bash
-sudo journalctl -u kws-alert.service -n 80 --no-pager | grep -i openwakeword
-```
-
-Expected log lines include `openWakeWord discovered .onnx files` and
-`openWakeWord ready`.
-
-## Pi Model Validation
-
-Before relying on a new model in the full alert flow, score it live from the Pi
-microphones:
-
-```bash
-cd ~/Project_Pi/raspberry_pi/kws
-source ~/kws-env/bin/activate
-python validate_tagalog_models.py \
-  --phrases tulong saklolo "tulungan niyo ako" "tulungan mo ako" \
-  --threshold 0.30 \
-  --vad-threshold 0.40
-```
-
-For English models:
-
-```bash
-python validate_tagalog_models.py \
-  --phrases help "save me" "help me" "please help" "i need help" emergency \
-  --threshold 0.45 \
-  --vad-threshold 0.40
-```
-
-Use the maximum score printed for each real utterance as the first threshold
-guide, then confirm it again through `kws-alert.service` and the Flutter alert
-overlay.
 
 ## Pi Threshold Tuning
 
