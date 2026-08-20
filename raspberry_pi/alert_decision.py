@@ -41,7 +41,7 @@ DEFAULT_POLICY_PATH = (
 
 @dataclass(frozen=True)
 class AlertPolicy:
-    policy_version: str = "phase1.1.safe_defaults"
+    policy_version: str = "phase1.2.safe_defaults"
     advisory_threshold: float = 0.70
     critical_threshold: float = 0.85
     thermal_freshness_seconds: float = 1.25
@@ -192,9 +192,11 @@ class AlertDecisionEngine:
     """
     Authoritative alert policy for Project Pi.
 
-    `final_confidence` is retained as a legacy fusion score:
-    keyword confidence + applied thermal boost - noise penalty. It is not a
-    calibrated probability and should not be treated as one.
+    `keyword_confidence` is the raw detector score kept for compatibility.
+    `adjusted_voice_confidence` is the raw score after the SNR penalty.
+    `final_confidence` is a rule-based fusion score:
+    adjusted voice confidence + applied thermal boost. It is not a calibrated
+    probability and should not be treated as one.
     """
 
     def __init__(
@@ -224,7 +226,8 @@ class AlertDecisionEngine:
     ) -> dict[str, Any]:
         now = self.clock()
         keyword = str(keyword_event.get("keyword", "")).strip().lower()
-        self.keyword_confidence = self._as_float(keyword_event.get("confidence"))
+        raw_voice_confidence = self._as_float(keyword_event.get("confidence"))
+        self.keyword_confidence = raw_voice_confidence
         thermal = self._thermal_evidence(thermal_frame)
         self.thermal_confidence_boost = thermal.confidence_boost
 
@@ -240,15 +243,17 @@ class AlertDecisionEngine:
         )
         noise_penalty = self._noise_penalty_for_snr(snr_db)
 
-        final_confidence = min(
-            max(self.keyword_confidence + thermal.confidence_boost - noise_penalty, 0.0),
-            1.0,
+        adjusted_voice_confidence = self._clamp01(
+            raw_voice_confidence - noise_penalty,
+        )
+        final_confidence = self._clamp01(
+            adjusted_voice_confidence + thermal.confidence_boost,
         )
 
         repeat_count = 0
         is_medium_voice = (
             self.policy.advisory_threshold
-            <= self.keyword_confidence
+            <= raw_voice_confidence
             < self.policy.critical_threshold
         )
         if keyword and is_medium_voice:
@@ -260,6 +265,8 @@ class AlertDecisionEngine:
             keyword_event=keyword_event,
             thermal=thermal,
             repeat_count=repeat_count,
+            raw_voice_confidence=raw_voice_confidence,
+            final_confidence=final_confidence,
         )
         alert_level = self._legacy_alert_level(state)
         should_alert = state in {
@@ -285,7 +292,10 @@ class AlertDecisionEngine:
 
         decision_factors = {
             "keyword_confidence": round(self.keyword_confidence, 4),
+            "raw_voice_confidence": round(raw_voice_confidence, 4),
+            "adjusted_voice_confidence": round(adjusted_voice_confidence, 4),
             "thermal_boost": round(thermal.confidence_boost, 4),
+            "applied_thermal_boost": round(thermal.confidence_boost, 4),
             "raw_thermal_boost": round(thermal.raw_confidence_boost, 4),
             "thermal_confidence": (
                 round(thermal.thermal_confidence, 4)
@@ -295,7 +305,7 @@ class AlertDecisionEngine:
             "noise_penalty": round(noise_penalty, 4),
             "legacy_fusion_score": round(final_confidence, 4),
             "legacy_fusion_note": (
-                "keyword_confidence + thermal_boost - noise_penalty; "
+                "adjusted_voice_confidence + applied_thermal_boost; "
                 "not a calibrated probability"
             ),
             "human_detected": thermal.state == ThermalState.POSITIVE,
@@ -342,6 +352,8 @@ class AlertDecisionEngine:
             "policy_version": self.policy.policy_version,
             "policy_source": self.policy.policy_source,
             "keyword_confidence": round(self.keyword_confidence, 4),
+            "raw_voice_confidence": round(raw_voice_confidence, 4),
+            "adjusted_voice_confidence": round(adjusted_voice_confidence, 4),
             "thermal_boost": round(thermal.confidence_boost, 4),
         }
 
@@ -351,19 +363,14 @@ class AlertDecisionEngine:
         keyword_event: dict[str, Any],
         thermal: ThermalEvidence,
         repeat_count: int,
+        raw_voice_confidence: float,
+        final_confidence: float,
     ) -> tuple[DecisionState, AlertModality, str]:
         if str(keyword_event.get("event", "")).strip().lower() == "system_fault":
             return (
                 DecisionState.SYSTEM_FAULT,
                 AlertModality.SENSOR_FAULT,
                 "sensor_failure",
-            )
-
-        if self.keyword_confidence < self.policy.advisory_threshold:
-            return (
-                DecisionState.SUPPRESSED,
-                AlertModality.VOICE_ONLY,
-                "voice_below_threshold",
             )
 
         thermal_positive = thermal.state == ThermalState.POSITIVE
@@ -373,13 +380,20 @@ class AlertDecisionEngine:
             else AlertModality.VOICE_ONLY
         )
 
-        if self.keyword_confidence >= self.policy.critical_threshold:
+        if raw_voice_confidence >= self.policy.critical_threshold:
             return (
                 DecisionState.CRITICAL,
                 modality,
                 "voice_confirmed_by_thermal"
                 if thermal_positive
                 else "voice_high_confidence",
+            )
+
+        if raw_voice_confidence < self.policy.advisory_threshold:
+            return (
+                DecisionState.SUPPRESSED,
+                AlertModality.VOICE_ONLY,
+                "voice_below_threshold",
             )
 
         if (
@@ -390,6 +404,13 @@ class AlertDecisionEngine:
                 DecisionState.CRITICAL,
                 modality,
                 "repeated_distress_escalation",
+            )
+
+        if final_confidence < self.policy.advisory_threshold:
+            return (
+                DecisionState.SUPPRESSED,
+                AlertModality.VOICE_ONLY,
+                "adjusted_voice_below_threshold",
             )
 
         if thermal_positive:
@@ -411,8 +432,11 @@ class AlertDecisionEngine:
 
         explicit_state = self._explicit_thermal_state(thermal_frame.get("thermal_state"))
         frame_age_seconds = self._as_optional_float(
-            thermal_frame.get("frame_age_seconds")
-            or thermal_frame.get("thermal_frame_age_seconds")
+            self._first_present(
+                thermal_frame,
+                "frame_age_seconds",
+                "thermal_frame_age_seconds",
+            )
         )
         frame_timestamp = (
             str(thermal_frame.get("timestamp"))
@@ -460,10 +484,10 @@ class AlertDecisionEngine:
             detected_part=str(thermal_frame.get("detected_part") or "none"),
             confidence_boost=applied_boost,
             raw_confidence_boost=raw_boost,
-            thermal_confidence=self._as_optional_float(
-                thermal_frame.get("thermal_confidence")
-            )
-            or model_confidence,
+            thermal_confidence=self._first_not_none(
+                self._as_optional_float(thermal_frame.get("thermal_confidence")),
+                model_confidence,
+            ),
             frame_timestamp=frame_timestamp,
             frame_age_seconds=frame_age_seconds,
             frame_valid=frame_valid,
@@ -558,15 +582,34 @@ class AlertDecisionEngine:
 
     @classmethod
     def _frame_valid(cls, thermal_frame: dict[str, Any]) -> bool:
+        explicit_frame_valid = None
         if "frame_valid" in thermal_frame:
-            return cls._as_bool(thermal_frame.get("frame_valid"))
+            explicit_frame_valid = cls._as_bool(thermal_frame.get("frame_valid"))
         temperatures = thermal_frame.get("temperatures")
-        if temperatures is None:
-            return True
+        if temperatures is not None:
+            return (
+                cls._temperature_frame_valid(temperatures)
+                and explicit_frame_valid is not False
+            )
+        if explicit_frame_valid is not None:
+            return explicit_frame_valid
+        return True
+
+    @staticmethod
+    def _temperature_frame_valid(temperatures: Any) -> bool:
         try:
-            return len(temperatures) >= 768
+            values = list(temperatures)
         except TypeError:
             return False
+        if len(values) != 768:
+            return False
+        for value in values:
+            try:
+                if not math.isfinite(float(value)):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return True
 
     @staticmethod
     def _noise_penalty_for_snr(snr_db: float) -> float:
@@ -575,6 +618,10 @@ class AlertDecisionEngine:
         if snr_db >= 10.0:
             return 0.05
         return 0.10
+
+    @staticmethod
+    def _clamp01(value: float) -> float:
+        return min(max(value, 0.0), 1.0)
 
     @staticmethod
     def _as_float(value: Any, fallback: float = 0.0) -> float:
@@ -613,5 +660,12 @@ class AlertDecisionEngine:
         for key in keys:
             value = payload.get(key)
             if value not in (None, ""):
+                return value
+        return None
+
+    @staticmethod
+    def _first_not_none(*values: Any) -> Any:
+        for value in values:
+            if value is not None:
                 return value
         return None

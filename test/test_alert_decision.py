@@ -166,6 +166,103 @@ class AlertDecisionEngineTest(unittest.TestCase):
         )
         self.assertEqual(result["thermal_state"], "invalid")
 
+    def test_high_raw_voice_poor_snr_remains_fail_safe_critical(self):
+        result = self.evaluate(0.90, None, snr_db=0.0)
+
+        self.assert_decision(
+            result,
+            "critical",
+            "voice_high_confidence",
+            "voice_only",
+            "full_alert",
+        )
+        self.assertEqual(result["decision_factors"]["noise_penalty"], 0.10)
+        self.assertEqual(result["decision_factors"]["adjusted_voice_confidence"], 0.80)
+
+    def test_medium_voice_good_snr_is_advisory(self):
+        result = self.evaluate(0.75, self.negative_thermal(), snr_db=25.0)
+
+        self.assert_decision(
+            result,
+            "advisory",
+            "thermal_negative",
+            "voice_only",
+            "visual_only",
+        )
+        self.assertEqual(result["decision_factors"]["adjusted_voice_confidence"], 0.75)
+        self.assertEqual(result["final_confidence"], 0.75)
+
+    def test_medium_voice_poor_snr_without_thermal_is_suppressed(self):
+        result = self.evaluate(0.75, self.negative_thermal(), snr_db=0.0)
+
+        self.assert_decision(
+            result,
+            "suppressed",
+            "adjusted_voice_below_threshold",
+            "voice_only",
+            "none",
+        )
+        self.assertFalse(result["should_alert"])
+        self.assertEqual(result["decision_factors"]["adjusted_voice_confidence"], 0.65)
+        self.assertEqual(result["final_confidence"], 0.65)
+
+    def test_medium_voice_poor_snr_positive_thermal_can_confirm(self):
+        result = self.evaluate(0.75, self.positive_thermal(), snr_db=0.0)
+
+        self.assert_decision(
+            result,
+            "confirmed",
+            "voice_confirmed_by_thermal",
+            "voice_thermal",
+            "full_alert",
+        )
+        self.assertEqual(result["decision_factors"]["adjusted_voice_confidence"], 0.65)
+        self.assertEqual(result["decision_factors"]["applied_thermal_boost"], 0.15)
+        self.assertEqual(result["final_confidence"], 0.80)
+
+    def test_medium_voice_very_poor_snr_insufficient_thermal_is_suppressed(self):
+        result = self.evaluate(
+            0.70,
+            self.positive_thermal(confidence_boost=0.05),
+            snr_db=0.0,
+        )
+
+        self.assert_decision(
+            result,
+            "suppressed",
+            "adjusted_voice_below_threshold",
+            "voice_only",
+            "none",
+        )
+        self.assertEqual(result["final_confidence"], 0.65)
+
+    def test_weak_voice_cannot_be_confirmed_by_positive_thermal_alone(self):
+        result = self.evaluate(0.60, self.positive_thermal(), snr_db=25.0)
+
+        self.assert_decision(
+            result,
+            "suppressed",
+            "voice_below_threshold",
+            "voice_only",
+            "none",
+        )
+        self.assertEqual(result["final_confidence"], 0.75)
+
+    def test_repeated_noisy_medium_voice_escalates(self):
+        first = self.evaluate(0.75, self.negative_thermal(), snr_db=0.0)
+        self.clock.advance(2.0)
+        second = self.evaluate(0.76, self.negative_thermal(), snr_db=0.0)
+
+        self.assertEqual(first["decision_state"], "suppressed")
+        self.assert_decision(
+            second,
+            "critical",
+            "repeated_distress_escalation",
+            "voice_only",
+            "full_alert",
+        )
+        self.assertEqual(second["decision_factors"]["repeat_count"], 2)
+
     def test_high_voice_no_thermal_is_critical(self):
         result = self.evaluate(0.95, None)
 
@@ -312,10 +409,121 @@ class AlertDecisionEngineTest(unittest.TestCase):
         self.assertEqual(result["decision_factors"]["thermal_boost"], 0.0)
         self.assertEqual(result["decision_factors"]["raw_thermal_boost"], 0.15)
 
+    def test_zero_thermal_values_are_preserved(self):
+        result = self.evaluate(
+            0.75,
+            self.positive_thermal(
+                confidence_boost=0.0,
+                thermal_confidence=0.0,
+                thermal_model_confidence=0.91,
+                frame_age_seconds=0.0,
+                thermal_frame_age_seconds=9.0,
+            ),
+        )
+
+        factors = result["decision_factors"]
+        self.assertEqual(factors["thermal_confidence"], 0.0)
+        self.assertEqual(factors["thermal_frame_age_seconds"], 0.0)
+        self.assertEqual(factors["thermal_boost"], 0.0)
+        self.assertEqual(factors["raw_thermal_boost"], 0.0)
+
     def test_invalid_positive_frame_receives_no_boost(self):
         result = self.evaluate(
             0.75,
             self.positive_thermal(frame_valid=False),
+        )
+
+        self.assertEqual(result["thermal_state"], "invalid")
+        self.assertEqual(result["decision_factors"]["thermal_boost"], 0.0)
+
+    def test_exactly_768_finite_thermal_values_are_valid(self):
+        result = self.evaluate(
+            0.75,
+            self.positive_thermal(temperatures=[34.0] * 768),
+        )
+
+        self.assertEqual(result["thermal_state"], "positive")
+        self.assertTrue(result["decision_factors"]["thermal_frame_valid"])
+        self.assertEqual(result["decision_factors"]["thermal_boost"], 0.15)
+
+    def test_thermal_frame_with_767_values_is_invalid(self):
+        result = self.evaluate(
+            0.75,
+            self.positive_thermal(temperatures=[34.0] * 767),
+        )
+
+        self.assertEqual(result["thermal_state"], "invalid")
+        self.assertFalse(result["decision_factors"]["thermal_frame_valid"])
+        self.assertEqual(result["decision_factors"]["thermal_boost"], 0.0)
+
+    def test_thermal_frame_with_769_values_is_invalid(self):
+        result = self.evaluate(
+            0.75,
+            self.positive_thermal(temperatures=[34.0] * 769),
+        )
+
+        self.assertEqual(result["thermal_state"], "invalid")
+        self.assertFalse(result["decision_factors"]["thermal_frame_valid"])
+        self.assertEqual(result["decision_factors"]["thermal_boost"], 0.0)
+
+    def test_thermal_frame_with_nan_is_invalid(self):
+        result = self.evaluate(
+            0.75,
+            self.positive_thermal(temperatures=[34.0] * 767 + [float("nan")]),
+        )
+
+        self.assertEqual(result["thermal_state"], "invalid")
+        self.assertEqual(result["decision_factors"]["thermal_boost"], 0.0)
+
+    def test_thermal_frame_with_positive_infinity_is_invalid(self):
+        result = self.evaluate(
+            0.75,
+            self.positive_thermal(temperatures=[34.0] * 767 + [float("inf")]),
+        )
+
+        self.assertEqual(result["thermal_state"], "invalid")
+        self.assertEqual(result["decision_factors"]["thermal_boost"], 0.0)
+
+    def test_thermal_frame_with_negative_infinity_is_invalid(self):
+        result = self.evaluate(
+            0.75,
+            self.positive_thermal(temperatures=[34.0] * 767 + [float("-inf")]),
+        )
+
+        self.assertEqual(result["thermal_state"], "invalid")
+        self.assertEqual(result["decision_factors"]["thermal_boost"], 0.0)
+
+    def test_thermal_frame_with_nonnumeric_value_is_invalid(self):
+        result = self.evaluate(
+            0.75,
+            self.positive_thermal(temperatures=[34.0] * 767 + ["bad"]),
+        )
+
+        self.assertEqual(result["thermal_state"], "invalid")
+        self.assertEqual(result["decision_factors"]["thermal_boost"], 0.0)
+
+    def test_valid_stale_positive_frame_has_no_boost(self):
+        result = self.evaluate(
+            0.75,
+            self.positive_thermal(
+                temperatures=[34.0] * 768,
+                frame_age_seconds=2.0,
+            ),
+        )
+
+        self.assertEqual(result["thermal_state"], "stale")
+        self.assertTrue(result["decision_factors"]["thermal_frame_valid"])
+        self.assertEqual(result["decision_factors"]["thermal_boost"], 0.0)
+        self.assertEqual(result["decision_factors"]["raw_thermal_boost"], 0.15)
+
+    def test_invalid_frame_with_positive_cached_data_has_no_boost(self):
+        result = self.evaluate(
+            0.75,
+            self.positive_thermal(
+                temperatures=[34.0] * 767,
+                thermal_model_confidence=0.99,
+                body_coverage=0.25,
+            ),
         )
 
         self.assertEqual(result["thermal_state"], "invalid")
@@ -355,7 +563,7 @@ class AlertDecisionEngineTest(unittest.TestCase):
         policy = AlertPolicy.load(policy_path)
 
         self.assertEqual(policy.policy_source, "file")
-        self.assertEqual(policy.policy_version, "phase1.1.2026-08-20")
+        self.assertEqual(policy.policy_version, "phase1.2.2026-08-20")
         self.assertEqual(policy.advisory_threshold, 0.70)
         self.assertEqual(policy.critical_threshold, 0.85)
         self.assertEqual(policy.thermal_freshness_seconds, 1.25)
@@ -370,7 +578,7 @@ class AlertDecisionEngineTest(unittest.TestCase):
             policy = AlertPolicy.load(Path(temp_dir) / "missing.yaml")
 
         self.assertEqual(policy.policy_source, "safe_defaults")
-        self.assertEqual(policy.policy_version, "phase1.1.safe_defaults")
+        self.assertEqual(policy.policy_version, "phase1.2.safe_defaults")
 
     def test_invalid_policy_files_fall_back_as_a_complete_unit(self):
         base = {
@@ -437,7 +645,7 @@ class AlertDecisionEngineTest(unittest.TestCase):
                     policy = AlertPolicy.load(path)
 
                     self.assertEqual(policy.policy_source, "safe_defaults")
-                    self.assertEqual(policy.policy_version, "phase1.1.safe_defaults")
+                    self.assertEqual(policy.policy_version, "phase1.2.safe_defaults")
                     self.assertEqual(policy.advisory_threshold, 0.70)
                     self.assertEqual(policy.critical_threshold, 0.85)
 

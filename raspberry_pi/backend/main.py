@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import subprocess
@@ -282,80 +283,93 @@ class AlertIdempotencyRegistry:
         self.ttl_seconds = float(ttl_seconds)
         self.max_entries = max(1, int(max_entries))
         self.clock = clock or time.monotonic
-        self._entries: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._in_flight: dict[str, dict[str, Any]] = {}
+        self._completed: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._lock = asyncio.Lock()
+        self._in_flight_warning_threshold = max(128, self.max_entries * 2)
 
     async def claim(self, event_id: str, fingerprint: str) -> dict[str, Any]:
         async with self._lock:
-            self._prune_locked()
-            entry = self._entries.get(event_id)
-            if entry is not None:
-                self._entries.move_to_end(event_id)
-                if entry["fingerprint"] != fingerprint:
+            self._prune_completed_locked()
+
+            in_flight = self._in_flight.get(event_id)
+            if in_flight is not None:
+                if in_flight["fingerprint"] != fingerprint:
                     return {"status": "conflict"}
-                if entry.get("response") is not None:
-                    return {
-                        "status": "duplicate",
-                        "response": dict(entry["response"]),
-                    }
-                return {"status": "in_flight", "future": entry["future"]}
+                return {"status": "in_flight", "future": in_flight["future"]}
+
+            completed = self._completed.get(event_id)
+            if completed is not None:
+                self._completed.move_to_end(event_id)
+                if completed["fingerprint"] != fingerprint:
+                    return {"status": "conflict"}
+                return {
+                    "status": "duplicate",
+                    "response": dict(completed["response"]),
+                }
 
             loop = asyncio.get_running_loop()
             future: asyncio.Future[dict[str, Any]] = loop.create_future()
-            self._entries[event_id] = {
+            self._in_flight[event_id] = {
                 "fingerprint": fingerprint,
-                "created_at": self.clock(),
+                "started_at": self.clock(),
                 "future": future,
-                "response": None,
             }
-            self._trim_capacity_locked()
+            if len(self._in_flight) > self._in_flight_warning_threshold:
+                print(
+                    "Alert idempotency warning: unusually many in-flight "
+                    f"events ({len(self._in_flight)})",
+                    file=sys.stderr,
+                    flush=True,
+                )
             return {"status": "claimed", "future": future}
 
     async def complete(self, event_id: str, response: dict[str, Any]) -> None:
         async with self._lock:
-            entry = self._entries.get(event_id)
-            if entry is None:
+            in_flight = self._in_flight.pop(event_id, None)
+            if in_flight is None:
                 return
             cached_response = dict(response)
             cached_response["duplicate_event"] = False
-            entry["response"] = cached_response
-            future = entry["future"]
+            self._completed[event_id] = {
+                "fingerprint": in_flight["fingerprint"],
+                "created_at": self.clock(),
+                "response": cached_response,
+            }
+            future = in_flight["future"]
             if not future.done():
                 future.set_result(cached_response)
-            self._entries.move_to_end(event_id)
-            self._trim_capacity_locked()
+            self._completed.move_to_end(event_id)
+            self._trim_completed_capacity_locked()
 
     async def fail(self, event_id: str, exc: BaseException) -> None:
         async with self._lock:
-            entry = self._entries.pop(event_id, None)
-            if entry is None:
+            in_flight = self._in_flight.pop(event_id, None)
+            if in_flight is None:
                 return
-            future = entry["future"]
+            future = in_flight["future"]
             if not future.done():
                 future.set_exception(exc)
 
     def snapshot_size(self) -> int:
-        return len(self._entries)
+        return len(self._completed)
 
-    def _prune_locked(self) -> None:
+    def in_flight_size(self) -> int:
+        return len(self._in_flight)
+
+    def _prune_completed_locked(self) -> None:
         now = self.clock()
         expired = [
             event_id
-            for event_id, entry in self._entries.items()
+            for event_id, entry in self._completed.items()
             if now - float(entry["created_at"]) > self.ttl_seconds
         ]
         for event_id in expired:
-            entry = self._entries.pop(event_id)
-            future = entry["future"]
-            if not future.done():
-                future.cancel()
+            self._completed.pop(event_id)
 
-    def _trim_capacity_locked(self) -> None:
-        while len(self._entries) > self.max_entries:
-            event_id, entry = self._entries.popitem(last=False)
-            future = entry["future"]
-            if not future.done():
-                future.cancel()
+    def _trim_completed_capacity_locked(self) -> None:
+        while len(self._completed) > self.max_entries:
+            self._completed.popitem(last=False)
 
 
 alert_store = AlertStore(ALERT_DB_PATH)
@@ -1013,6 +1027,29 @@ def duplicate_response(event: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "duplicate_event": True, "event": duplicate}
 
 
+def first_not_none(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def thermal_frame_values_valid(temperatures: object) -> bool:
+    try:
+        values = list(temperatures)  # type: ignore[arg-type]
+    except TypeError:
+        return False
+    if len(values) != 768:
+        return False
+    for value in values:
+        try:
+            if not math.isfinite(float(value)):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def thermal_evidence_for_decision(
     thermal_payload: dict[str, Any] | None,
     *,
@@ -1033,16 +1070,13 @@ def thermal_evidence_for_decision(
     if read_error is not None:
         evidence["thermal_error"] = str(read_error)
 
-    last_read_at = getattr(thermal, "_last_read_at", 0.0)
-    if last_read_at:
-        evidence["frame_age_seconds"] = max(0.0, time.monotonic() - last_read_at)
+    last_read_at = getattr(thermal, "_last_read_at", None)
+    if last_read_at is not None:
+        evidence["frame_age_seconds"] = max(0.0, time.monotonic() - float(last_read_at))
 
     temperatures = evidence.get("temperatures")
     if temperatures is not None:
-        try:
-            evidence["frame_valid"] = len(temperatures) >= 768
-        except TypeError:
-            evidence["frame_valid"] = False
+        evidence["frame_valid"] = thermal_frame_values_valid(temperatures)
 
     if not evidence.get("frame_valid", True):
         evidence["thermal_state"] = "invalid"
@@ -1071,16 +1105,21 @@ def enrich_alert_payload(payload: dict[str, Any], thermal_payload: dict[str, Any
     if direction == "center":
         direction = "front"
     payload["direction"] = direction
-    payload["direction_angle"] = payload.get("direction_angle") or latest_audio.get(
-        "direction_angle",
+    payload["direction_angle"] = first_not_none(
+        payload.get("direction_angle"),
+        latest_audio.get("direction_angle"),
         0,
     )
-    payload["direction_confidence"] = payload.get(
-        "direction_confidence",
-    ) or latest_audio.get("direction_confidence", 0.0)
-    payload["distance_estimate_m"] = payload.get(
-        "distance_estimate_m",
-    ) or payload.get("distance_m") or latest_audio.get("distance_estimate_m")
+    payload["direction_confidence"] = first_not_none(
+        payload.get("direction_confidence"),
+        latest_audio.get("direction_confidence"),
+        0.0,
+    )
+    payload["distance_estimate_m"] = first_not_none(
+        payload.get("distance_estimate_m"),
+        payload.get("distance_m"),
+        latest_audio.get("distance_estimate_m"),
+    )
     payload["phase"] = payload.get("phase") or "direction_guidance"
     decision = decision_engine.evaluate(payload, thermal_payload)
     decision_factors = decision["decision_factors"]

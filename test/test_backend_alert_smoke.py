@@ -458,6 +458,14 @@ class BackendAlertSmokeTest(unittest.TestCase):
                     "timestamp": "2026-08-20T00:00:00Z",
                     "snr_db": 25.0,
                 }
+                evaluations = {"count": 0}
+                original_evaluate = module.decision_engine.evaluate
+
+                def counting_evaluate(*args, **kwargs):
+                    evaluations["count"] += 1
+                    return original_evaluate(*args, **kwargs)
+
+                module.decision_engine.evaluate = counting_evaluate
 
                 first = self.run_alert(module, payload)
                 second = self.run_alert(module, payload)
@@ -465,8 +473,10 @@ class BackendAlertSmokeTest(unittest.TestCase):
                 self.assertFalse(first["duplicate_event"])
                 self.assertTrue(second["duplicate_event"])
                 self.assertEqual(first["event"]["id"], second["event"]["id"])
+                self.assertEqual(first["event"]["event_id"], second["event"]["event_id"])
                 self.assertEqual(len(module.alert_store.inserted), 1)
                 self.assertEqual(len(module.alerts.published), 1)
+                self.assertEqual(evaluations["count"], 1)
                 self.assertEqual(
                     len(module.decision_engine.repeat_history["help"]),
                     1,
@@ -475,6 +485,49 @@ class BackendAlertSmokeTest(unittest.TestCase):
                     second["event"]["decision_factors"]["repeat_count"],
                     1,
                 )
+            finally:
+                self.cleanup_backend(module, previous)
+
+    def test_retry_of_noisy_medium_voice_does_not_escalate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_backend_module(temp_dir)
+            try:
+                self.prepare_backend(module)
+                module.audio.latest = {"direction": "front", "snr_db": 0.0}
+                module.thermal = FakeThermal(
+                    module,
+                    {
+                        "thermal_state": "negative",
+                        "human_detected": False,
+                        "confidence_boost": 0.0,
+                        "temperatures": [24.0] * 768,
+                    },
+                )
+                payload = {
+                    "event_id": "noisy-retry",
+                    "keyword": "help",
+                    "confidence": 0.75,
+                    "source": "openwakeword",
+                    "timestamp": "2026-08-20T00:00:00Z",
+                    "snr_db": 0.0,
+                }
+
+                first = self.run_alert(module, payload)
+                second = self.run_alert(module, payload)
+
+                self.assertEqual(first["event"]["decision_state"], "suppressed")
+                self.assertEqual(second["event"]["decision_state"], "suppressed")
+                self.assertTrue(second["duplicate_event"])
+                self.assertEqual(
+                    first["event"]["decision_reason"],
+                    "adjusted_voice_below_threshold",
+                )
+                self.assertEqual(
+                    len(module.decision_engine.repeat_history["help"]),
+                    1,
+                )
+                self.assertEqual(len(module.alert_store.inserted), 1)
+                self.assertEqual(len(module.alerts.published), 1)
             finally:
                 self.cleanup_backend(module, previous)
 
@@ -613,6 +666,11 @@ class BackendAlertSmokeTest(unittest.TestCase):
 
                 self.assertFalse(first["duplicate_event"])
                 self.assertTrue(second["duplicate_event"])
+                self.assertEqual(first["event"]["id"], second["event"]["id"])
+                self.assertEqual(
+                    first["event"]["decision_state"],
+                    second["event"]["decision_state"],
+                )
                 self.assertEqual(len(module.alert_store.inserted), 1)
                 self.assertEqual(len(module.alerts.published), 1)
             finally:
@@ -692,6 +750,106 @@ class BackendAlertSmokeTest(unittest.TestCase):
                     )
 
                 self.assertLessEqual(module.alert_idempotency.snapshot_size(), 2)
+            finally:
+                self.cleanup_backend(module, previous)
+
+    def test_in_flight_event_is_not_evicted_by_completed_ttl_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_backend_module(temp_dir)
+            try:
+                clock = FakeClock()
+                registry = module.AlertIdempotencyRegistry(
+                    ttl_seconds=1.0,
+                    max_entries=1,
+                    clock=clock,
+                )
+
+                async def scenario():
+                    old = await registry.claim("old", "fp-old")
+                    await registry.complete("old", {"event_id": "old"})
+                    active = await registry.claim("active", "fp-active")
+                    clock.advance(2.0)
+                    trigger = await registry.claim("trigger", "fp-trigger")
+                    duplicate = await registry.claim("active", "fp-active")
+
+                    self.assertEqual(duplicate["status"], "in_flight")
+                    self.assertEqual(registry.in_flight_size(), 2)
+                    self.assertEqual(registry.snapshot_size(), 0)
+                    self.assertFalse(active["future"].cancelled())
+
+                    await registry.complete("active", {"event_id": "active"})
+                    result = await duplicate["future"]
+                    await registry.complete("trigger", {"event_id": "trigger"})
+                    self.assertEqual(result["event_id"], "active")
+                    self.assertFalse(old["future"].cancelled())
+                    self.assertFalse(trigger["future"].cancelled())
+
+                asyncio.run(scenario())
+            finally:
+                self.cleanup_backend(module, previous)
+
+    def test_in_flight_event_is_not_evicted_by_completed_capacity(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_backend_module(temp_dir)
+            try:
+                registry = module.AlertIdempotencyRegistry(
+                    ttl_seconds=60.0,
+                    max_entries=1,
+                )
+
+                async def scenario():
+                    active = await registry.claim("active", "fp-active")
+                    first = await registry.claim("completed-1", "fp-1")
+                    await registry.complete("completed-1", {"event_id": "completed-1"})
+                    second = await registry.claim("completed-2", "fp-2")
+                    await registry.complete("completed-2", {"event_id": "completed-2"})
+                    duplicate = await registry.claim("active", "fp-active")
+
+                    self.assertEqual(duplicate["status"], "in_flight")
+                    self.assertEqual(registry.in_flight_size(), 1)
+                    self.assertEqual(registry.snapshot_size(), 1)
+                    self.assertFalse(active["future"].cancelled())
+
+                    await registry.complete("active", {"event_id": "active"})
+                    result = await duplicate["future"]
+                    self.assertEqual(result["event_id"], "active")
+                    self.assertFalse(first["future"].cancelled())
+                    self.assertFalse(second["future"].cancelled())
+                    self.assertLessEqual(registry.snapshot_size(), 1)
+
+                asyncio.run(scenario())
+            finally:
+                self.cleanup_backend(module, previous)
+
+    def test_completed_cache_ttl_and_capacity_do_not_cancel_in_flight_future(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_backend_module(temp_dir)
+            try:
+                clock = FakeClock()
+                registry = module.AlertIdempotencyRegistry(
+                    ttl_seconds=1.0,
+                    max_entries=1,
+                    clock=clock,
+                )
+
+                async def scenario():
+                    active = await registry.claim("active", "fp-active")
+                    completed = await registry.claim("completed", "fp-completed")
+                    await registry.complete("completed", {"event_id": "completed"})
+                    clock.advance(2.0)
+                    next_completed = await registry.claim("next", "fp-next")
+                    await registry.complete("next", {"event_id": "next"})
+
+                    self.assertFalse(active["future"].cancelled())
+                    self.assertFalse(completed["future"].cancelled())
+                    self.assertFalse(next_completed["future"].cancelled())
+                    self.assertEqual(registry.in_flight_size(), 1)
+                    self.assertLessEqual(registry.snapshot_size(), 1)
+
+                    await registry.complete("active", {"event_id": "active"})
+                    self.assertEqual((await active["future"])["event_id"], "active")
+
+                asyncio.run(scenario())
             finally:
                 self.cleanup_backend(module, previous)
 
