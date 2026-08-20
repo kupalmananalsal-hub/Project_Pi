@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import math
+import sys
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, fields
@@ -39,28 +41,80 @@ DEFAULT_POLICY_PATH = (
 
 @dataclass(frozen=True)
 class AlertPolicy:
-    policy_version: str = "phase1.2026-08-20"
+    policy_version: str = "phase1.1.safe_defaults"
     advisory_threshold: float = 0.70
     critical_threshold: float = 0.85
     thermal_freshness_seconds: float = 1.25
     repeat_window_seconds: float = 10.0
     repeat_required_count: int = 2
     repeat_escalates_to_critical: bool = True
+    idempotency_ttl_seconds: float = 60.0
+    idempotency_max_entries: int = 512
+    policy_source: str = "safe_defaults"
 
     @classmethod
     def load(cls, path: Path | None = None) -> "AlertPolicy":
         config_path = path or DEFAULT_POLICY_PATH
         if not config_path.exists():
+            cls._warn_policy_fallback(
+                config_path,
+                "policy file is missing",
+            )
             return cls()
 
-        raw_values: dict[str, str] = {}
-        for line in config_path.read_text(encoding="utf-8").splitlines():
-            stripped = line.split("#", 1)[0].strip()
-            if not stripped or ":" not in stripped:
-                continue
-            key, value = stripped.split(":", 1)
-            raw_values[key.strip()] = value.strip().strip('"\'')
+        try:
+            return cls._load_from_file(config_path)
+        except Exception as exc:
+            cls._warn_policy_fallback(config_path, str(exc))
+            return cls()
 
+    @classmethod
+    def _load_from_file(cls, config_path: Path) -> "AlertPolicy":
+        raw_values: dict[str, str] = {}
+        has_policy_content = False
+        for line_number, line in enumerate(
+            config_path.read_text(encoding="utf-8").splitlines(),
+            start=1,
+        ):
+            stripped = line.split("#", 1)[0].strip()
+            if not stripped:
+                continue
+            has_policy_content = True
+            if ":" not in stripped or stripped.startswith(":"):
+                raise ValueError(f"malformed policy line {line_number}")
+            key, value = stripped.split(":", 1)
+            key = key.strip()
+            value = value.strip().strip('"\'')
+            if not key:
+                raise ValueError(f"empty policy key on line {line_number}")
+            raw_values[key] = value
+
+        if not has_policy_content:
+            raise ValueError("policy file is empty")
+
+        field_map = {field.name: field for field in fields(cls)}
+        required_keys = set(field_map) - {"policy_source"}
+        missing_keys = sorted(required_keys - set(raw_values))
+        if missing_keys:
+            raise ValueError(
+                "policy file is missing required setting(s): "
+                + ", ".join(missing_keys)
+            )
+
+        unknown_keys = sorted(set(raw_values) - required_keys)
+        if unknown_keys:
+            raise ValueError(
+                "policy file contains unsupported setting(s): "
+                + ", ".join(unknown_keys)
+            )
+
+        parsed = cls._parse_policy_values(raw_values)
+        policy = cls(**parsed, policy_source="file")
+        policy._validate()
+        return policy
+
+    @classmethod
+    def _parse_policy_values(cls, raw_values: dict[str, str]) -> dict[str, object]:
         parsed: dict[str, object] = {}
         field_map = {field.name: field for field in fields(cls)}
         for key, raw_value in raw_values.items():
@@ -68,14 +122,50 @@ class AlertPolicy:
                 continue
             default = field_map[key].default
             if isinstance(default, bool):
-                parsed[key] = raw_value.lower() in {"1", "true", "yes", "on"}
+                normalized = raw_value.strip().lower()
+                if normalized not in {"true", "false"}:
+                    raise ValueError(f"{key} must be true or false")
+                parsed[key] = normalized == "true"
             elif isinstance(default, int) and not isinstance(default, bool):
-                parsed[key] = int(float(raw_value))
+                parsed[key] = int(raw_value)
             elif isinstance(default, float):
-                parsed[key] = float(raw_value)
+                value = float(raw_value)
+                if not math.isfinite(value):
+                    raise ValueError(f"{key} must be finite")
+                parsed[key] = value
             else:
                 parsed[key] = raw_value
-        return cls(**parsed)
+        return parsed
+
+    def _validate(self) -> None:
+        if not self.policy_version.strip():
+            raise ValueError("policy_version must be non-empty")
+        if not 0.0 <= self.advisory_threshold < self.critical_threshold <= 1.0:
+            raise ValueError(
+                "thresholds must satisfy "
+                "0.0 <= advisory_threshold < critical_threshold <= 1.0"
+            )
+        if self.thermal_freshness_seconds <= 0:
+            raise ValueError("thermal_freshness_seconds must be positive")
+        if self.repeat_window_seconds <= 0:
+            raise ValueError("repeat_window_seconds must be positive")
+        if self.repeat_required_count < 2:
+            raise ValueError("repeat_required_count must be at least 2")
+        if not isinstance(self.repeat_escalates_to_critical, bool):
+            raise ValueError("repeat_escalates_to_critical must be boolean")
+        if self.idempotency_ttl_seconds <= 0:
+            raise ValueError("idempotency_ttl_seconds must be positive")
+        if self.idempotency_max_entries <= 0:
+            raise ValueError("idempotency_max_entries must be positive")
+
+    @staticmethod
+    def _warn_policy_fallback(config_path: Path, reason: str) -> None:
+        print(
+            "Alert policy warning: "
+            f"{config_path.name} ignored; using safe defaults ({reason})",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 @dataclass(frozen=True)
@@ -236,6 +326,7 @@ class AlertDecisionEngine:
             "repeat_count": repeat_count,
             "repeat_window_seconds": self.policy.repeat_window_seconds,
             "repeat_required_count": self.policy.repeat_required_count,
+            "policy_source": self.policy.policy_source,
         }
 
         return {
@@ -249,6 +340,7 @@ class AlertDecisionEngine:
             "alert_modality": modality.value,
             "thermal_state": thermal.state.value,
             "policy_version": self.policy.policy_version,
+            "policy_source": self.policy.policy_source,
             "keyword_confidence": round(self.keyword_confidence, 4),
             "thermal_boost": round(thermal.confidence_boost, 4),
         }
@@ -337,23 +429,22 @@ class AlertDecisionEngine:
             "analysis_error",
         )
 
-        state = explicit_state
-        if state is None:
-            if not frame_valid:
-                state = ThermalState.INVALID
-            elif error:
-                state = ThermalState.INVALID
-            elif self._is_stale(frame_age_seconds):
-                state = ThermalState.STALE
-            elif human_detected:
-                state = ThermalState.POSITIVE
-            else:
-                state = ThermalState.NEGATIVE
-        elif state in {ThermalState.POSITIVE, ThermalState.NEGATIVE}:
-            if not frame_valid:
-                state = ThermalState.INVALID
-            elif self._is_stale(frame_age_seconds):
-                state = ThermalState.STALE
+        if explicit_state == ThermalState.UNAVAILABLE:
+            state = ThermalState.UNAVAILABLE
+        elif explicit_state == ThermalState.INVALID:
+            state = ThermalState.INVALID
+        elif not frame_valid:
+            state = ThermalState.INVALID
+        elif error:
+            state = ThermalState.UNAVAILABLE
+        elif self._is_stale(frame_age_seconds):
+            state = ThermalState.STALE
+        elif explicit_state is not None:
+            state = explicit_state
+        elif human_detected:
+            state = ThermalState.POSITIVE
+        else:
+            state = ThermalState.NEGATIVE
 
         applied_boost = raw_boost if state == ThermalState.POSITIVE else 0.0
         details = thermal_frame.get("details")

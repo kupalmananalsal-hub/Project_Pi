@@ -2,8 +2,35 @@ import 'dart:convert';
 
 import 'voice_direction.dart';
 
+enum AlertDecisionState {
+  suppressed,
+  advisory,
+  confirmed,
+  critical,
+  systemFault,
+  unknown,
+}
+
+enum AlertModality {
+  voiceOnly,
+  voiceThermal,
+  thermalOnly,
+  sensorFault,
+  unknown,
+}
+
+enum BackendThermalState {
+  positive,
+  negative,
+  unavailable,
+  stale,
+  invalid,
+  unknown,
+}
+
 class AlertEvent {
   const AlertEvent({
+    this.eventId,
     required this.keyword,
     required this.confidence,
     required this.timestamp,
@@ -26,8 +53,18 @@ class AlertEvent {
     this.phase = 'direction_guidance',
     this.streamType = 'live',
     this.message,
+    this.rawDecisionState,
+    this.decisionState = AlertDecisionState.unknown,
+    this.decisionReason,
+    this.rawAlertModality,
+    this.alertModality = AlertModality.unknown,
+    this.rawThermalState,
+    this.backendThermalState = BackendThermalState.unknown,
+    this.policyVersion,
+    this.duplicateEvent = false,
   });
 
+  final String? eventId;
   final String event;
   final String keyword;
   final double confidence;
@@ -50,6 +87,15 @@ class AlertEvent {
   final String phase;
   final String streamType;
   final String? message;
+  final String? rawDecisionState;
+  final AlertDecisionState decisionState;
+  final String? decisionReason;
+  final String? rawAlertModality;
+  final AlertModality alertModality;
+  final String? rawThermalState;
+  final BackendThermalState backendThermalState;
+  final String? policyVersion;
+  final bool duplicateEvent;
 
   factory AlertEvent.fromMessage(dynamic message) {
     final decoded = message is String ? jsonDecode(message) : message;
@@ -62,7 +108,11 @@ class AlertEvent {
       final parsedFinalConfidence =
           _asNullableDouble(decoded['final_confidence']) ??
           _asNullableDouble(decisionFactors['final_confidence']);
+      final rawDecisionState = _asNullableString(decoded['decision_state']);
+      final rawAlertModality = _asNullableString(decoded['alert_modality']);
+      final rawThermalState = _asNullableString(decoded['thermal_state']);
       return AlertEvent(
+        eventId: _asNullableString(decoded['event_id']),
         event: decoded['event']?.toString() ?? 'keyword_detected',
         keyword: decoded['keyword']?.toString() ?? 'unknown',
         confidence: parsedConfidence,
@@ -110,6 +160,15 @@ class AlertEvent {
         phase: decoded['phase']?.toString() ?? 'direction_guidance',
         streamType: decoded['type']?.toString() ?? 'live',
         message: decoded['message']?.toString(),
+        rawDecisionState: rawDecisionState,
+        decisionState: _parseDecisionState(rawDecisionState),
+        decisionReason: _asNullableString(decoded['decision_reason']),
+        rawAlertModality: rawAlertModality,
+        alertModality: _parseAlertModality(rawAlertModality),
+        rawThermalState: rawThermalState,
+        backendThermalState: _parseThermalState(rawThermalState),
+        policyVersion: _asNullableString(decoded['policy_version']),
+        duplicateEvent: _asBool(decoded['duplicate_event']),
         timestamp:
             DateTime.tryParse(decoded['timestamp']?.toString() ?? '') ??
             DateTime.now(),
@@ -139,15 +198,39 @@ class AlertEvent {
 
   bool get isKeywordDetection => event == 'keyword_detected';
 
+  bool get hasAuthoritativeDecision =>
+      rawDecisionState != null && rawDecisionState!.trim().isNotEmpty;
+
   bool get isHelpKeyword => _keywordWords.contains('help');
 
   bool get isTulongKeyword => _keywordWords.contains('tulong');
 
   double get displayedConfidence => finalConfidence ?? confidence;
 
-  bool get shouldVibrate => alertLevel == 'full_alert';
+  bool get shouldVibrate {
+    if (!hasAuthoritativeDecision) {
+      return alertLevel == 'full_alert';
+    }
+    return decisionState == AlertDecisionState.confirmed ||
+        decisionState == AlertDecisionState.critical;
+  }
 
-  bool get shouldShowDirectionGuidance => isLive && isKeywordDetection;
+  bool get shouldShowDirectionGuidance {
+    if (!isLive || !isKeywordDetection || duplicateEvent) {
+      return false;
+    }
+    if (!hasAuthoritativeDecision) {
+      return true;
+    }
+    return switch (decisionState) {
+      AlertDecisionState.advisory ||
+      AlertDecisionState.confirmed ||
+      AlertDecisionState.critical => true,
+      AlertDecisionState.suppressed ||
+      AlertDecisionState.systemFault ||
+      AlertDecisionState.unknown => false,
+    };
+  }
 
   VoiceDirection get voiceDirection {
     return VoiceDirection.fromPayload(
@@ -249,6 +332,63 @@ class AlertEvent {
     }
     final normalized = value?.toString().trim().toLowerCase();
     return normalized == 'true' || normalized == '1' || normalized == 'yes';
+  }
+
+  static String? _asNullableString(dynamic value) {
+    final text = value?.toString();
+    if (text == null || text.trim().isEmpty) {
+      return null;
+    }
+    return text;
+  }
+
+  static AlertDecisionState _parseDecisionState(String? value) {
+    switch (value?.trim().toLowerCase()) {
+      case 'suppressed':
+        return AlertDecisionState.suppressed;
+      case 'advisory':
+        return AlertDecisionState.advisory;
+      case 'confirmed':
+        return AlertDecisionState.confirmed;
+      case 'critical':
+        return AlertDecisionState.critical;
+      case 'system_fault':
+        return AlertDecisionState.systemFault;
+      default:
+        return AlertDecisionState.unknown;
+    }
+  }
+
+  static AlertModality _parseAlertModality(String? value) {
+    switch (value?.trim().toLowerCase()) {
+      case 'voice_only':
+        return AlertModality.voiceOnly;
+      case 'voice_thermal':
+        return AlertModality.voiceThermal;
+      case 'thermal_only':
+        return AlertModality.thermalOnly;
+      case 'sensor_fault':
+        return AlertModality.sensorFault;
+      default:
+        return AlertModality.unknown;
+    }
+  }
+
+  static BackendThermalState _parseThermalState(String? value) {
+    switch (value?.trim().toLowerCase()) {
+      case 'positive':
+        return BackendThermalState.positive;
+      case 'negative':
+        return BackendThermalState.negative;
+      case 'unavailable':
+        return BackendThermalState.unavailable;
+      case 'stale':
+        return BackendThermalState.stale;
+      case 'invalid':
+        return BackendThermalState.invalid;
+      default:
+        return BackendThermalState.unknown;
+    }
   }
 
   static String _alertLevelForConfidence(double confidence) {

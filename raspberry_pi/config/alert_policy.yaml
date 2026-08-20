@@ -1,7 +1,14 @@
-policy_version: phase1.2026-08-20
+policy_version: phase1.1.2026-08-20
 advisory_threshold: 0.70
 critical_threshold: 0.85
 thermal_freshness_seconds: 1.25
+# KWS cooldown suppresses duplicate detections from one utterance before POST.
+# Backend repeat tracking escalates multiple unique event_id values per phrase.
 repeat_window_seconds: 10.0
 repeat_required_count: 2
 repeat_escalates_to_critical: true
+# In-memory retry deduplication. It survives HTTP retries while this backend
+# process is running, but not a backend restart; persistent idempotency is
+# deferred until a future database-migration phase.
+idempotency_ttl_seconds: 60.0
+idempotency_max_entries: 512

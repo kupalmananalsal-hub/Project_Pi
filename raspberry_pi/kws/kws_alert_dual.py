@@ -8,6 +8,7 @@ import signal
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -93,7 +94,10 @@ class AlertPoster:
         self.queue_path = queue_path
         self.session = requests.Session()
         self.lock = threading.Lock()
-        self.pending = self._load_pending()
+        self.pending, upgraded_pending = self._load_pending()
+        if upgraded_pending:
+            with self.lock:
+                self._persist_pending_locked()
 
     def publish(
         self,
@@ -105,6 +109,7 @@ class AlertPoster:
         extra: dict[str, object] | None = None,
     ) -> None:
         event: dict[str, object] = {
+            "event_id": str(uuid.uuid4()),
             "event": "keyword_detected",
             "keyword": keyword,
             "confidence": confidence,
@@ -142,11 +147,12 @@ class AlertPoster:
                 self._persist_pending_locked()
                 print(f"Backend alert posted: {sent['keyword']}", flush=True)
 
-    def _load_pending(self) -> list[dict[str, object]]:
+    def _load_pending(self) -> tuple[list[dict[str, object]], bool]:
         if not self.queue_path.exists():
-            return []
+            return [], False
 
         pending: list[dict[str, object]] = []
+        upgraded_pending = False
         with self.queue_path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 try:
@@ -154,8 +160,11 @@ class AlertPoster:
                 except json.JSONDecodeError:
                     continue
                 if isinstance(decoded, dict):
+                    if not self._has_event_id(decoded):
+                        decoded["event_id"] = str(uuid.uuid4())
+                        upgraded_pending = True
                     pending.append(decoded)
-        return pending
+        return pending, upgraded_pending
 
     def _persist_pending_locked(self) -> None:
         if not self.pending:
@@ -165,9 +174,17 @@ class AlertPoster:
                 pass
             return
 
-        with self.queue_path.open("w", encoding="utf-8") as handle:
+        self.queue_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.queue_path.with_name(f"{self.queue_path.name}.tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
             for event in self.pending:
                 handle.write(json.dumps(event) + "\n")
+        os.replace(temp_path, self.queue_path)
+
+    @staticmethod
+    def _has_event_id(event: dict[str, object]) -> bool:
+        value = event.get("event_id")
+        return isinstance(value, str) and bool(value.strip())
 
 
 class CooldownGate:

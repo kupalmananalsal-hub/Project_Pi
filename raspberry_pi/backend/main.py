@@ -10,9 +10,11 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 import wave
 
 import numpy as np
@@ -88,6 +90,7 @@ class LedRequest(BaseModel):
 
 
 class AlertIn(BaseModel):
+    event_id: str | None = None
     event: str = "keyword_detected"
     keyword: str
     confidence: float = 0.0
@@ -260,9 +263,108 @@ class AlertHub:
         self.clients.discard(client_queue)
 
 
+class AlertIdempotencyRegistry:
+    """
+    Bounded in-memory idempotency cache for KWS alert submissions.
+
+    This prevents HTTP retries from being treated as new distress events while
+    the backend process remains alive. Persistence across backend restarts is
+    intentionally deferred until the future database-migration phase.
+    """
+
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float,
+        max_entries: int,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self.ttl_seconds = float(ttl_seconds)
+        self.max_entries = max(1, int(max_entries))
+        self.clock = clock or time.monotonic
+        self._entries: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._lock = asyncio.Lock()
+
+    async def claim(self, event_id: str, fingerprint: str) -> dict[str, Any]:
+        async with self._lock:
+            self._prune_locked()
+            entry = self._entries.get(event_id)
+            if entry is not None:
+                self._entries.move_to_end(event_id)
+                if entry["fingerprint"] != fingerprint:
+                    return {"status": "conflict"}
+                if entry.get("response") is not None:
+                    return {
+                        "status": "duplicate",
+                        "response": dict(entry["response"]),
+                    }
+                return {"status": "in_flight", "future": entry["future"]}
+
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[dict[str, Any]] = loop.create_future()
+            self._entries[event_id] = {
+                "fingerprint": fingerprint,
+                "created_at": self.clock(),
+                "future": future,
+                "response": None,
+            }
+            self._trim_capacity_locked()
+            return {"status": "claimed", "future": future}
+
+    async def complete(self, event_id: str, response: dict[str, Any]) -> None:
+        async with self._lock:
+            entry = self._entries.get(event_id)
+            if entry is None:
+                return
+            cached_response = dict(response)
+            cached_response["duplicate_event"] = False
+            entry["response"] = cached_response
+            future = entry["future"]
+            if not future.done():
+                future.set_result(cached_response)
+            self._entries.move_to_end(event_id)
+            self._trim_capacity_locked()
+
+    async def fail(self, event_id: str, exc: BaseException) -> None:
+        async with self._lock:
+            entry = self._entries.pop(event_id, None)
+            if entry is None:
+                return
+            future = entry["future"]
+            if not future.done():
+                future.set_exception(exc)
+
+    def snapshot_size(self) -> int:
+        return len(self._entries)
+
+    def _prune_locked(self) -> None:
+        now = self.clock()
+        expired = [
+            event_id
+            for event_id, entry in self._entries.items()
+            if now - float(entry["created_at"]) > self.ttl_seconds
+        ]
+        for event_id in expired:
+            entry = self._entries.pop(event_id)
+            future = entry["future"]
+            if not future.done():
+                future.cancel()
+
+    def _trim_capacity_locked(self) -> None:
+        while len(self._entries) > self.max_entries:
+            event_id, entry = self._entries.popitem(last=False)
+            future = entry["future"]
+            if not future.done():
+                future.cancel()
+
+
 alert_store = AlertStore(ALERT_DB_PATH)
 alerts = AlertHub()
 decision_engine = AlertDecisionEngine()
+alert_idempotency = AlertIdempotencyRegistry(
+    ttl_seconds=decision_engine.policy.idempotency_ttl_seconds,
+    max_entries=decision_engine.policy.idempotency_max_entries,
+)
 noise_config_store = NoiseSuppressionConfigStore(
     Path(os.getenv("NOISE_SUPPRESSION_CONFIG_PATH", str(DEFAULT_CONFIG_PATH)))
 )
@@ -876,6 +978,41 @@ def alert_to_dict(event: AlertIn) -> dict[str, Any]:
     return event.dict()
 
 
+def normalize_event_id(value: object) -> tuple[str, bool]:
+    if value is None:
+        return str(uuid.uuid4()), True
+    event_id = str(value).strip()
+    if not event_id:
+        raise HTTPException(status_code=400, detail="event_id must be non-empty")
+    if len(event_id) > 128:
+        raise HTTPException(
+            status_code=400,
+            detail="event_id must be 128 characters or fewer",
+        )
+    if any(ord(character) < 32 for character in event_id):
+        raise HTTPException(
+            status_code=400,
+            detail="event_id must not contain control characters",
+        )
+    return event_id, False
+
+
+def alert_event_fingerprint(payload: dict[str, Any]) -> str:
+    stable = {
+        "keyword": str(payload.get("keyword") or "").strip().lower(),
+        "source": str(payload.get("source") or "").strip().lower(),
+        "timestamp": str(payload.get("timestamp") or "").strip(),
+        "confidence": round(_as_float(payload.get("confidence"), 0.0), 6),
+    }
+    return json.dumps(stable, sort_keys=True, separators=(",", ":"))
+
+
+def duplicate_response(event: dict[str, Any]) -> dict[str, Any]:
+    duplicate = dict(event)
+    duplicate["duplicate_event"] = True
+    return {"ok": True, "duplicate_event": True, "event": duplicate}
+
+
 def thermal_evidence_for_decision(
     thermal_payload: dict[str, Any] | None,
     *,
@@ -907,18 +1044,17 @@ def thermal_evidence_for_decision(
         except TypeError:
             evidence["frame_valid"] = False
 
-    if "thermal_state" not in evidence:
-        if not evidence.get("frame_valid", True):
-            evidence["thermal_state"] = "invalid"
-        elif evidence.get("frame_age_seconds", 0.0) > decision_engine.policy.thermal_freshness_seconds:
-            evidence["thermal_state"] = "stale"
-        elif (
-            evidence.get("error")
-            or evidence.get("analysis_error")
-            or evidence.get("thermal_error")
-        ):
-            evidence["thermal_state"] = "invalid"
-        elif evidence.get("human_detected", False):
+    if not evidence.get("frame_valid", True):
+        evidence["thermal_state"] = "invalid"
+    elif evidence.get("error") or evidence.get("analysis_error") or evidence.get("thermal_error"):
+        evidence["thermal_state"] = "unavailable"
+    elif (
+        evidence.get("frame_age_seconds", 0.0)
+        > decision_engine.policy.thermal_freshness_seconds
+    ):
+        evidence["thermal_state"] = "stale"
+    elif "thermal_state" not in evidence:
+        if evidence.get("human_detected", False):
             evidence["thermal_state"] = "positive"
         else:
             evidence["thermal_state"] = "negative"
@@ -971,6 +1107,7 @@ def enrich_alert_payload(payload: dict[str, Any], thermal_payload: dict[str, Any
     payload["decision_reason"] = decision["decision_reason"]
     payload["alert_modality"] = decision["alert_modality"]
     payload["policy_version"] = decision["policy_version"]
+    payload["policy_source"] = decision["policy_source"]
     return payload
 
 
@@ -1311,26 +1448,49 @@ async def calibrate_from_samples():
 async def api_alerts(event: AlertIn):
     payload = alert_to_dict(event)
     payload["type"] = "live"
-    thermal_payload = None
-    thermal_error = None
-    try:
-        thermal_payload = await asyncio.to_thread(
-            thermal.latest,
-            decision_engine.policy.thermal_freshness_seconds,
+    event_id, generated_event_id = normalize_event_id(payload.get("event_id"))
+    payload["event_id"] = event_id
+    payload["server_generated_event_id"] = generated_event_id
+    fingerprint = alert_event_fingerprint(payload)
+    claim = await alert_idempotency.claim(event_id, fingerprint)
+    if claim["status"] == "conflict":
+        raise HTTPException(
+            status_code=409,
+            detail="event_id was reused for a different alert event",
         )
-    except Exception as exc:
-        thermal_error = exc
-        thermal_payload = getattr(thermal, "_last_payload", None)
+    if claim["status"] == "duplicate":
+        return duplicate_response(claim["response"])
+    if claim["status"] == "in_flight":
+        cached_event = await claim["future"]
+        return duplicate_response(cached_event)
 
-    thermal_payload = thermal_evidence_for_decision(
-        thermal_payload,
-        read_error=thermal_error,
-    )
-    payload = enrich_alert_payload(payload, thermal_payload)
-    stored_payload = await asyncio.to_thread(alert_store.insert, payload)
-    broadcast_payload = dict(stored_payload)
-    await alerts.publish(broadcast_payload)
-    return {"ok": True, "event": stored_payload}
+    try:
+        thermal_payload = None
+        thermal_error = None
+        try:
+            thermal_payload = await asyncio.to_thread(
+                thermal.latest,
+                decision_engine.policy.thermal_freshness_seconds,
+            )
+        except Exception as exc:
+            thermal_error = exc
+            thermal_payload = getattr(thermal, "_last_payload", None)
+
+        thermal_payload = thermal_evidence_for_decision(
+            thermal_payload,
+            read_error=thermal_error,
+        )
+        payload = enrich_alert_payload(payload, thermal_payload)
+        payload["duplicate_event"] = False
+        stored_payload = await asyncio.to_thread(alert_store.insert, payload)
+        stored_payload["duplicate_event"] = False
+        broadcast_payload = dict(stored_payload)
+        await alerts.publish(broadcast_payload)
+        await alert_idempotency.complete(event_id, stored_payload)
+        return {"ok": True, "duplicate_event": False, "event": stored_payload}
+    except Exception as exc:
+        await alert_idempotency.fail(event_id, exc)
+        raise
 
 
 REFRESH_SCRIPT = RASPBERRY_PI_ROOT / "scripts" / "pi_refresh.sh"

@@ -169,6 +169,16 @@ class AlertsController extends Notifier<AlertsState> {
     state = state.copyWith(history: const [], error: null);
   }
 
+  @visibleForTesting
+  void handleAlertForTest(AlertEvent event) {
+    _handleAlert(event);
+  }
+
+  @visibleForTesting
+  void handleThermalStateForTest(ThermalState? previous, ThermalState next) {
+    _handleThermalStateChanged(previous, next);
+  }
+
   void replaceHistory(List<AlertEvent> history) {
     state = state.copyWith(history: List.unmodifiable(history), error: null);
   }
@@ -213,6 +223,49 @@ class AlertsController extends Notifier<AlertsState> {
     }
     state = state.copyWith(history: nextHistory, error: null);
 
+    if (event.duplicateEvent) {
+      return;
+    }
+
+    if (event.hasAuthoritativeDecision) {
+      _handleAuthoritativeAlert(event);
+      return;
+    }
+
+    _handleLegacyAlert(event);
+  }
+
+  void _handleAuthoritativeAlert(AlertEvent event) {
+    switch (event.decisionState) {
+      case AlertDecisionState.suppressed:
+        _clearPendingVoiceState(clearKeywordNotice: true);
+        return;
+      case AlertDecisionState.advisory:
+        _clearPendingVoiceState();
+        _showKeywordNotice(event);
+        return;
+      case AlertDecisionState.confirmed:
+      case AlertDecisionState.critical:
+        unawaited(_startAuthoritativeEmergencyAlert(event));
+        return;
+      case AlertDecisionState.systemFault:
+        _clearPendingVoiceState(clearKeywordNotice: true);
+        state = state.copyWith(
+          thermalSoftAlert: false,
+          error: event.decisionReason ?? 'System fault reported by backend',
+        );
+        return;
+      case AlertDecisionState.unknown:
+        _clearPendingVoiceState(clearKeywordNotice: true);
+        state = state.copyWith(
+          thermalSoftAlert: false,
+          error: 'Unknown backend alert decision: ${event.rawDecisionState}',
+        );
+        return;
+    }
+  }
+
+  void _handleLegacyAlert(AlertEvent event) {
     if (!event.shouldShowDirectionGuidance) {
       return;
     }
@@ -238,6 +291,18 @@ class AlertsController extends Notifier<AlertsState> {
 
     _showKeywordNotice(event);
     _startThermalConfirmationWindow(event);
+  }
+
+  void _clearPendingVoiceState({bool clearKeywordNotice = false}) {
+    _pendingVoiceTimer?.cancel();
+    _pendingVoiceTimer = null;
+    _pendingVoiceEvent = null;
+    _pendingVoiceStartedAt = null;
+    if (clearKeywordNotice) {
+      _keywordNoticeTimer?.cancel();
+      _keywordNoticeTimer = null;
+      state = state.copyWith(keywordNotice: null);
+    }
   }
 
   void _addAlertToHistorySilently(AlertEvent event) {
@@ -339,6 +404,32 @@ class AlertsController extends Notifier<AlertsState> {
     AlertEvent event,
     ThermalFrame? thermalFrame,
   ) async {
+    await _startFullEmergencyAlert(
+      event,
+      thermalFrame,
+      humanDetected: true,
+      vibrate: true,
+    );
+  }
+
+  Future<void> _startAuthoritativeEmergencyAlert(AlertEvent event) async {
+    final thermalFrame = event.humanDetected
+        ? ref.read(thermalProvider).frame ?? _lastThermalHumanFrame
+        : null;
+    await _startFullEmergencyAlert(
+      event,
+      thermalFrame,
+      humanDetected: event.humanDetected,
+      vibrate: event.shouldVibrate,
+    );
+  }
+
+  Future<void> _startFullEmergencyAlert(
+    AlertEvent event,
+    ThermalFrame? thermalFrame, {
+    required bool humanDetected,
+    required bool vibrate,
+  }) async {
     _keywordNoticeTimer?.cancel();
     _keywordNoticeTimer = null;
     _pendingVoiceTimer?.cancel();
@@ -353,14 +444,14 @@ class AlertsController extends Notifier<AlertsState> {
       pendingGuidanceHumanDetected: false,
       thermalSoftAlert: false,
       activeAlert: event,
-      activeAlertHumanDetected: true,
+      activeAlertHumanDetected: humanDetected,
       activeAlertThermalFrame: thermalFrame,
       error: null,
     );
     final sound = ref.read(settingsProvider).alertSound;
     await ref
         .read(alertRuntimeServiceProvider)
-        .startEmergency(event, sound, vibrate: true);
+        .startEmergency(event, sound, vibrate: vibrate);
   }
 }
 

@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -293,6 +294,158 @@ class AlertDecisionEngineTest(unittest.TestCase):
         self.assertEqual(result["decision_state"], "suppressed")
         self.assertEqual(result["alert_level"], "none")
         self.assertFalse(result["should_alert"])
+
+    def test_current_thermal_error_overrides_cached_positive(self):
+        result = self.evaluate(
+            0.75,
+            self.positive_thermal(thermal_error="current read failed"),
+        )
+
+        self.assert_decision(
+            result,
+            "advisory",
+            "thermal_unavailable",
+            "voice_only",
+            "visual_only",
+        )
+        self.assertEqual(result["thermal_state"], "unavailable")
+        self.assertEqual(result["decision_factors"]["thermal_boost"], 0.0)
+        self.assertEqual(result["decision_factors"]["raw_thermal_boost"], 0.15)
+
+    def test_invalid_positive_frame_receives_no_boost(self):
+        result = self.evaluate(
+            0.75,
+            self.positive_thermal(frame_valid=False),
+        )
+
+        self.assertEqual(result["thermal_state"], "invalid")
+        self.assertEqual(result["decision_factors"]["thermal_boost"], 0.0)
+
+    def test_positive_frame_at_freshness_boundary_is_fresh(self):
+        result = self.evaluate(
+            0.75,
+            self.positive_thermal(frame_age_seconds=1.25),
+        )
+
+        self.assert_decision(
+            result,
+            "confirmed",
+            "voice_confirmed_by_thermal",
+            "voice_thermal",
+            "full_alert",
+        )
+
+    def test_positive_frame_outside_freshness_boundary_is_stale(self):
+        result = self.evaluate(
+            0.75,
+            self.positive_thermal(frame_age_seconds=1.2501),
+        )
+
+        self.assert_decision(
+            result,
+            "advisory",
+            "thermal_stale",
+            "voice_only",
+            "visual_only",
+        )
+        self.assertEqual(result["decision_factors"]["thermal_boost"], 0.0)
+
+    def test_valid_committed_policy_loads_from_file(self):
+        policy_path = PROJECT_ROOT / "raspberry_pi" / "config" / "alert_policy.yaml"
+        policy = AlertPolicy.load(policy_path)
+
+        self.assertEqual(policy.policy_source, "file")
+        self.assertEqual(policy.policy_version, "phase1.1.2026-08-20")
+        self.assertEqual(policy.advisory_threshold, 0.70)
+        self.assertEqual(policy.critical_threshold, 0.85)
+        self.assertEqual(policy.thermal_freshness_seconds, 1.25)
+        self.assertEqual(policy.repeat_window_seconds, 10.0)
+        self.assertEqual(policy.repeat_required_count, 2)
+        self.assertTrue(policy.repeat_escalates_to_critical)
+        self.assertEqual(policy.idempotency_ttl_seconds, 60.0)
+        self.assertEqual(policy.idempotency_max_entries, 512)
+
+    def test_missing_policy_file_uses_safe_defaults(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            policy = AlertPolicy.load(Path(temp_dir) / "missing.yaml")
+
+        self.assertEqual(policy.policy_source, "safe_defaults")
+        self.assertEqual(policy.policy_version, "phase1.1.safe_defaults")
+
+    def test_invalid_policy_files_fall_back_as_a_complete_unit(self):
+        base = {
+            "policy_version": "test-policy",
+            "advisory_threshold": "0.70",
+            "critical_threshold": "0.85",
+            "thermal_freshness_seconds": "1.25",
+            "repeat_window_seconds": "10.0",
+            "repeat_required_count": "2",
+            "repeat_escalates_to_critical": "true",
+            "idempotency_ttl_seconds": "60.0",
+            "idempotency_max_entries": "512",
+        }
+        cases = {
+            "empty file": "",
+            "malformed syntax": "policy_version test-policy\n",
+            "invalid number": self._policy_text(
+                base,
+                advisory_threshold="not-a-number",
+            ),
+            "invalid boolean": self._policy_text(
+                base,
+                repeat_escalates_to_critical="yes",
+            ),
+            "threshold inversion": self._policy_text(
+                base,
+                advisory_threshold="0.90",
+                critical_threshold="0.85",
+            ),
+            "out of range threshold": self._policy_text(
+                base,
+                advisory_threshold="-0.1",
+            ),
+            "invalid repeat count": self._policy_text(
+                base,
+                repeat_required_count="1",
+            ),
+            "invalid timing": self._policy_text(
+                base,
+                repeat_window_seconds="0",
+            ),
+            "invalid idempotency ttl": self._policy_text(
+                base,
+                idempotency_ttl_seconds="0",
+            ),
+            "invalid idempotency capacity": self._policy_text(
+                base,
+                idempotency_max_entries="0",
+            ),
+            "partial required configuration": self._policy_text(
+                {
+                    key: value
+                    for key, value in base.items()
+                    if key != "critical_threshold"
+                },
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "alert_policy.yaml"
+            for name, text in cases.items():
+                with self.subTest(name=name):
+                    path.write_text(text, encoding="utf-8")
+                    policy = AlertPolicy.load(path)
+
+                    self.assertEqual(policy.policy_source, "safe_defaults")
+                    self.assertEqual(policy.policy_version, "phase1.1.safe_defaults")
+                    self.assertEqual(policy.advisory_threshold, 0.70)
+                    self.assertEqual(policy.critical_threshold, 0.85)
+
+    @staticmethod
+    def _policy_text(values, **overrides):
+        merged = dict(values)
+        merged.update(overrides)
+        return "\n".join(f"{key}: {value}" for key, value in merged.items()) + "\n"
 
 
 if __name__ == "__main__":
