@@ -12,6 +12,8 @@ Group=audio
 SupplementaryGroups=gpio i2c spi
 WorkingDirectory=/home/thesis/Project_Pi/raspberry_pi/backend
 Environment=PYTHONUNBUFFERED=1
+Environment="GPIOZERO_PIN_FACTORY=lgpio"
+Environment="LGPIO_CHIP=4"
 ExecStart=/home/thesis/thermal-env-sys/bin/uvicorn main:app --host 0.0.0.0 --port 8765
 Restart=always
 RestartSec=3

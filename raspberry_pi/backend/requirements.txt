@@ -8,3 +8,4 @@ spidev
 gpiozero
 adafruit-blinka
 adafruit-circuitpython-mlx90640
+tflite-runtime

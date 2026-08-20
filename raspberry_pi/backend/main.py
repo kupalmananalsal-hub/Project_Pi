@@ -927,8 +927,14 @@ def current_noise_settings() -> dict[str, Any]:
 
 @app.on_event("startup")
 async def startup():
-    button.init()
-    thermal.init()
+    try:
+        button.init()
+    except Exception as exc:
+        print(f"Button init skipped: {exc}")
+    try:
+        thermal.init()
+    except Exception as exc:
+        print(f"Thermal init skipped: {exc}")
     VOICE_SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
     noise_config_store.save(noise_config_store.load())
 
