@@ -4,13 +4,13 @@ Flutter mobile app for the Raspberry Pi 5 thermal camera and voice alert backend
 
 ## Backend Defaults
 
-- Current hotspot Pi IP: `10.159.83.236`
+- Current hotspot Pi IP: `10.129.205.32`
 - Port: `8765`
 - Hostname fallback: `raspberrypi.local`
-- REST base URL: `http://10.159.83.236:8765/api/`
-- Thermal WebSocket: `ws://10.159.83.236:8765/ws/thermal`
-- Audio WebSocket: `ws://10.159.83.236:8765/ws/audio`
-- Alert WebSocket: `ws://10.159.83.236:8765/ws/alerts`
+- REST base URL: `http://10.129.205.32:8765/api/`
+- Thermal WebSocket: `ws://10.129.205.32:8765/ws/thermal`
+- Audio WebSocket: `ws://10.129.205.32:8765/ws/audio`
+- Alert WebSocket: `ws://10.129.205.32:8765/ws/alerts`
 
 The Pi connects to the phone hotspot as a client, so the hotspot may assign a
 different IP later. If that happens, update the Pi IP in the Flutter app

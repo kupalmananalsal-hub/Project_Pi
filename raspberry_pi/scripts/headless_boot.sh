@@ -23,6 +23,9 @@ fi
 HOTSPOT_SSID="${PROJECT_PI_HOTSPOT_SSID:-Teddy}"
 HOTSPOT_PASSWORD="${PROJECT_PI_HOTSPOT_PASSWORD:-}"
 HOTSPOT_CONNECTION="${PROJECT_PI_HOTSPOT_CONNECTION:-${HOTSPOT_SSID}}"
+HOTSPOT_STATIC_IPV4="${PROJECT_PI_HOTSPOT_STATIC_IPV4:-${PROJECT_PI_STATIC_IPV4:-}}"
+HOTSPOT_STATIC_GATEWAY="${PROJECT_PI_HOTSPOT_STATIC_GATEWAY:-${PROJECT_PI_STATIC_GATEWAY:-}}"
+HOTSPOT_STATIC_DNS="${PROJECT_PI_HOTSPOT_STATIC_DNS:-${PROJECT_PI_STATIC_DNS:-8.8.8.8 8.8.4.4}}"
 
 wait_for_network() {
   local attempt
@@ -51,6 +54,60 @@ ensure_hotspot_profile() {
 
   nmcli connection modify "${HOTSPOT_CONNECTION}" connection.autoconnect yes
   nmcli connection modify "${HOTSPOT_CONNECTION}" connection.autoconnect-priority 10
+  configure_static_ipv4
+}
+
+normalize_static_ipv4() {
+  local address="$1"
+  if [[ "${address}" == */* ]]; then
+    printf '%s\n' "${address}"
+  else
+    printf '%s/24\n' "${address}"
+  fi
+}
+
+detect_gateway() {
+  local gateway
+  gateway="$(ip -4 route show default dev wlan0 2>/dev/null | awk 'NR == 1 {print $3}')"
+  if [[ -n "${gateway}" ]]; then
+    printf '%s\n' "${gateway}"
+    return 0
+  fi
+
+  ip -4 route show default 2>/dev/null | awk 'NR == 1 {print $3}'
+}
+
+configure_static_ipv4() {
+  if [[ -z "${HOTSPOT_STATIC_IPV4}" ]]; then
+    return 0
+  fi
+
+  local address gateway target_ip current_ips
+  address="$(normalize_static_ipv4 "${HOTSPOT_STATIC_IPV4}")"
+  gateway="${HOTSPOT_STATIC_GATEWAY}"
+  if [[ -z "${gateway}" ]]; then
+    gateway="$(detect_gateway || true)"
+  fi
+
+  if [[ -z "${gateway}" ]]; then
+    log "Static IPv4 ${address} requested, but no gateway was found; leaving existing IPv4 settings"
+    return 1
+  fi
+
+  target_ip="${address%%/*}"
+  current_ips="$(hostname -I || true)"
+  if ! grep -qw "${target_ip}" <<<"${current_ips}"; then
+    if ping -c 1 -W 1 "${target_ip}" >/dev/null 2>&1; then
+      log "Refusing static IPv4 ${target_ip}; another hotspot device already responds to it"
+      return 1
+    fi
+  fi
+
+  log "Configuring ${HOTSPOT_CONNECTION} with static IPv4 ${address}, gateway ${gateway}"
+  nmcli connection modify "${HOTSPOT_CONNECTION}" ipv4.method manual
+  nmcli connection modify "${HOTSPOT_CONNECTION}" ipv4.addresses "${address}"
+  nmcli connection modify "${HOTSPOT_CONNECTION}" ipv4.gateway "${gateway}"
+  nmcli connection modify "${HOTSPOT_CONNECTION}" ipv4.dns "${HOTSPOT_STATIC_DNS}"
 }
 
 connect_hotspot() {
@@ -58,6 +115,10 @@ connect_hotspot() {
 
   if iwgetid -r 2>/dev/null | grep -Fxq "${HOTSPOT_SSID}"; then
     log "Already associated with ${HOTSPOT_SSID}"
+    if [[ -n "${HOTSPOT_STATIC_IPV4}" ]] && ! ip -4 addr show dev wlan0 | grep -q "inet ${HOTSPOT_STATIC_IPV4%%/*}/"; then
+      log "Reapplying ${HOTSPOT_CONNECTION} so static IPv4 settings take effect"
+      nmcli connection up "${HOTSPOT_CONNECTION}" || true
+    fi
     return 0
   fi
 

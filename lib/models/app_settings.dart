@@ -29,8 +29,8 @@ class AppSettings {
   }) : host = host.trim().isEmpty ? defaultHost : host.trim(),
        port = normalizeBackendPort(port);
 
-  static const defaultHost = '10.159.83.236';
-  static const fallbackHost = '10.159.83.236';
+  static const defaultHost = '10.129.205.32';
+  static const fallbackHost = '10.129.205.32';
   static const mdnsFallbackHost = 'raspberrypi.local';
   static const defaultPort = 8765;
 

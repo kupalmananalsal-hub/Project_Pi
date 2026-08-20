@@ -15,7 +15,7 @@ flutter build apk --debug
 Current hotspot backend settings:
 
 ```text
-IP: 10.159.83.236
+IP: 10.129.205.32
 Port: 8765
 ```
 

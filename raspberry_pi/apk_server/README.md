@@ -67,7 +67,7 @@ was recreated. The service does not need a restart when only the APK changes.
 Connect the phone to the same hotspot as the Pi. The current hotspot address is:
 
 ```text
-http://10.159.83.236:8080/
+http://10.129.205.32:8080/
 ```
 
 If the hotspot assigns a different address later, find it with `hostname -I`
@@ -80,7 +80,7 @@ http://<PI_IP>:8080/
 The direct debug APK path is:
 
 ```text
-http://10.159.83.236:8080/app-debug.apk
+http://10.129.205.32:8080/app-debug.apk
 ```
 
 Android may ask for permission to install apps downloaded by that browser.
