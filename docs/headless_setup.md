@@ -148,6 +148,44 @@ Or from the app: **Refresh KWS Service**.
 | Disk full | `df -h /`, `systemctl start project-pi-log-cleanup.service` |
 | Old `kws-alert-vosk.service` | Deprecated; use `kws-alert.service` (boot script installs it every boot) |
 
+### Raspberry Pi 5 GPIO / Blinka Diagnostics
+
+Raspberry Pi 5 GPIO chip numbers are not stable identifiers across OS and
+kernel builds. For MLX90640/Blinka startup, the important controller label is
+`pinctrl-rp1`, not a fixed number such as `gpiochip11` or `gpiochip15`.
+
+Inspect the current kernel GPIO view:
+
+```bash
+gpiodetect
+```
+
+Example:
+
+```text
+gpiochip15 [pinctrl-rp1]
+```
+
+Run the non-destructive Project Pi diagnostic:
+
+```bash
+cd ~/Project_Pi
+python raspberry_pi/scripts/patch_blinka_lgpio_pin.py --diagnose
+```
+
+Then check Blinka/MLX90640 imports with the thermal virtual environment:
+
+```bash
+GPIOZERO_PIN_FACTORY=lgpio \
+/home/thesis/thermal-env-sys/bin/python -c \
+"import board, adafruit_mlx90640; print('Blinka/MLX90640 imports OK')"
+```
+
+The repository service patches Blinka at startup to discover `pinctrl-rp1`
+dynamically. For unusual deployments, an administrator can temporarily set
+`LGPIO_CHIP=<chip-number>`, but the default service does not assume a fixed
+GPIO chip number.
+
 ## File Locations
 
 ```text
