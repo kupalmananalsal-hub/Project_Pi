@@ -8,7 +8,7 @@ deployment pipeline.
 The scripts expect the datasets under:
 
 ```text
-~/thesis_dataset/thermal/raw/
+dataset/thermal/raw/
 ```
 
 Configured sources:
@@ -45,7 +45,7 @@ python3 raspberry_pi/thermal/preprocess_thermal_datasets.py --dataset all
 Output:
 
 ```text
-~/thesis_dataset/thermal/processed/thermal_human_detection.npz
+dataset/thermal/processed/thermal_human_detection.npz
 ```
 
 The NPZ contains:
@@ -99,7 +99,7 @@ deactivate
 Recorded frames are saved under:
 
 ```text
-~/thesis_dataset/thermal/recorded/
+dataset/thermal/recorded/
 ```
 
 Include them in preprocessing:
@@ -115,7 +115,7 @@ Train on Colab or a stronger machine:
 ```bash
 python3 -m pip install tensorflow numpy matplotlib
 python3 raspberry_pi/thermal/train_thermal_model.py \
-  --data ~/thesis_dataset/thermal/processed/thermal_human_detection.npz \
+  --data dataset/thermal/processed/thermal_human_detection.npz \
   --epochs 40 \
   --batch-size 64 \
   --split-by source_id
@@ -124,16 +124,16 @@ python3 raspberry_pi/thermal/train_thermal_model.py \
 The exported model is:
 
 ```text
-raspberry_pi/thermal/models/thermal_human_detector.tflite
+dataset/thermal/models/thermal_human_detector.tflite
 ```
 
 Training also writes:
 
 ```text
-raspberry_pi/thermal/models/split.json
-raspberry_pi/thermal/models/thermal_human_detector.metadata.json
-raspberry_pi/thermal/models/thermal_human_detector_metrics.json
-raspberry_pi/thermal/models/thermal_human_detector_pr_curve.png
+dataset/thermal/models/split.json
+dataset/thermal/models/thermal_human_detector.metadata.json
+dataset/thermal/models/thermal_human_detector_metrics.json
+dataset/thermal/models/thermal_human_detector_pr_curve.png
 ```
 
 Copy that file to the same path on the Raspberry Pi.
@@ -161,7 +161,9 @@ to the existing rule-based heuristic.
 Runtime environment variables:
 
 ```ini
-Environment=THERMAL_HUMAN_MODEL_PATH=/home/thesis/Project_Pi/raspberry_pi/thermal/models/thermal_human_detector.tflite
+Environment=DATASET_DIR=/home/thesis/Project_Pi/dataset
+Environment=THERMAL_HUMAN_MODEL_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_detector.tflite
+Environment=THERMAL_HUMAN_MODEL_METADATA_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_detector.metadata.json
 Environment=THERMAL_HUMAN_MODEL_THRESHOLD=0.55
 ```
 

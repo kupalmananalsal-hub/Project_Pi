@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -11,60 +12,63 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
-ROOT = Path.home() / "thesis_dataset"
+PROJECT_ROOT = Path(
+    os.getenv("PROJECT_PI_ROOT", Path(__file__).resolve().parents[2])
+).expanduser()
+ROOT = Path(os.getenv("DATASET_DIR", str(PROJECT_ROOT / "dataset"))).expanduser()
 
 DATASETS = {
     "ms-snsd": {
         "url": "https://github.com/microsoft/MS-SNSD.git",
         "type": "git",
-        "path": ROOT / "MS-SNSD",
+        "path": ROOT / "audio" / "augmentation" / "synthetic_noise" / "MS-SNSD",
         "purpose": "Noise suppression training",
     },
     "fda_thermal": {
         "url": "https://cdrh-rst.fda.gov/dataset-infrared-facial-and-oral-temperatures-human-volunteers",
         "type": "manual",
-        "path": ROOT / "fda_thermal",
+        "path": ROOT / "thermal" / "raw" / "fda_thermal",
         "purpose": "Human skin temperature baseline",
         "notes": "Download the FDA dataset manually if the site requires form acceptance.",
     },
     "speech_commands": {
         "url": "http://download.tensorflow.org/data/speech_commands_v0.02.tar.gz",
         "type": "download",
-        "path": ROOT / "speech_commands",
+        "path": ROOT / "audio" / "real_clips" / "en" / "speech_commands",
         "archive_name": "speech_commands_v0.02.tar.gz",
         "purpose": "Keyword spotting validation",
     },
     "esc50": {
         "url": "https://github.com/karolpiczak/ESC-50.git",
         "type": "git",
-        "path": ROOT / "ESC-50",
+        "path": ROOT / "audio" / "augmentation" / "synthetic_noise" / "ESC-50",
         "purpose": "Environmental sound classification",
     },
     "demand": {
         "url": "https://zenodo.org/record/1227121/files/DEMAND.zip",
         "type": "download",
-        "path": ROOT / "DEMAND",
+        "path": ROOT / "audio" / "augmentation" / "synthetic_noise" / "DEMAND",
         "archive_name": "DEMAND.zip",
         "purpose": "Noise augmentation",
     },
     "vpqad": {
         "url": "https://github.com/placeholder/VPQAD",
         "type": "manual",
-        "path": ROOT / "VPQAD",
+        "path": ROOT / "audio" / "augmentation" / "vpqad",
         "purpose": "Real-world noisy environment recordings for robustness testing",
         "notes": "Provide the final VPQAD source URL in this script before download.",
     },
     "iphd": {
         "url": "https://github.com/placeholder/IPHD",
         "type": "manual",
-        "path": ROOT / "IPHD",
+        "path": ROOT / "thermal" / "raw" / "iphd",
         "purpose": "Thermal human detection with bounding boxes",
         "notes": "Provide the final IPHD source URL in this script before download.",
     },
     "pd_t": {
         "url": "https://github.com/placeholder/PD-T",
         "type": "manual",
-        "path": ROOT / "PD-T",
+        "path": ROOT / "thermal" / "raw" / "pd_t",
         "purpose": "Outdoor thermal person detection",
         "notes": "Provide the final PD-T source URL in this script before download.",
     },
@@ -89,7 +93,7 @@ def download_all() -> None:
             continue
 
         archive_name = dataset.get("archive_name") or Path(urlparse(dataset["url"]).path).name
-        archive_path = ROOT / archive_name
+        archive_path = ROOT / "archives" / archive_name
         _download_file(dataset["url"], archive_path)
         _extract_archive(archive_path, dataset_path)
 

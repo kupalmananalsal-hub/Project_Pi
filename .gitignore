@@ -66,5 +66,17 @@ thermal_models_backup_*/
 raspberry_pi/*.onnx
 raspberry_pi/*.onnx.data
 
+# Central dataset storage. Keep runtime models tracked, but ignore raw/generated
+# training corpora and processed outputs.
+dataset/thermal/raw/**
+dataset/thermal/recorded/**
+dataset/thermal/processed/**
+dataset/archives/**
+dataset/audio/real_clips/**
+dataset/audio/tts_clips/**
+dataset/audio/augmentation/**
+dataset/audio/processed/**
+!dataset/**/.gitkeep
+
 # Local editor settings
 .vscode/

@@ -29,7 +29,8 @@ Environment=NOISE_PROFILE_SECONDS=2.0
 Environment=NOISE_PROFILE_ADAPT_RATE=0.05
 Environment=NOISE_LOG_INTERVAL_SECONDS=5.0
 Environment=OPENWAKEWORD_ENABLED=1
-Environment="OPENWAKEWORD_MODEL_DIR=/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models"
+Environment="DATASET_DIR=/home/thesis/Project_Pi/dataset"
+Environment="OPENWAKEWORD_MODEL_DIR=/home/thesis/Project_Pi/dataset/audio/openwakeword_models"
 Environment=OPENWAKEWORD_VAD_THRESHOLD=0.40
 Environment=OPENWAKEWORD_WAKE_THRESHOLD=0.40
 Environment="OPENWAKEWORD_MODEL_THRESHOLDS=tulong=0.30,saklolo=0.30,ang sakit=0.30,agai=0.30,aray=0.30,sunog=0.30,help=0.45,save me=0.45,help me=0.45,please help=0.45,rescue=0.45,emergency=0.45,over here=0.45,ouch=0.45"

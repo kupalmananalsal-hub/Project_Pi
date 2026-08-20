@@ -12,10 +12,24 @@ import numpy as np
 
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_MODEL_PATH = Path(
-    "/home/thesis/Project_Pi/raspberry_pi/thermal/models/thermal_human_detector.tflite"
+PROJECT_ROOT = Path(
+    os.getenv("PROJECT_PI_ROOT", Path(__file__).resolve().parents[2])
+).expanduser()
+DATASET_DIR = Path(os.getenv("DATASET_DIR", str(PROJECT_ROOT / "dataset"))).expanduser()
+DEFAULT_MODEL_PATH = DATASET_DIR / "thermal" / "models" / "thermal_human_detector.tflite"
+LEGACY_MODEL_PATH = (
+    PROJECT_ROOT / "raspberry_pi" / "thermal" / "models" / "thermal_human_detector.tflite"
 )
 DEFAULT_MODEL_THRESHOLD = 0.55
+
+
+def _default_model_path() -> Path:
+    configured = os.getenv("THERMAL_HUMAN_MODEL_PATH")
+    if configured:
+        return Path(configured)
+    if DEFAULT_MODEL_PATH.exists() or not LEGACY_MODEL_PATH.exists():
+        return DEFAULT_MODEL_PATH
+    return LEGACY_MODEL_PATH
 
 
 @dataclass(frozen=True)
@@ -75,10 +89,7 @@ class ThermalConfidenceScorer:
         self.width = width
         self.height = height
         self.temporal_required = temporal_required
-        self.model_path = Path(
-            model_path
-            or os.getenv("THERMAL_HUMAN_MODEL_PATH", str(DEFAULT_MODEL_PATH))
-        ).expanduser()
+        self.model_path = Path(model_path or _default_model_path()).expanduser()
         self.metadata_path = Path(
             os.getenv(
                 "THERMAL_HUMAN_MODEL_METADATA_PATH",

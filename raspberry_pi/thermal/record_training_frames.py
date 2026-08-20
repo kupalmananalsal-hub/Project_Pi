@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import time
 from datetime import datetime, timezone
@@ -11,7 +12,11 @@ from pathlib import Path
 import numpy as np
 
 
-DEFAULT_OUTPUT_ROOT = Path.home() / "thesis_dataset" / "thermal" / "recorded"
+PROJECT_ROOT = Path(
+    os.getenv("PROJECT_PI_ROOT", Path(__file__).resolve().parents[2])
+).expanduser()
+DATASET_DIR = Path(os.getenv("DATASET_DIR", str(PROJECT_ROOT / "dataset"))).expanduser()
+DEFAULT_OUTPUT_ROOT = DATASET_DIR / "thermal" / "recorded"
 RUNNING = True
 
 

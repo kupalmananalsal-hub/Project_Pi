@@ -13,7 +13,11 @@ import pyaudio
 from audio_preprocessor import AudioPreprocessor
 
 
-DEFAULT_MODEL_DIR = Path("/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models")
+PROJECT_ROOT = Path(
+    os.getenv("PROJECT_PI_ROOT", Path(__file__).resolve().parents[2])
+).expanduser()
+DATASET_DIR = Path(os.getenv("DATASET_DIR", str(PROJECT_ROOT / "dataset"))).expanduser()
+DEFAULT_MODEL_DIR = DATASET_DIR / "audio" / "openwakeword_models"
 DEFAULT_PHRASES = ("tulong", "saklolo", "ang sakit", "agai", "aray", "sunog")
 
 

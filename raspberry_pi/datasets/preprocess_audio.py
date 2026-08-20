@@ -4,6 +4,7 @@ from __future__ import annotations
 import audioop
 import json
 import math
+import os
 import random
 import wave
 from pathlib import Path
@@ -12,7 +13,11 @@ import numpy as np
 
 
 SAMPLE_RATE = 16000
-OUTPUT_ROOT = Path.home() / "thesis_dataset" / "processed_audio"
+PROJECT_ROOT = Path(
+    os.getenv("PROJECT_PI_ROOT", Path(__file__).resolve().parents[2])
+).expanduser()
+DATASET_DIR = Path(os.getenv("DATASET_DIR", str(PROJECT_ROOT / "dataset"))).expanduser()
+OUTPUT_ROOT = DATASET_DIR / "audio" / "processed"
 SNR_LEVELS = (-5, 0, 5, 10, 15)
 
 
@@ -53,8 +58,12 @@ def generate_noisy_speech_pairs(
     noise_root: str | Path | None = None,
     output_root: str | Path | None = None,
 ) -> Path:
-    clean_root = Path(clean_root or Path.home() / "thesis_dataset" / "speech_commands").expanduser()
-    noise_root = Path(noise_root or Path.home() / "thesis_dataset" / "MS-SNSD").expanduser()
+    clean_root = Path(
+        clean_root or DATASET_DIR / "audio" / "real_clips" / "en" / "speech_commands"
+    ).expanduser()
+    noise_root = Path(
+        noise_root or DATASET_DIR / "audio" / "augmentation" / "synthetic_noise" / "MS-SNSD"
+    ).expanduser()
     output_root = Path(output_root or OUTPUT_ROOT / "noisy_pairs").expanduser()
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -103,7 +112,7 @@ def create_keyword_dataset(
     keyword_root: str | Path | None = None,
     output_path: str | Path | None = None,
 ) -> Path:
-    keyword_root = Path(keyword_root or Path.home() / "thesis_dataset" / "keywords").expanduser()
+    keyword_root = Path(keyword_root or DATASET_DIR / "audio" / "real_clips").expanduser()
     output_path = Path(output_path or OUTPUT_ROOT / "keyword_dataset.jsonl").expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -12,7 +13,11 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
-ROOT = Path.home() / "thesis_dataset" / "thermal"
+PROJECT_ROOT = Path(
+    os.getenv("PROJECT_PI_ROOT", Path(__file__).resolve().parents[2])
+).expanduser()
+DATASET_DIR = Path(os.getenv("DATASET_DIR", str(PROJECT_ROOT / "dataset"))).expanduser()
+ROOT = DATASET_DIR / "thermal"
 RAW_ROOT = ROOT / "raw"
 
 DATASETS: dict[str, dict[str, str]] = {
@@ -59,7 +64,7 @@ def main() -> None:
         "--root",
         type=Path,
         default=ROOT,
-        help="Dataset root. Defaults to ~/thesis_dataset/thermal.",
+        help="Dataset root. Defaults to Project_Pi/dataset/thermal.",
     )
     args = parser.parse_args()
 

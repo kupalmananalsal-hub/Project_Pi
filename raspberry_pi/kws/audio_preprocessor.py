@@ -8,13 +8,21 @@ from typing import Any
 import numpy as np
 
 
-DEFAULT_MODEL_DIR = Path("/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models")
+PROJECT_ROOT = Path(
+    os.getenv("PROJECT_PI_ROOT", Path(__file__).resolve().parents[2])
+).expanduser()
+DATASET_DIR = Path(os.getenv("DATASET_DIR", str(PROJECT_ROOT / "dataset"))).expanduser()
+DEFAULT_MODEL_DIR = DATASET_DIR / "audio" / "openwakeword_models"
+LEGACY_MODEL_DIR = PROJECT_ROOT / "raspberry_pi" / "kws" / "openwakeword_models"
 
 
 def _model_dir_from_env() -> Path:
-    return Path(
-        os.getenv("OPENWAKEWORD_MODEL_DIR", str(DEFAULT_MODEL_DIR))
-    ).expanduser()
+    configured = os.getenv("OPENWAKEWORD_MODEL_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    if DEFAULT_MODEL_DIR.exists() or not LEGACY_MODEL_DIR.exists():
+        return DEFAULT_MODEL_DIR
+    return LEGACY_MODEL_DIR
 
 
 MODEL_DIR = _model_dir_from_env()

@@ -1,6 +1,6 @@
 # openWakeWord Models
 
-Place the custom openWakeWord models used by the Pi keyword service here:
+Deployable custom openWakeWord models used by the Pi keyword service live here:
 
 ```text
 tulong.onnx
@@ -18,8 +18,11 @@ please_help.onnx.data
 The systemd service loads them from:
 
 ```text
-/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/
+/home/thesis/Project_Pi/dataset/audio/openwakeword_models/
 ```
+
+The legacy path `raspberry_pi/kws/openwakeword_models` is kept as a symlink on
+Linux checkouts for older scripts and operator muscle memory.
 
 The keyword service automatically loads every `.onnx` file in this directory.
 Keep each `.onnx.data` companion file beside its `.onnx` model. Companion data
@@ -29,4 +32,5 @@ Missing or unloadable models are skipped at startup, so you can copy trained
 models into this directory incrementally. File names become the alert keyword
 shown by the backend after underscores are converted to spaces.
 
-Model training steps live in [`../README.md`](../README.md).
+Model training steps live in
+[`raspberry_pi/kws/README.md`](../../../raspberry_pi/kws/README.md).

@@ -1,0 +1,17 @@
+project_root: /home/thesis/Project_Pi
+dataset_dir: /home/thesis/Project_Pi/dataset
+
+thermal:
+  raw_dir: /home/thesis/Project_Pi/dataset/thermal/raw
+  recorded_dir: /home/thesis/Project_Pi/dataset/thermal/recorded
+  processed_dir: /home/thesis/Project_Pi/dataset/thermal/processed
+  models_dir: /home/thesis/Project_Pi/dataset/thermal/models
+  model_path: /home/thesis/Project_Pi/dataset/thermal/models/thermal_human_detector.tflite
+  metadata_path: /home/thesis/Project_Pi/dataset/thermal/models/thermal_human_detector.metadata.json
+
+audio:
+  real_clips_dir: /home/thesis/Project_Pi/dataset/audio/real_clips
+  tts_clips_dir: /home/thesis/Project_Pi/dataset/audio/tts_clips
+  augmentation_dir: /home/thesis/Project_Pi/dataset/audio/augmentation
+  processed_dir: /home/thesis/Project_Pi/dataset/audio/processed
+  openwakeword_models_dir: /home/thesis/Project_Pi/dataset/audio/openwakeword_models

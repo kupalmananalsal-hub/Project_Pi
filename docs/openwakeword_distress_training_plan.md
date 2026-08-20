@@ -524,16 +524,16 @@ validation_set_features.npy
 
 ## Copy Models To The Pi
 
-Copy each finished `.tflite` file to:
+Copy each finished `.onnx` file and its `.onnx.data` companion to:
 
 ```text
-/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/
+/home/thesis/Project_Pi/dataset/audio/openwakeword_models/
 ```
 
 Example:
 
 ```bash
-scp my_custom_model/save_me.tflite thesis@10.129.205.32:/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/
+scp my_custom_model/save_me.onnx my_custom_model/save_me.onnx.data thesis@10.129.205.32:/home/thesis/Project_Pi/dataset/audio/openwakeword_models/
 ```
 
 Then restart:
@@ -551,7 +551,7 @@ exists in the model directory.
 Start with:
 
 ```bash
-OPENWAKEWORD_MODEL_DIR=/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models
+OPENWAKEWORD_MODEL_DIR=/home/thesis/Project_Pi/dataset/audio/openwakeword_models
 OPENWAKEWORD_WAKE_THRESHOLD=0.65
 OPENWAKEWORD_VAD_THRESHOLD=0.50
 ```

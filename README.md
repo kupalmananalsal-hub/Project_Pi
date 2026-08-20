@@ -37,9 +37,10 @@ Android may not resolve it reliably.
 
 ## Distress Phrase Models
 
-The Pi keyword service can load multiple openWakeWord `.tflite` distress phrase
-models from `raspberry_pi/kws/openwakeword_models/`. Training guidance for the
-expanded English and Tagalog phrase set is in
+The Pi keyword service loads openWakeWord `.onnx` distress phrase model pairs
+from `dataset/audio/openwakeword_models/`. The legacy
+`raspberry_pi/kws/openwakeword_models` path is kept as a compatibility symlink
+on the Pi. Training guidance for the expanded English and Tagalog phrase set is in
 [`docs/openwakeword_distress_training_plan.md`](docs/openwakeword_distress_training_plan.md).
 
 ## Mobile Notes

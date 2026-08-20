@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -26,7 +27,11 @@ except Exception:  # pragma: no cover - optional training dependency
 
 WIDTH = 32
 HEIGHT = 24
-DEFAULT_ROOT = Path.home() / "thesis_dataset" / "thermal"
+PROJECT_ROOT = Path(
+    os.getenv("PROJECT_PI_ROOT", Path(__file__).resolve().parents[2])
+).expanduser()
+DATASET_DIR = Path(os.getenv("DATASET_DIR", str(PROJECT_ROOT / "dataset"))).expanduser()
+DEFAULT_ROOT = DATASET_DIR / "thermal"
 RAW_ROOT = DEFAULT_ROOT / "raw"
 RECORDED_ROOT = DEFAULT_ROOT / "recorded"
 PROCESSED_ROOT = DEFAULT_ROOT / "processed"

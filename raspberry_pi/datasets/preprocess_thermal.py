@@ -3,13 +3,18 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 
 
-OUTPUT_ROOT = Path.home() / "thesis_dataset" / "processed_thermal"
+PROJECT_ROOT = Path(
+    os.getenv("PROJECT_PI_ROOT", Path(__file__).resolve().parents[2])
+).expanduser()
+DATASET_DIR = Path(os.getenv("DATASET_DIR", str(PROJECT_ROOT / "dataset"))).expanduser()
+OUTPUT_ROOT = DATASET_DIR / "thermal" / "processed"
 
 
 def resample_to_mlx90640(image: np.ndarray | list[list[float]] | list[float]) -> np.ndarray:
@@ -252,7 +257,7 @@ def _body_parts_for_label(label: str) -> list[str]:
 
 
 if __name__ == "__main__":
-    dataset_root = Path.home() / "thesis_dataset" / "fda_thermal"
+    dataset_root = DATASET_DIR / "thermal" / "raw" / "fda_thermal"
     stats = extract_temperature_statistics(dataset_root)
     print(json.dumps(stats, indent=2))
     generate_training_data(dataset_root)

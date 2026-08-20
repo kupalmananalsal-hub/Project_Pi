@@ -9,7 +9,7 @@ datasets used by the Raspberry Pi 5 emergency alert thesis project.
   - clones Git-based datasets
   - downloads archive-based datasets
   - creates manual-download placeholders for sources that require form access
-  - writes `~/thesis_dataset/dataset_inventory.json`
+  - writes `dataset/dataset_inventory.json`
 - `preprocess_thermal.py`
   - resamples thermal frames to the MLX90640 format (`32x24`)
   - extracts temperature statistics
@@ -22,7 +22,7 @@ datasets used by the Raspberry Pi 5 emergency alert thesis project.
 ## Default Dataset Root
 
 ```text
-~/thesis_dataset
+Project_Pi/dataset
 ```
 
 ## Example Usage

@@ -129,7 +129,8 @@ openWakeWord is configured through systemd environment variables:
 
 ```ini
 Environment=OPENWAKEWORD_ENABLED=1
-Environment="OPENWAKEWORD_MODEL_DIR=/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models"
+Environment="DATASET_DIR=/home/thesis/Project_Pi/dataset"
+Environment="OPENWAKEWORD_MODEL_DIR=/home/thesis/Project_Pi/dataset/audio/openwakeword_models"
 Environment=OPENWAKEWORD_VAD_THRESHOLD=0.50
 Environment=OPENWAKEWORD_WAKE_THRESHOLD=0.65
 Environment="OPENWAKEWORD_MODEL_THRESHOLDS=tulong=0.55,help=0.65,save me=0.45,help me=0.45,please help=0.45"
@@ -140,7 +141,7 @@ Environment=OPENWAKEWORD_SPEEX_NOISE_SUPPRESSION=1
 The service automatically loads every `.onnx` model in:
 
 ```text
-/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/
+/home/thesis/Project_Pi/dataset/audio/openwakeword_models/
 ```
 
 Keep each model's `.onnx.data` file in the same directory. To use VAD gating
@@ -176,9 +177,9 @@ Train one model per distress phrase. Download each generated `.onnx` file and
 its `.onnx.data` companion, then copy both files to the Pi:
 
 ```bash
-mkdir -p ~/Project_Pi/raspberry_pi/kws/openwakeword_models
-scp tulong.onnx tulong.onnx.data thesis@<PI_IP>:/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/
-scp help.onnx help.onnx.data thesis@<PI_IP>:/home/thesis/Project_Pi/raspberry_pi/kws/openwakeword_models/
+mkdir -p ~/Project_Pi/dataset/audio/openwakeword_models
+scp tulong.onnx tulong.onnx.data thesis@<PI_IP>:/home/thesis/Project_Pi/dataset/audio/openwakeword_models/
+scp help.onnx help.onnx.data thesis@<PI_IP>:/home/thesis/Project_Pi/dataset/audio/openwakeword_models/
 ```
 
 If the files were downloaded on the Pi itself, move them into the same folder

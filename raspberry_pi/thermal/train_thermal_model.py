@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import subprocess
 from collections import Counter, defaultdict
@@ -14,10 +15,12 @@ import numpy as np
 
 WIDTH = 32
 HEIGHT = 24
-DEFAULT_DATA = (
-    Path.home() / "thesis_dataset" / "thermal" / "processed" / "thermal_human_detection.npz"
-)
-DEFAULT_OUTPUT_DIR = Path("raspberry_pi/thermal/models")
+PROJECT_ROOT = Path(
+    os.getenv("PROJECT_PI_ROOT", Path(__file__).resolve().parents[2])
+).expanduser()
+DATASET_DIR = Path(os.getenv("DATASET_DIR", str(PROJECT_ROOT / "dataset"))).expanduser()
+DEFAULT_DATA = DATASET_DIR / "thermal" / "processed" / "thermal_human_detection.npz"
+DEFAULT_OUTPUT_DIR = DATASET_DIR / "thermal" / "models"
 THRESHOLDS = np.round(np.arange(0.05, 1.0, 0.05), 2)
 
 
