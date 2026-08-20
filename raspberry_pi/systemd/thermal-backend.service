@@ -13,11 +13,11 @@ SupplementaryGroups=gpio i2c spi
 WorkingDirectory=/home/thesis/Project_Pi/raspberry_pi/backend
 Environment=PYTHONUNBUFFERED=1
 Environment="GPIOZERO_PIN_FACTORY=lgpio"
-Environment="LGPIO_CHIP=11"
 Environment="DATASET_DIR=/home/thesis/Project_Pi/dataset"
 Environment="THERMAL_HUMAN_MODEL_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_detector.tflite"
 Environment="THERMAL_HUMAN_MODEL_METADATA_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_detector.metadata.json"
-ExecStartPre=+/home/thesis/thermal-env-sys/bin/python /home/thesis/Project_Pi/raspberry_pi/scripts/patch_blinka_lgpio_pin.py --chips 11,4,0
+# Optional troubleshooting override: Environment="LGPIO_CHIP=<chip-number>"
+ExecStartPre=+/home/thesis/thermal-env-sys/bin/python /home/thesis/Project_Pi/raspberry_pi/scripts/patch_blinka_lgpio_pin.py
 ExecStart=/home/thesis/thermal-env-sys/bin/uvicorn main:app --host 0.0.0.0 --port 8765
 Restart=always
 RestartSec=3
