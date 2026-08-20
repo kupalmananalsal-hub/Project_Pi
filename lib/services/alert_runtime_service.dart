@@ -15,6 +15,7 @@ import '../models/app_settings.dart';
 class AlertRuntimeService {
   final _notifications = FlutterLocalNotificationsPlugin();
   final _player = AudioPlayer();
+  final _softPlayer = AudioPlayer();
 
   Timer? _vibrationFallbackTimer;
   bool _initialized = false;
@@ -72,6 +73,7 @@ class AlertRuntimeService {
     bool vibrate = true,
   }) async {
     await initialize();
+    await _softPlayer.stop();
     await _showNotification(event, vibrate: vibrate);
     await _startAudio(sound);
     if (vibrate) {
@@ -89,9 +91,23 @@ class AlertRuntimeService {
     await _notifications.cancel(id: 1001);
   }
 
+  Future<void> playSoftThermalBeep() async {
+    await initialize();
+    final session = await AudioSession.instance;
+    await session.setActive(true);
+    final file = await _softBeepFile();
+    await _softPlayer.stop();
+    await _softPlayer.setFilePath(file.path);
+    await _softPlayer.setLoopMode(LoopMode.off);
+    await _softPlayer.setVolume(0.32);
+    await _softPlayer.play();
+  }
+
   Future<void> dispose() async {
     await stopEmergency();
+    await _softPlayer.stop();
     await _player.dispose();
+    await _softPlayer.dispose();
   }
 
   Future<void> _showNotification(
@@ -175,6 +191,15 @@ class AlertRuntimeService {
     return file;
   }
 
+  Future<File> _softBeepFile() async {
+    final directory = await getTemporaryDirectory();
+    final file = File('${directory.path}/thermal_soft_beep.wav');
+    if (!await file.exists()) {
+      await file.writeAsBytes(_buildSoftBeepWave(), flush: true);
+    }
+    return file;
+  }
+
   Uint8List _buildWave(AlertSound sound) {
     final sampleRate = 44100;
     final durationSeconds = sound == AlertSound.bell ? 0.75 : 1.0;
@@ -214,6 +239,46 @@ class AlertRuntimeService {
       };
       final signal = math.sin(2 * math.pi * baseFrequency * seconds);
       final sample = (signal * envelope * 30000).round();
+      data.setInt16(44 + (i * 2), sample, Endian.little);
+    }
+
+    return bytes;
+  }
+
+  Uint8List _buildSoftBeepWave() {
+    const sampleRate = 44100;
+    const durationSeconds = 0.48;
+    final samples = (sampleRate * durationSeconds).round();
+    final dataBytes = samples * 2;
+    final bytes = Uint8List(44 + dataBytes);
+    final data = ByteData.view(bytes.buffer);
+
+    void writeAscii(int offset, String value) {
+      for (var i = 0; i < value.length; i++) {
+        bytes[offset + i] = value.codeUnitAt(i);
+      }
+    }
+
+    writeAscii(0, 'RIFF');
+    data.setUint32(4, 36 + dataBytes, Endian.little);
+    writeAscii(8, 'WAVEfmt ');
+    data.setUint32(16, 16, Endian.little);
+    data.setUint16(20, 1, Endian.little);
+    data.setUint16(22, 1, Endian.little);
+    data.setUint32(24, sampleRate, Endian.little);
+    data.setUint32(28, sampleRate * 2, Endian.little);
+    data.setUint16(32, 2, Endian.little);
+    data.setUint16(34, 16, Endian.little);
+    writeAscii(36, 'data');
+    data.setUint32(40, dataBytes, Endian.little);
+
+    for (var i = 0; i < samples; i++) {
+      final seconds = i / sampleRate;
+      final firstBeep = seconds >= 0.03 && seconds <= 0.13;
+      final secondBeep = seconds >= 0.25 && seconds <= 0.35;
+      final envelope = firstBeep || secondBeep ? 1.0 : 0.0;
+      final signal = math.sin(2 * math.pi * 1760 * seconds);
+      final sample = (signal * envelope * 18000).round();
       data.setInt16(44 + (i * 2), sample, Endian.little);
     }
 

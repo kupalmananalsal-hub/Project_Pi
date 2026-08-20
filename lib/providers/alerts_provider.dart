@@ -21,6 +21,7 @@ class AlertsState {
     this.pendingGuidance,
     this.pendingGuidanceHumanDetected = false,
     this.keywordNotice,
+    this.thermalSoftAlert = false,
     this.activeAlert,
     this.activeAlertHumanDetected = false,
     this.activeAlertThermalFrame,
@@ -32,6 +33,7 @@ class AlertsState {
   final AlertEvent? pendingGuidance;
   final bool pendingGuidanceHumanDetected;
   final AlertEvent? keywordNotice;
+  final bool thermalSoftAlert;
   final AlertEvent? activeAlert;
   final bool activeAlertHumanDetected;
   final ThermalFrame? activeAlertThermalFrame;
@@ -43,6 +45,7 @@ class AlertsState {
     Object? pendingGuidance = _unset,
     bool? pendingGuidanceHumanDetected,
     Object? keywordNotice = _unset,
+    bool? thermalSoftAlert,
     Object? activeAlert = _unset,
     bool? activeAlertHumanDetected,
     Object? activeAlertThermalFrame = _unset,
@@ -59,6 +62,7 @@ class AlertsState {
       keywordNotice: keywordNotice == _unset
           ? this.keywordNotice
           : keywordNotice as AlertEvent?,
+      thermalSoftAlert: thermalSoftAlert ?? this.thermalSoftAlert,
       activeAlert: activeAlert == _unset
           ? this.activeAlert
           : activeAlert as AlertEvent?,
@@ -75,16 +79,29 @@ class AlertsState {
 
 class AlertsController extends Notifier<AlertsState> {
   static const _keywordNoticeDuration = Duration(seconds: 5);
+  static const _thermalConfirmationWindow = Duration(seconds: 2);
+  static const _thermalSoftAlertDuration = Duration(seconds: 4);
+  static const _thermalSoftBeepCooldown = Duration(seconds: 7);
 
   ReconnectingWebSocketService<AlertEvent>? _socket;
   StreamSubscription<AlertEvent>? _alertSubscription;
   StreamSubscription<SocketConnectionStatus>? _statusSubscription;
   Timer? _keywordNoticeTimer;
+  Timer? _pendingVoiceTimer;
+  Timer? _thermalSoftAlertTimer;
+  AlertEvent? _pendingVoiceEvent;
+  DateTime? _pendingVoiceStartedAt;
+  DateTime? _lastThermalHumanAt;
+  ThermalFrame? _lastThermalHumanFrame;
+  DateTime? _lastSoftBeepAt;
 
   @override
   AlertsState build() {
+    ref.listen<ThermalState>(thermalProvider, _handleThermalStateChanged);
     ref.onDispose(() {
       _keywordNoticeTimer?.cancel();
+      _pendingVoiceTimer?.cancel();
+      _thermalSoftAlertTimer?.cancel();
       disconnect();
     });
     return const AlertsState();
@@ -163,12 +180,19 @@ class AlertsController extends Notifier<AlertsState> {
     _statusSubscription = null;
     _keywordNoticeTimer?.cancel();
     _keywordNoticeTimer = null;
+    _pendingVoiceTimer?.cancel();
+    _pendingVoiceTimer = null;
+    _pendingVoiceEvent = null;
+    _pendingVoiceStartedAt = null;
+    _thermalSoftAlertTimer?.cancel();
+    _thermalSoftAlertTimer = null;
     _socket?.disconnect();
     _socket = null;
     if (ref.mounted) {
       state = state.copyWith(
         socketStatus: SocketConnectionStatus.disconnected,
         keywordNotice: null,
+        thermalSoftAlert: false,
       );
     }
   }
@@ -202,14 +226,18 @@ class AlertsController extends Notifier<AlertsState> {
       return true;
     }());
 
-    if (event.humanDetected) {
+    if (_hasThermalPresenceFor(event)) {
       unawaited(
-        _startThermalConfirmedAlert(event, ref.read(thermalProvider).frame),
+        _startThermalConfirmedAlert(
+          event,
+          ref.read(thermalProvider).frame ?? _lastThermalHumanFrame,
+        ),
       );
       return;
     }
 
     _showKeywordNotice(event);
+    _startThermalConfirmationWindow(event);
   }
 
   void _addAlertToHistorySilently(AlertEvent event) {
@@ -222,12 +250,89 @@ class AlertsController extends Notifier<AlertsState> {
 
   void _showKeywordNotice(AlertEvent event) {
     _keywordNoticeTimer?.cancel();
-    state = state.copyWith(keywordNotice: event, error: null);
+    state = state.copyWith(
+      keywordNotice: event,
+      thermalSoftAlert: false,
+      error: null,
+    );
     _keywordNoticeTimer = Timer(_keywordNoticeDuration, () {
       if (ref.mounted) {
         state = state.copyWith(keywordNotice: null);
       }
     });
+  }
+
+  void _startThermalConfirmationWindow(AlertEvent event) {
+    _pendingVoiceTimer?.cancel();
+    _pendingVoiceEvent = event;
+    _pendingVoiceStartedAt = DateTime.now();
+    _pendingVoiceTimer = Timer(_thermalConfirmationWindow, () {
+      if (_pendingVoiceEvent == event) {
+        _pendingVoiceEvent = null;
+        _pendingVoiceStartedAt = null;
+      }
+    });
+  }
+
+  bool _hasThermalPresenceFor(AlertEvent event) {
+    if (event.humanDetected) {
+      return true;
+    }
+    final thermal = ref.read(thermalProvider);
+    if (thermal.humanDetected) {
+      return true;
+    }
+    final lastThermalAt = _lastThermalHumanAt;
+    if (lastThermalAt == null) {
+      return false;
+    }
+    return DateTime.now().difference(lastThermalAt) <=
+        _thermalConfirmationWindow;
+  }
+
+  void _handleThermalStateChanged(ThermalState? previous, ThermalState next) {
+    final wasDetected = previous?.humanDetected ?? false;
+    if (!next.humanDetected) {
+      return;
+    }
+
+    _lastThermalHumanAt = DateTime.now();
+    _lastThermalHumanFrame = next.frame;
+
+    final pending = _pendingVoiceEvent;
+    final pendingStartedAt = _pendingVoiceStartedAt;
+    if (pending != null &&
+        pendingStartedAt != null &&
+        DateTime.now().difference(pendingStartedAt) <=
+            _thermalConfirmationWindow) {
+      unawaited(_startThermalConfirmedAlert(pending, next.frame));
+      return;
+    }
+
+    if (!wasDetected &&
+        state.keywordNotice == null &&
+        state.activeAlert == null &&
+        pending == null) {
+      _showThermalSoftAlert();
+    }
+  }
+
+  void _showThermalSoftAlert() {
+    state = state.copyWith(thermalSoftAlert: true, error: null);
+    _thermalSoftAlertTimer?.cancel();
+    _thermalSoftAlertTimer = Timer(_thermalSoftAlertDuration, () {
+      if (ref.mounted) {
+        state = state.copyWith(thermalSoftAlert: false);
+      }
+    });
+
+    final now = DateTime.now();
+    final lastSoftBeepAt = _lastSoftBeepAt;
+    if (lastSoftBeepAt == null ||
+        now.difference(lastSoftBeepAt) >= _thermalSoftBeepCooldown) {
+      _lastSoftBeepAt = now;
+      unawaited(ref.read(alertRuntimeServiceProvider).playSoftThermalBeep());
+    }
   }
 
   Future<void> _startThermalConfirmedAlert(
@@ -236,10 +341,17 @@ class AlertsController extends Notifier<AlertsState> {
   ) async {
     _keywordNoticeTimer?.cancel();
     _keywordNoticeTimer = null;
+    _pendingVoiceTimer?.cancel();
+    _pendingVoiceTimer = null;
+    _pendingVoiceEvent = null;
+    _pendingVoiceStartedAt = null;
+    _thermalSoftAlertTimer?.cancel();
+    _thermalSoftAlertTimer = null;
     state = state.copyWith(
       keywordNotice: null,
       pendingGuidance: null,
       pendingGuidanceHumanDetected: false,
+      thermalSoftAlert: false,
       activeAlert: event,
       activeAlertHumanDetected: true,
       activeAlertThermalFrame: thermalFrame,

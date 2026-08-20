@@ -10,6 +10,10 @@ void main() {
     await tester.pump();
 
     expect(find.text('Monitor'), findsWidgets);
-    expect(find.textContaining('10.129.205.32'), findsOneWidget);
+    expect(find.text('DIRECTION'), findsOneWidget);
+    expect(find.text('Listening'), findsOneWidget);
+    expect(find.text('THERMAL'), findsOneWidget);
+    expect(find.text('MICROPHONES'), findsOneWidget);
+    expect(find.text('Simulate distress call'), findsOneWidget);
   });
 }
