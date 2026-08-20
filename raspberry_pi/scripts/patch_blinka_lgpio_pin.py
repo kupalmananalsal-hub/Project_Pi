@@ -16,7 +16,7 @@ from typing import Callable, Iterable, Sequence
 RELATIVE_PATH = Path("adafruit_blinka/microcontroller/generic_linux/lgpio_pin.py")
 DEFAULT_SYSFS_GPIO_ROOT = Path("/sys/bus/gpio/devices")
 DEFAULT_DEV_ROOT = Path("/dev")
-DEFAULT_FALLBACK_CHIPS = (15, 11, 4, 0)
+DEFAULT_FALLBACK_CHIPS = ()
 RP1_LABEL = "pinctrl-rp1"
 PATCH_BEGIN = "# PROJECT_PI_DYNAMIC_RP1_GPIO_PATCH_BEGIN"
 PATCH_END = "# PROJECT_PI_DYNAMIC_RP1_GPIO_PATCH_END"
@@ -561,7 +561,7 @@ def main() -> int:
         default=list(DEFAULT_FALLBACK_CHIPS),
         help=(
             "Comma-separated fallback lgpio chip ids to try after LGPIO_CHIP "
-            "and dynamic RP1 discovery. Default: 15,11,4,0."
+            "and dynamic RP1 discovery. No fallback chips are tried unless --chips is supplied."
         ),
     )
     parser.add_argument(
