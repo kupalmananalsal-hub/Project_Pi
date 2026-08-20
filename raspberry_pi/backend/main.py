@@ -876,6 +876,56 @@ def alert_to_dict(event: AlertIn) -> dict[str, Any]:
     return event.dict()
 
 
+def thermal_evidence_for_decision(
+    thermal_payload: dict[str, Any] | None,
+    *,
+    read_error: Exception | None = None,
+) -> dict[str, Any]:
+    if thermal_payload is None:
+        evidence: dict[str, Any] = {
+            "thermal_state": "unavailable",
+            "frame_valid": False,
+        }
+        if read_error is not None:
+            evidence["thermal_error"] = str(read_error)
+        elif getattr(thermal, "error", None):
+            evidence["thermal_error"] = str(thermal.error)
+        return evidence
+
+    evidence = dict(thermal_payload or {})
+    if read_error is not None:
+        evidence["thermal_error"] = str(read_error)
+
+    last_read_at = getattr(thermal, "_last_read_at", 0.0)
+    if last_read_at:
+        evidence["frame_age_seconds"] = max(0.0, time.monotonic() - last_read_at)
+
+    temperatures = evidence.get("temperatures")
+    if temperatures is not None:
+        try:
+            evidence["frame_valid"] = len(temperatures) >= 768
+        except TypeError:
+            evidence["frame_valid"] = False
+
+    if "thermal_state" not in evidence:
+        if not evidence.get("frame_valid", True):
+            evidence["thermal_state"] = "invalid"
+        elif evidence.get("frame_age_seconds", 0.0) > decision_engine.policy.thermal_freshness_seconds:
+            evidence["thermal_state"] = "stale"
+        elif (
+            evidence.get("error")
+            or evidence.get("analysis_error")
+            or evidence.get("thermal_error")
+        ):
+            evidence["thermal_state"] = "invalid"
+        elif evidence.get("human_detected", False):
+            evidence["thermal_state"] = "positive"
+        else:
+            evidence["thermal_state"] = "negative"
+
+    return evidence
+
+
 def enrich_alert_payload(payload: dict[str, Any], thermal_payload: dict[str, Any] | None) -> dict[str, Any]:
     thermal_payload = thermal_payload or {}
     latest_audio = read_shared_audio_status() or (
@@ -897,14 +947,30 @@ def enrich_alert_payload(payload: dict[str, Any], thermal_payload: dict[str, Any
     ) or payload.get("distance_m") or latest_audio.get("distance_estimate_m")
     payload["phase"] = payload.get("phase") or "direction_guidance"
     decision = decision_engine.evaluate(payload, thermal_payload)
-    payload["human_detected"] = thermal_payload.get("human_detected", False)
+    decision_factors = decision["decision_factors"]
+    payload["raw_thermal_human_detected"] = thermal_payload.get("human_detected", False)
+    payload["human_detected"] = decision["thermal_state"] == "positive"
     payload["body_coverage"] = thermal_payload.get("body_coverage", 0.0)
     payload["detected_part"] = thermal_payload.get("detected_part", "no_human")
-    payload["thermal_confidence_boost"] = thermal_payload.get("confidence_boost", 0.0)
+    payload["thermal_confidence_boost"] = decision_factors["thermal_boost"]
+    payload["raw_thermal_confidence_boost"] = decision_factors["raw_thermal_boost"]
+    payload["thermal_confidence"] = decision_factors["thermal_confidence"]
+    payload["thermal_state"] = decision["thermal_state"]
+    payload["thermal_frame_age_seconds"] = decision_factors[
+        "thermal_frame_age_seconds"
+    ]
+    payload["thermal_frame_valid"] = decision_factors["thermal_frame_valid"]
+    payload["keyword_confidence"] = decision["keyword_confidence"]
     payload["final_confidence"] = decision["final_confidence"]
-    payload["decision_factors"] = decision["decision_factors"]
+    payload["decision_factors"] = decision_factors
+    # Legacy aliases for current Flutter builds. Do not change these outside
+    # the decision engine; `decision_state` is the authoritative state.
     payload["alert_level"] = decision["alert_level"]
     payload["should_alert"] = decision["should_alert"]
+    payload["decision_state"] = decision["decision_state"]
+    payload["decision_reason"] = decision["decision_reason"]
+    payload["alert_modality"] = decision["alert_modality"]
+    payload["policy_version"] = decision["policy_version"]
     return payload
 
 
@@ -1246,17 +1312,23 @@ async def api_alerts(event: AlertIn):
     payload = alert_to_dict(event)
     payload["type"] = "live"
     thermal_payload = None
+    thermal_error = None
     try:
-        thermal_payload = await asyncio.to_thread(thermal.latest, 1.25)
-    except Exception:
-        thermal_payload = None
+        thermal_payload = await asyncio.to_thread(
+            thermal.latest,
+            decision_engine.policy.thermal_freshness_seconds,
+        )
+    except Exception as exc:
+        thermal_error = exc
+        thermal_payload = getattr(thermal, "_last_payload", None)
 
+    thermal_payload = thermal_evidence_for_decision(
+        thermal_payload,
+        read_error=thermal_error,
+    )
     payload = enrich_alert_payload(payload, thermal_payload)
     stored_payload = await asyncio.to_thread(alert_store.insert, payload)
     broadcast_payload = dict(stored_payload)
-    if not payload["should_alert"]:
-        broadcast_payload["alert_level"] = "visual_only"
-        broadcast_payload["ui_note"] = "keyword_detected_without_thermal_confirmation"
     await alerts.publish(broadcast_payload)
     return {"ok": True, "event": stored_payload}
 
