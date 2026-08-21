@@ -17,52 +17,151 @@ final connectionProvider =
       ConnectionController.new,
     );
 
+typedef PiStatusFetcher = Future<SystemStatus> Function(String host, int port);
+
+final piStatusFetcherProvider = Provider<PiStatusFetcher>((ref) {
+  return (host, port) => PiApiService(host: host, port: port).fetchStatus();
+});
+
+class PiConnectionChannels {
+  const PiConnectionChannels({required this.connect, required this.disconnect});
+
+  final void Function(String host, int port) connect;
+  final void Function() disconnect;
+}
+
+final piConnectionChannelsProvider = Provider<PiConnectionChannels>((ref) {
+  return PiConnectionChannels(
+    connect: (host, port) {
+      ref.read(thermalProvider.notifier).connect(host, port);
+      ref.read(audioProvider.notifier).connect(host, port);
+      ref.read(alertsProvider.notifier).connect(host, port);
+      unawaited(
+        ref.read(noiseSuppressionProvider.notifier).connect(host, port),
+      );
+    },
+    disconnect: () {
+      ref.read(thermalProvider.notifier).disconnect();
+      ref.read(audioProvider.notifier).disconnect();
+      ref.read(alertsProvider.notifier).disconnect();
+      ref.read(noiseSuppressionProvider.notifier).disconnect();
+    },
+  );
+});
+
+final piAutoConnectProvider = Provider<bool>((ref) => true);
+
+enum PiConnectionStatus { disconnected, connecting, connected, error }
+
+extension PiConnectionStatusLabel on PiConnectionStatus {
+  String get label {
+    switch (this) {
+      case PiConnectionStatus.disconnected:
+        return 'Disconnected';
+      case PiConnectionStatus.connecting:
+        return 'Connecting...';
+      case PiConnectionStatus.connected:
+        return 'Connected';
+      case PiConnectionStatus.error:
+        return 'Error';
+    }
+  }
+}
+
 class PiConnectionState {
   PiConnectionState({
     String host = AppSettings.defaultHost,
     int? port,
-    this.isConnected = false,
-    this.isConnecting = false,
+    PiConnectionStatus? connectionStatus,
+    bool? isConnected,
+    bool? isConnecting,
+    this.userRequestedDisconnect = false,
     this.status,
     this.lastStatusAt,
     this.error,
   }) : host = host.trim().isEmpty ? AppSettings.defaultHost : host.trim(),
-       port = AppSettings.normalizeBackendPort(port);
+       port = AppSettings.normalizeBackendPort(port),
+       connectionStatus =
+           connectionStatus ??
+           _statusFromLegacyFlags(
+             isConnected: isConnected,
+             isConnecting: isConnecting,
+             error: error,
+           );
 
   final String host;
   final int port;
-  final bool isConnected;
-  final bool isConnecting;
+  final PiConnectionStatus connectionStatus;
+  final bool userRequestedDisconnect;
   final SystemStatus? status;
   final DateTime? lastStatusAt;
   final String? error;
 
+  bool get isConnected => connectionStatus == PiConnectionStatus.connected;
+
+  bool get isConnecting => connectionStatus == PiConnectionStatus.connecting;
+
+  String get connectionStatusLabel => connectionStatus.label;
+
   PiConnectionState copyWith({
     String? host,
     int? port,
+    PiConnectionStatus? connectionStatus,
     bool? isConnected,
     bool? isConnecting,
+    bool? userRequestedDisconnect,
     Object? status = _unset,
     Object? lastStatusAt = _unset,
     Object? error = _unset,
   }) {
+    final nextError = error == _unset ? this.error : error as String?;
     return PiConnectionState(
       host: host ?? this.host,
       port: AppSettings.normalizeBackendPort(port ?? this.port),
-      isConnected: isConnected ?? this.isConnected,
-      isConnecting: isConnecting ?? this.isConnecting,
+      connectionStatus:
+          connectionStatus ??
+          _statusFromLegacyFlags(
+            isConnected: isConnected,
+            isConnecting: isConnecting,
+            error: nextError,
+            fallback: this.connectionStatus,
+          ),
+      userRequestedDisconnect:
+          userRequestedDisconnect ?? this.userRequestedDisconnect,
       status: status == _unset ? this.status : status as SystemStatus?,
       lastStatusAt: lastStatusAt == _unset
           ? this.lastStatusAt
           : lastStatusAt as DateTime?,
-      error: error == _unset ? this.error : error as String?,
+      error: nextError,
     );
+  }
+
+  static PiConnectionStatus _statusFromLegacyFlags({
+    bool? isConnected,
+    bool? isConnecting,
+    String? error,
+    PiConnectionStatus fallback = PiConnectionStatus.disconnected,
+  }) {
+    if (isConnecting == true) {
+      return PiConnectionStatus.connecting;
+    }
+    if (isConnected == true) {
+      return PiConnectionStatus.connected;
+    }
+    if (error != null && error.isNotEmpty) {
+      return PiConnectionStatus.error;
+    }
+    if (isConnecting != null || isConnected != null) {
+      return PiConnectionStatus.disconnected;
+    }
+    return fallback;
   }
 }
 
 class ConnectionController extends Notifier<PiConnectionState> {
   Timer? _statusTimer;
   bool _startupConnectScheduled = false;
+  bool _updatingSettingsForConnect = false;
 
   @override
   PiConnectionState build() {
@@ -70,6 +169,17 @@ class ConnectionController extends Notifier<PiConnectionState> {
     ref.listen(settingsProvider, (previous, next) {
       if (previous != null &&
           (previous.host != next.host || previous.port != next.port)) {
+        if (_updatingSettingsForConnect) {
+          return;
+        }
+        if (state.userRequestedDisconnect) {
+          state = state.copyWith(host: next.host, port: next.port);
+          return;
+        }
+        if (!ref.read(piAutoConnectProvider)) {
+          state = state.copyWith(host: next.host, port: next.port);
+          return;
+        }
         unawaited(connect(host: next.host, port: next.port));
         return;
       }
@@ -77,13 +187,15 @@ class ConnectionController extends Notifier<PiConnectionState> {
         state = state.copyWith(host: next.host, port: next.port);
       }
     });
-    if (!_startupConnectScheduled) {
+    if (ref.read(piAutoConnectProvider) && !_startupConnectScheduled) {
       _startupConnectScheduled = true;
       Future.microtask(() async {
         if (!ref.mounted) {
           return;
         }
-        if (!state.isConnected && !state.isConnecting) {
+        if (!state.userRequestedDisconnect &&
+            !state.isConnected &&
+            !state.isConnecting) {
           await connect(host: settings.host, port: settings.port);
         }
       });
@@ -94,22 +206,37 @@ class ConnectionController extends Notifier<PiConnectionState> {
 
   Future<void> connect({String? host, int? port}) async {
     final settings = ref.read(settingsProvider);
-    final requestedHost = (host ?? settings.host).trim().isEmpty
-        ? AppSettings.defaultHost
-        : (host ?? settings.host).trim();
+    final requestedHost = (host ?? settings.host).trim();
     final requestedPort = AppSettings.normalizeBackendPort(
       port ?? settings.port,
     );
+    if (requestedHost.isEmpty) {
+      state = state.copyWith(
+        connectionStatus: PiConnectionStatus.error,
+        isConnected: false,
+        isConnecting: false,
+        status: null,
+        lastStatusAt: null,
+        error: 'Pi IP or hostname is required.',
+        userRequestedDisconnect: false,
+      );
+      return;
+    }
 
-    await ref.read(settingsProvider.notifier).updateHost(requestedHost);
-    await ref.read(settingsProvider.notifier).updatePort(requestedPort);
+    _updatingSettingsForConnect = true;
+    try {
+      await ref.read(settingsProvider.notifier).updateHost(requestedHost);
+      await ref.read(settingsProvider.notifier).updatePort(requestedPort);
+    } finally {
+      _updatingSettingsForConnect = false;
+    }
 
     state = state.copyWith(
       host: requestedHost,
       port: requestedPort,
-      isConnecting: true,
-      isConnected: false,
+      connectionStatus: PiConnectionStatus.connecting,
       error: null,
+      userRequestedDisconnect: false,
     );
 
     try {
@@ -117,19 +244,11 @@ class ConnectionController extends Notifier<PiConnectionState> {
         requestedHost,
         requestedPort,
       );
-      ref.read(thermalProvider.notifier).connect(target.host, target.port);
-      ref.read(audioProvider.notifier).connect(target.host, target.port);
-      ref.read(alertsProvider.notifier).connect(target.host, target.port);
-      unawaited(
-        ref
-            .read(noiseSuppressionProvider.notifier)
-            .connect(target.host, target.port),
-      );
+      ref.read(piConnectionChannelsProvider).connect(target.host, target.port);
       state = state.copyWith(
         host: target.host,
         port: target.port,
-        isConnected: true,
-        isConnecting: false,
+        connectionStatus: PiConnectionStatus.connected,
         status: target.status,
         lastStatusAt: DateTime.now(),
         error: target.usedFallback
@@ -138,31 +257,33 @@ class ConnectionController extends Notifier<PiConnectionState> {
       );
       _startPolling(target.host, target.port);
     } catch (error) {
-      disconnect();
+      _closeConnectionChannels();
       state = state.copyWith(
         host: requestedHost,
         port: requestedPort,
-        isConnected: false,
-        isConnecting: false,
+        connectionStatus: PiConnectionStatus.error,
         status: null,
         lastStatusAt: null,
         error: _friendlyError(error),
+        userRequestedDisconnect: false,
       );
     }
   }
 
   void disconnect() {
-    _stopPolling();
-    ref.read(thermalProvider.notifier).disconnect();
-    ref.read(audioProvider.notifier).disconnect();
-    ref.read(alertsProvider.notifier).disconnect();
-    ref.read(noiseSuppressionProvider.notifier).disconnect();
+    _closeConnectionChannels();
     state = state.copyWith(
-      isConnected: false,
-      isConnecting: false,
+      connectionStatus: PiConnectionStatus.disconnected,
       status: null,
       lastStatusAt: null,
+      error: null,
+      userRequestedDisconnect: true,
     );
+  }
+
+  void _closeConnectionChannels() {
+    _stopPolling();
+    ref.read(piConnectionChannelsProvider).disconnect();
   }
 
   Future<void> refreshStatus() async {
@@ -170,17 +291,21 @@ class ConnectionController extends Notifier<PiConnectionState> {
       return;
     }
     try {
-      final status = await PiApiService(
-        host: state.host,
-        port: state.port,
-      ).fetchStatus();
+      final status = await ref.read(piStatusFetcherProvider)(
+        state.host,
+        state.port,
+      );
       state = state.copyWith(
+        connectionStatus: PiConnectionStatus.connected,
         status: status,
         lastStatusAt: DateTime.now(),
         error: null,
       );
     } catch (error) {
-      state = state.copyWith(error: _friendlyError(error));
+      state = state.copyWith(
+        connectionStatus: PiConnectionStatus.error,
+        error: _friendlyError(error),
+      );
     }
   }
 
@@ -188,14 +313,18 @@ class ConnectionController extends Notifier<PiConnectionState> {
     _stopPolling();
     _statusTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
       try {
-        final status = await PiApiService(host: host, port: port).fetchStatus();
+        final status = await ref.read(piStatusFetcherProvider)(host, port);
         state = state.copyWith(
+          connectionStatus: PiConnectionStatus.connected,
           status: status,
           lastStatusAt: DateTime.now(),
           error: null,
         );
       } catch (error) {
-        state = state.copyWith(error: _friendlyError(error));
+        state = state.copyWith(
+          connectionStatus: PiConnectionStatus.error,
+          error: _friendlyError(error),
+        );
       }
     });
   }
@@ -218,10 +347,7 @@ class ConnectionController extends Notifier<PiConnectionState> {
     Object? lastError;
     for (final candidate in candidates) {
       try {
-        final status = await PiApiService(
-          host: candidate,
-          port: port,
-        ).fetchStatus();
+        final status = await ref.read(piStatusFetcherProvider)(candidate, port);
         return _ResolvedTarget(
           host: candidate,
           port: port,
@@ -237,9 +363,21 @@ class ConnectionController extends Notifier<PiConnectionState> {
 
   String _friendlyError(Object error) {
     if (error is DioException) {
-      return error.message ?? error.type.name;
+      switch (error.type) {
+        case DioExceptionType.connectionTimeout:
+        case DioExceptionType.receiveTimeout:
+        case DioExceptionType.sendTimeout:
+          return 'Connection timed out.';
+        case DioExceptionType.cancel:
+          return 'Connection cancelled.';
+        case DioExceptionType.badResponse:
+        case DioExceptionType.badCertificate:
+        case DioExceptionType.connectionError:
+        case DioExceptionType.unknown:
+          return 'Unable to connect to Raspberry Pi.';
+      }
     }
-    return error.toString();
+    return 'Unable to connect to Raspberry Pi.';
   }
 }
 

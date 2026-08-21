@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/app_settings.dart';
+import '../providers/connection_provider.dart';
 import '../providers/settings_provider.dart';
 import '../widgets/status_card.dart';
 
@@ -12,19 +13,10 @@ class SettingsScreen extends ConsumerStatefulWidget {
   ConsumerState<SettingsScreen> createState() => _SettingsScreenState();
 }
 
-Future<void> _applyConnection(WidgetRef ref, {String? host, int? port}) async {
-  final notifier = ref.read(settingsProvider.notifier);
-  if (host != null) {
-    await notifier.updateHost(host);
-  }
-  if (port != null) {
-    await notifier.updatePort(port);
-  }
-}
-
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   late final TextEditingController _hostController;
   late final TextEditingController _portController;
+  late final FocusNode _hostFocusNode;
 
   @override
   void initState() {
@@ -33,10 +25,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _portController = TextEditingController(
       text: AppSettings.defaultPort.toString(),
     );
+    _hostFocusNode = FocusNode();
   }
 
   @override
   void dispose() {
+    _hostFocusNode.dispose();
     _hostController.dispose();
     _portController.dispose();
     super.dispose();
@@ -45,7 +39,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
-    if (_hostController.text != settings.host) {
+    final connection = ref.watch(connectionProvider);
+    if (!_hostFocusNode.hasFocus && _hostController.text != settings.host) {
       _hostController.text = settings.host;
     }
     final portText = settings.port.toString();
@@ -58,29 +53,66 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          TextField(
-            controller: _hostController,
-            decoration: const InputDecoration(
-              labelText: 'Pi IP or hostname',
-              prefixIcon: Icon(Icons.lan_rounded),
-              border: OutlineInputBorder(),
-            ),
-            onSubmitted: (value) => _applyConnection(ref, host: value),
+          Text(
+            'Raspberry Pi Connection',
+            style: Theme.of(context).textTheme.titleLarge,
           ),
           const SizedBox(height: 12),
           TextField(
+            key: const ValueKey('pi-host-field'),
+            controller: _hostController,
+            focusNode: _hostFocusNode,
+            keyboardType: TextInputType.url,
+            decoration: const InputDecoration(
+              labelText: 'Pi IP / Hostname',
+              prefixIcon: Icon(Icons.lan_rounded),
+              border: OutlineInputBorder(),
+            ),
+            onSubmitted: (_) => _connect(context),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            key: const ValueKey('pi-port-field'),
             controller: _portController,
+            readOnly: true,
             keyboardType: TextInputType.number,
             decoration: const InputDecoration(
               labelText: 'Port',
               prefixIcon: Icon(Icons.numbers_rounded),
               border: OutlineInputBorder(),
             ),
-            onSubmitted: (value) => _applyConnection(
-              ref,
-              port: int.tryParse(value) ?? AppSettings.defaultPort,
-            ),
           ),
+          const SizedBox(height: 12),
+          _ConnectionStatusRow(connection: connection),
+          if (connection.error != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              connection.error!,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ],
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: connection.isConnected
+                ? OutlinedButton.icon(
+                    key: const ValueKey('pi-disconnect-button'),
+                    onPressed: _disconnect,
+                    icon: const Icon(Icons.link_off_rounded),
+                    label: const Text('Disconnect'),
+                  )
+                : FilledButton.icon(
+                    key: const ValueKey('pi-connect-button'),
+                    onPressed: connection.isConnecting
+                        ? null
+                        : () => _connect(context),
+                    icon: const Icon(Icons.link_rounded),
+                    label: Text(
+                      connection.isConnecting ? 'Connecting...' : 'Connect',
+                    ),
+                  ),
+          ),
+          const SizedBox(height: 24),
           const SizedBox(height: 12),
           DropdownButtonFormField<AlertSound>(
             initialValue: settings.alertSound,
@@ -128,6 +160,68 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  Future<void> _connect(BuildContext context) async {
+    FocusScope.of(context).unfocus();
+    final host = _hostController.text.trim();
+    if (host.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Pi IP or hostname is required.')),
+      );
+      return;
+    }
+    await ref
+        .read(connectionProvider.notifier)
+        .connect(
+          host: host,
+          port: int.tryParse(_portController.text) ?? AppSettings.defaultPort,
+        );
+    if (!context.mounted) {
+      return;
+    }
+    final connection = ref.read(connectionProvider);
+    if (connection.connectionStatus == PiConnectionStatus.error &&
+        connection.error != null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(connection.error!)));
+    }
+  }
+
+  void _disconnect() {
+    FocusScope.of(context).unfocus();
+    ref.read(connectionProvider.notifier).disconnect();
+  }
+}
+
+class _ConnectionStatusRow extends StatelessWidget {
+  const _ConnectionStatusRow({required this.connection});
+
+  final PiConnectionState connection;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final statusColor = switch (connection.connectionStatus) {
+      PiConnectionStatus.connected => Colors.greenAccent,
+      PiConnectionStatus.connecting => colorScheme.primary,
+      PiConnectionStatus.error => colorScheme.error,
+      PiConnectionStatus.disconnected => colorScheme.onSurfaceVariant,
+    };
+
+    return Row(
+      children: [
+        Text(
+          'Connection Status:',
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
+        const SizedBox(width: 8),
+        Icon(Icons.circle, size: 10, color: statusColor),
+        const SizedBox(width: 8),
+        Text(connection.connectionStatusLabel),
+      ],
     );
   }
 }
