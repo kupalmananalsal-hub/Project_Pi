@@ -21,6 +21,7 @@ class AlertsState {
     this.pendingGuidance,
     this.pendingGuidanceHumanDetected = false,
     this.keywordNotice,
+    this.recentVoiceDetection,
     this.thermalSoftAlert = false,
     this.activeAlert,
     this.activeAlertHumanDetected = false,
@@ -33,6 +34,7 @@ class AlertsState {
   final AlertEvent? pendingGuidance;
   final bool pendingGuidanceHumanDetected;
   final AlertEvent? keywordNotice;
+  final AlertEvent? recentVoiceDetection;
   final bool thermalSoftAlert;
   final AlertEvent? activeAlert;
   final bool activeAlertHumanDetected;
@@ -45,6 +47,7 @@ class AlertsState {
     Object? pendingGuidance = _unset,
     bool? pendingGuidanceHumanDetected,
     Object? keywordNotice = _unset,
+    Object? recentVoiceDetection = _unset,
     bool? thermalSoftAlert,
     Object? activeAlert = _unset,
     bool? activeAlertHumanDetected,
@@ -62,6 +65,9 @@ class AlertsState {
       keywordNotice: keywordNotice == _unset
           ? this.keywordNotice
           : keywordNotice as AlertEvent?,
+      recentVoiceDetection: recentVoiceDetection == _unset
+          ? this.recentVoiceDetection
+          : recentVoiceDetection as AlertEvent?,
       thermalSoftAlert: thermalSoftAlert ?? this.thermalSoftAlert,
       activeAlert: activeAlert == _unset
           ? this.activeAlert
@@ -79,6 +85,7 @@ class AlertsState {
 
 class AlertsController extends Notifier<AlertsState> {
   static const _keywordNoticeDuration = Duration(seconds: 5);
+  static const _recentVoiceDetectionDuration = Duration(seconds: 3);
   static const _thermalConfirmationWindow = Duration(seconds: 2);
   static const _thermalSoftAlertDuration = Duration(seconds: 4);
   static const _thermalSoftBeepCooldown = Duration(seconds: 7);
@@ -87,6 +94,7 @@ class AlertsController extends Notifier<AlertsState> {
   StreamSubscription<AlertEvent>? _alertSubscription;
   StreamSubscription<SocketConnectionStatus>? _statusSubscription;
   Timer? _keywordNoticeTimer;
+  Timer? _recentVoiceDetectionTimer;
   Timer? _pendingVoiceTimer;
   Timer? _thermalSoftAlertTimer;
   AlertEvent? _pendingVoiceEvent;
@@ -100,6 +108,7 @@ class AlertsController extends Notifier<AlertsState> {
     ref.listen<ThermalState>(thermalProvider, _handleThermalStateChanged);
     ref.onDispose(() {
       _keywordNoticeTimer?.cancel();
+      _recentVoiceDetectionTimer?.cancel();
       _pendingVoiceTimer?.cancel();
       _thermalSoftAlertTimer?.cancel();
       disconnect();
@@ -190,6 +199,8 @@ class AlertsController extends Notifier<AlertsState> {
     _statusSubscription = null;
     _keywordNoticeTimer?.cancel();
     _keywordNoticeTimer = null;
+    _recentVoiceDetectionTimer?.cancel();
+    _recentVoiceDetectionTimer = null;
     _pendingVoiceTimer?.cancel();
     _pendingVoiceTimer = null;
     _pendingVoiceEvent = null;
@@ -202,6 +213,7 @@ class AlertsController extends Notifier<AlertsState> {
       state = state.copyWith(
         socketStatus: SocketConnectionStatus.disconnected,
         keywordNotice: null,
+        recentVoiceDetection: null,
         thermalSoftAlert: false,
       );
     }
@@ -225,6 +237,10 @@ class AlertsController extends Notifier<AlertsState> {
 
     if (event.duplicateEvent) {
       return;
+    }
+
+    if (event.isVoiceKeywordDetection) {
+      _markRecentVoiceDetection(event);
     }
 
     if (event.hasAuthoritativeDecision) {
@@ -323,6 +339,16 @@ class AlertsController extends Notifier<AlertsState> {
     _keywordNoticeTimer = Timer(_keywordNoticeDuration, () {
       if (ref.mounted) {
         state = state.copyWith(keywordNotice: null);
+      }
+    });
+  }
+
+  void _markRecentVoiceDetection(AlertEvent event) {
+    _recentVoiceDetectionTimer?.cancel();
+    state = state.copyWith(recentVoiceDetection: event);
+    _recentVoiceDetectionTimer = Timer(_recentVoiceDetectionDuration, () {
+      if (ref.mounted && state.recentVoiceDetection == event) {
+        state = state.copyWith(recentVoiceDetection: null);
       }
     });
   }

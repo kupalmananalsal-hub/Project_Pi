@@ -198,6 +198,31 @@ class AlertEvent {
 
   bool get isKeywordDetection => event == 'keyword_detected';
 
+  bool get isVoiceKeywordDetection {
+    if (!isLive || duplicateEvent || !isKeywordDetection) {
+      return false;
+    }
+    if (alertModality == AlertModality.thermalOnly ||
+        alertModality == AlertModality.sensorFault) {
+      return false;
+    }
+    final hasKeyword = keyword.trim().isNotEmpty && keyword != 'unknown';
+    if (!hasKeyword) {
+      return false;
+    }
+    if (alertModality == AlertModality.voiceOnly ||
+        alertModality == AlertModality.voiceThermal) {
+      return true;
+    }
+    final normalizedSource = source?.trim().toLowerCase() ?? '';
+    return normalizedSource.contains('openwakeword') ||
+        normalizedSource.contains('vosk') ||
+        normalizedSource.contains('snowboy') ||
+        normalizedSource.contains('wav2vec') ||
+        normalizedSource.contains('keyword') ||
+        normalizedSource.contains('voice');
+  }
+
   bool get hasAuthoritativeDecision =>
       rawDecisionState != null && rawDecisionState!.trim().isNotEmpty;
 

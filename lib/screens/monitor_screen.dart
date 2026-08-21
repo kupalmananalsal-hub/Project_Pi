@@ -42,8 +42,8 @@ class _MonitorScreenState extends ConsumerState<MonitorScreen> {
     final monitor = ref.watch(monitorProvider);
     final thermal = ref.watch(thermalProvider);
     final alerts = ref.watch(alertsProvider);
-    final directionEvent = alerts.keywordNotice ?? alerts.activeAlert;
-    final keywordSpotted = directionEvent != null;
+    final directionEvent = alerts.recentVoiceDetection;
+    final voiceDetected = directionEvent != null;
     final direction =
         directionEvent?.voiceDirection ?? const VoiceDirection.unknown();
     final voiceNotice = alerts.keywordNotice;
@@ -69,7 +69,7 @@ class _MonitorScreenState extends ConsumerState<MonitorScreen> {
                     children: [
                       _DirectionPanel(
                         direction: direction,
-                        keywordSpotted: keywordSpotted,
+                        voiceDetected: voiceDetected,
                         thermalSoftAlert: alerts.thermalSoftAlert,
                       ),
                       const SizedBox(height: 18),
@@ -121,12 +121,12 @@ class _MonitorScreenState extends ConsumerState<MonitorScreen> {
 class _DirectionPanel extends StatelessWidget {
   const _DirectionPanel({
     required this.direction,
-    required this.keywordSpotted,
+    required this.voiceDetected,
     required this.thermalSoftAlert,
   });
 
   final VoiceDirection direction;
-  final bool keywordSpotted;
+  final bool voiceDetected;
   final bool thermalSoftAlert;
 
   @override
@@ -143,8 +143,8 @@ class _DirectionPanel extends StatelessWidget {
               const SizedBox(height: 20),
               Center(
                 child: _StatusPill(
-                  label: keywordSpotted ? 'Keyword Spotted!' : 'Listening',
-                  active: keywordSpotted,
+                  label: voiceDetected ? 'Voice Detected!' : 'Listening',
+                  active: voiceDetected,
                 ),
               ),
               if (thermalSoftAlert) ...[
