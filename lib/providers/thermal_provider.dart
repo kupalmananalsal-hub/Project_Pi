@@ -159,7 +159,14 @@ class ThermalController extends Notifier<ThermalState> {
     _socket?.disconnect();
     _socket = null;
     if (ref.mounted) {
-      state = state.copyWith(socketStatus: SocketConnectionStatus.disconnected);
+      state = state.copyWith(
+        frame: null,
+        humanDetection: const HumanDetectionResult(detected: false),
+        selectedX: null,
+        selectedY: null,
+        fps: 0,
+        socketStatus: SocketConnectionStatus.disconnected,
+      );
     }
   }
 }

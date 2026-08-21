@@ -26,6 +26,7 @@ class AppSettings {
     int? port,
     this.darkMode = true,
     this.alertSound = AlertSound.alarm,
+    this.thermalMonitoringEnabled = true,
   }) : host = host.trim().isEmpty ? defaultHost : host.trim(),
        port = normalizeBackendPort(port);
 
@@ -44,6 +45,7 @@ class AppSettings {
   final int port;
   final bool darkMode;
   final AlertSound alertSound;
+  final bool thermalMonitoringEnabled;
 
   Uri httpUri(String path, {String? hostOverride}) {
     return Uri(
@@ -68,12 +70,15 @@ class AppSettings {
     int? port,
     bool? darkMode,
     AlertSound? alertSound,
+    bool? thermalMonitoringEnabled,
   }) {
     return AppSettings(
       host: host ?? this.host,
       port: normalizeBackendPort(port ?? this.port),
       darkMode: darkMode ?? this.darkMode,
       alertSound: alertSound ?? this.alertSound,
+      thermalMonitoringEnabled:
+          thermalMonitoringEnabled ?? this.thermalMonitoringEnabled,
     );
   }
 }

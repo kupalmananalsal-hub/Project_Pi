@@ -78,7 +78,7 @@ class AlertsState {
 }
 
 class AlertsController extends Notifier<AlertsState> {
-  static const _keywordNoticeDuration = Duration(seconds: 5);
+  static const _keywordNoticeDuration = Duration(seconds: 3);
   static const _thermalConfirmationWindow = Duration(seconds: 2);
   static const _thermalSoftAlertDuration = Duration(seconds: 4);
   static const _thermalSoftBeepCooldown = Duration(seconds: 7);
@@ -242,7 +242,9 @@ class AlertsController extends Notifier<AlertsState> {
         return;
       case AlertDecisionState.advisory:
         _clearPendingVoiceState();
-        _showKeywordNotice(event);
+        if (event.isRecognizedConfiguredKeyword) {
+          _showKeywordNotice(event);
+        }
         return;
       case AlertDecisionState.confirmed:
       case AlertDecisionState.critical:
@@ -289,7 +291,9 @@ class AlertsController extends Notifier<AlertsState> {
       return;
     }
 
-    _showKeywordNotice(event);
+    if (event.isRecognizedConfiguredKeyword) {
+      _showKeywordNotice(event);
+    }
     _startThermalConfirmationWindow(event);
   }
 
@@ -430,16 +434,26 @@ class AlertsController extends Notifier<AlertsState> {
     required bool humanDetected,
     required bool vibrate,
   }) async {
-    _keywordNoticeTimer?.cancel();
-    _keywordNoticeTimer = null;
     _pendingVoiceTimer?.cancel();
     _pendingVoiceTimer = null;
     _pendingVoiceEvent = null;
     _pendingVoiceStartedAt = null;
     _thermalSoftAlertTimer?.cancel();
     _thermalSoftAlertTimer = null;
+    final showKeyword = event.isRecognizedConfiguredKeyword;
+    if (showKeyword) {
+      _keywordNoticeTimer?.cancel();
+      _keywordNoticeTimer = Timer(_keywordNoticeDuration, () {
+        if (ref.mounted) {
+          state = state.copyWith(keywordNotice: null);
+        }
+      });
+    } else {
+      _keywordNoticeTimer?.cancel();
+      _keywordNoticeTimer = null;
+    }
     state = state.copyWith(
-      keywordNotice: null,
+      keywordNotice: showKeyword ? event : null,
       pendingGuidance: null,
       pendingGuidanceHumanDetected: false,
       thermalSoftAlert: false,

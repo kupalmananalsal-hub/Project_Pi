@@ -198,6 +198,34 @@ class AlertEvent {
 
   bool get isKeywordDetection => event == 'keyword_detected';
 
+  bool get isRecognizedConfiguredKeyword {
+    if (!isLive || !isKeywordDetection || duplicateEvent) {
+      return false;
+    }
+    if (alertModality == AlertModality.thermalOnly ||
+        alertModality == AlertModality.sensorFault) {
+      return false;
+    }
+    const ignored = {
+      'thermal',
+      'unknown',
+      'noise',
+      'speech',
+      'none',
+      'audio',
+      'voice',
+    };
+    final words = _keywordWords;
+    if (words.isEmpty || words.every(ignored.contains)) {
+      return false;
+    }
+    return isEmergencyKeyword ||
+        source == 'openwakeword' ||
+        source == 'vosk' ||
+        source == 'snowboy' ||
+        source == 'wav2vec2';
+  }
+
   bool get hasAuthoritativeDecision =>
       rawDecisionState != null && rawDecisionState!.trim().isNotEmpty;
 

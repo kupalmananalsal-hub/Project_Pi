@@ -39,6 +39,11 @@ class SettingsController extends Notifier<AppSettings> {
     await _persist();
   }
 
+  Future<void> setThermalMonitoring(bool enabled) async {
+    state = state.copyWith(thermalMonitoringEnabled: enabled);
+    await _persist();
+  }
+
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
     _prefs = prefs;
@@ -52,6 +57,7 @@ class SettingsController extends Notifier<AppSettings> {
       port: normalizedPort,
       darkMode: prefs.getBool('darkMode') ?? true,
       alertSound: AlertSoundLabel.fromName(prefs.getString('alertSound')),
+      thermalMonitoringEnabled: prefs.getBool('thermalMonitoringEnabled') ?? true,
     );
     if (savedPort != normalizedPort) {
       await prefs.setInt('port', normalizedPort);
@@ -65,5 +71,9 @@ class SettingsController extends Notifier<AppSettings> {
     await prefs.setInt('port', state.port);
     await prefs.setBool('darkMode', state.darkMode);
     await prefs.setString('alertSound', state.alertSound.name);
+    await prefs.setBool(
+      'thermalMonitoringEnabled',
+      state.thermalMonitoringEnabled,
+    );
   }
 }

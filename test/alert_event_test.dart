@@ -32,5 +32,20 @@ void main() {
     expect(event.shouldVibrate, isTrue);
     expect(event.detectedPartLabel, 'Torso or full face');
     expect(event.noiseLevelDb, closeTo(-38.2, 0.01));
+    expect(event.isRecognizedConfiguredKeyword, isTrue);
+  });
+
+  test('thermal-only events are not recognized KWS keywords', () {
+    final event = AlertEvent.fromMessage({
+      'event': 'keyword_detected',
+      'keyword': 'thermal',
+      'confidence': 0,
+      'source': 'thermal',
+      'direction': 'front',
+      'alert_modality': 'thermal_only',
+      'decision_state': 'advisory',
+      'timestamp': '2026-08-21T00:00:00Z',
+    });
+    expect(event.isRecognizedConfiguredKeyword, isFalse);
   });
 }
