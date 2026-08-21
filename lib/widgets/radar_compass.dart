@@ -33,9 +33,6 @@ class RadarCompass extends StatelessWidget {
         child: Stack(
           alignment: Alignment.center,
           children: [
-            Positioned.fill(
-              child: CustomPaint(painter: const _ArrowGuidePainter()),
-            ),
             AnimatedRotation(
               turns: rotation / (2 * math.pi),
               duration: const Duration(milliseconds: 240),
@@ -66,28 +63,3 @@ class RadarCompass extends StatelessWidget {
   }
 }
 
-class _ArrowGuidePainter extends CustomPainter {
-  const _ArrowGuidePainter();
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final paint = Paint()
-      ..color = _arrowLine.withValues(alpha: 0.28)
-      ..strokeWidth = 1.2
-      ..style = PaintingStyle.stroke;
-    canvas.drawLine(
-      Offset(center.dx, size.height * 0.18),
-      Offset(center.dx, size.height * 0.76),
-      paint,
-    );
-    canvas.drawLine(
-      Offset(size.width * 0.24, center.dy),
-      Offset(size.width * 0.76, center.dy),
-      paint,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _ArrowGuidePainter oldDelegate) => false;
-}

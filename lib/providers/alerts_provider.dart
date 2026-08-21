@@ -417,13 +417,21 @@ class AlertsController extends Notifier<AlertsState> {
   }
 
   Future<void> _startAuthoritativeEmergencyAlert(AlertEvent event) async {
-    final thermalFrame = event.humanDetected
-        ? ref.read(thermalProvider).frame ?? _lastThermalHumanFrame
-        : null;
+    if (!event.humanDetected) {
+      // Keyword detected but no thermal human — show status badge only.
+      // No full-screen alert, no alarm sound, no vibration (per alert table).
+      if (event.isRecognizedConfiguredKeyword) {
+        _showKeywordNotice(event);
+      }
+      return;
+    }
+    // Keyword + Human confirmed — trigger full-screen alarm.
+    final thermalFrame =
+        ref.read(thermalProvider).frame ?? _lastThermalHumanFrame;
     await _startFullEmergencyAlert(
       event,
       thermalFrame,
-      humanDetected: event.humanDetected,
+      humanDetected: true,
       vibrate: event.shouldVibrate,
     );
   }

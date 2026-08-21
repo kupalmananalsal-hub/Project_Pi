@@ -78,12 +78,13 @@ class _AlertOverlayState extends State<AlertOverlay>
                       ),
                       const SizedBox(height: 24),
                       Text(
-                        widget.event.emergencyTitle,
+                        'EMERGENCY ALERT',
                         textAlign: TextAlign.center,
                         style: Theme.of(context).textTheme.headlineMedium
                             ?.copyWith(
                               color: Colors.white,
                               fontWeight: FontWeight.w800,
+                              letterSpacing: 1.5,
                             ),
                       ),
                       const SizedBox(height: 18),

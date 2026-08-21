@@ -162,27 +162,32 @@ void main() {
     },
   );
 
-  test('critical voice-only starts full emergency without thermal', () async {
-    final runtime = FakeAlertRuntimeService();
-    final container = makeContainer(runtime);
-    final controller = container.read(alertsProvider.notifier);
-    final event = eventFrom(
-      decisionState: 'critical',
-      alertLevel: 'full_alert',
-      alertModality: 'voice_only',
-      thermalState: 'unavailable',
-      confidence: 0.95,
-    );
+  test(
+    'critical voice-only (no human) shows keyword notice only — no full-screen',
+    () async {
+      final runtime = FakeAlertRuntimeService();
+      final container = makeContainer(runtime);
+      final controller = container.read(alertsProvider.notifier);
+      final event = eventFrom(
+        decisionState: 'critical',
+        alertLevel: 'full_alert',
+        alertModality: 'voice_only',
+        thermalState: 'unavailable',
+        confidence: 0.95,
+        // humanDetected defaults to false
+      );
 
-    controller.handleAlertForTest(event);
-    await drainAsync();
+      controller.handleAlertForTest(event);
+      await drainAsync();
 
-    final state = container.read(alertsProvider);
-    expect(state.activeAlert, event);
-    expect(state.activeAlertHumanDetected, isFalse);
-    expect(runtime.emergencyStarts, 1);
-    expect(runtime.lastVibrate, isTrue);
-  });
+      // Per alert table: Keyword Only (no human) → status badge only,
+      // NO full-screen, no sound, no vibration.
+      final state = container.read(alertsProvider);
+      expect(state.keywordNotice, event);
+      expect(state.activeAlert, isNull);
+      expect(runtime.emergencyStarts, 0);
+    },
+  );
 
   test(
     'authoritative advisory is not upgraded by later local thermal state',
@@ -276,9 +281,12 @@ void main() {
       final runtime = FakeAlertRuntimeService();
       final container = makeContainer(runtime);
       final controller = container.read(alertsProvider.notifier);
+      // humanDetected:true so the first event triggers a full emergency
+      // (per new alert table: Keyword + Human → full-screen alarm).
       final first = eventFrom(
         decisionState: 'critical',
         alertLevel: 'full_alert',
+        humanDetected: true,
         confidence: 0.95,
       );
       final duplicate = eventFrom(
