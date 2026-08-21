@@ -17,7 +17,7 @@ Environment=BACKEND_ALERT_URL=http://127.0.0.1:8765/api/alerts
 Environment=ALERT_QUEUE_PATH=/tmp/project_pi_alerts.jsonl
 Environment=PROJECT_PI_AUDIO_STATUS_PATH=/tmp/project_pi_audio_status.json
 Environment=MIC_NAME_HINT=seeed
-Environment=VOSK_KEYWORD_CONFIDENCE=0.40
+Environment=VOSK_KEYWORD_CONFIDENCE=0.75
 Environment=WAV2VEC2_MODEL_PATH=Khalsuu/filipino-wav2vec2-l-xls-r-300m-official
 Environment=WAV2VEC2_VERIFY_BELOW_CONFIDENCE=0.70
 Environment=WAV2VEC2_CONTEXT_SECONDS=2.0
@@ -34,7 +34,7 @@ Environment="DATASET_DIR=/home/thesis/Project_Pi/dataset"
 Environment="OPENWAKEWORD_MODEL_DIR=/home/thesis/Project_Pi/dataset/audio/openwakeword_models"
 Environment=OPENWAKEWORD_VAD_THRESHOLD=0.40
 Environment=OPENWAKEWORD_WAKE_THRESHOLD=0.40
-Environment="OPENWAKEWORD_MODEL_THRESHOLDS=tulong=0.30,saklolo=0.30,ang sakit=0.30,agai=0.30,aray=0.30,sunog=0.30,help=0.45,save me=0.45,help me=0.45,please help=0.45,rescue=0.45,emergency=0.45,over here=0.45,ouch=0.45"
+Environment="OPENWAKEWORD_MODEL_THRESHOLDS=tulong=0.30,saklolo=0.30,ang sakit=0.30,agai=0.30,aray=0.30,sunog=0.30,kailangan ko ng tulong=0.30,tulungan mo ako=0.30,tulungan niyo ako=0.30,help=0.45,save me=0.45,help me=0.45,please help=0.45,rescue=0.45,emergency=0.45,over here=0.45,ouch=0.45"
 Environment=OPENWAKEWORD_SCORE_LOG_THRESHOLD=0.30
 Environment=OPENWAKEWORD_SPEEX_NOISE_SUPPRESSION=1
 Environment=DIRECTION_THRESHOLD_SECONDS=0.00003

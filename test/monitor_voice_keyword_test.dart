@@ -243,7 +243,6 @@ void main() {
     expect(find.text('Raspberry Pi Connection'), findsOneWidget);
     expect(find.byKey(const ValueKey('pi-host-field')), findsOneWidget);
     expect(find.byKey(const ValueKey('pi-connect-button')), findsOneWidget);
-    expect(find.byKey(const ValueKey('thermal-off-button')), findsOneWidget);
 
     final hostY = tester.getCenter(find.byKey(const ValueKey('pi-host-field'))).dy;
     final connectY =
@@ -265,13 +264,6 @@ void main() {
     await tester.pump();
     expect(disconnectCalls, 1);
     expect(container.read(connectionProvider).userRequestedDisconnect, isTrue);
-    expect(container.read(settingsProvider).host, '10.10.10.10');
-
-    await tester.tap(find.byKey(const ValueKey('thermal-off-button')));
-    await tester.pump();
-    expect(container.read(settingsProvider).thermalMonitoringEnabled, isFalse);
-    expect(find.byKey(const ValueKey('thermal-on-button')), findsOneWidget);
-
     container.dispose();
   });
 

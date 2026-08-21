@@ -33,11 +33,7 @@ class PiConnectionChannels {
 final piConnectionChannelsProvider = Provider<PiConnectionChannels>((ref) {
   return PiConnectionChannels(
     connect: (host, port) {
-      if (ref.read(settingsProvider).thermalMonitoringEnabled) {
-        ref.read(thermalProvider.notifier).connect(host, port);
-      } else {
-        ref.read(thermalProvider.notifier).disconnect();
-      }
+      ref.read(thermalProvider.notifier).connect(host, port);
       ref.read(audioProvider.notifier).connect(host, port);
       ref.read(alertsProvider.notifier).connect(host, port);
       unawaited(
@@ -283,17 +279,6 @@ class ConnectionController extends Notifier<PiConnectionState> {
       error: null,
       userRequestedDisconnect: true,
     );
-  }
-
-  Future<void> setThermalMonitoring(bool enabled) async {
-    await ref.read(settingsProvider.notifier).setThermalMonitoring(enabled);
-    if (!enabled) {
-      ref.read(thermalProvider.notifier).disconnect();
-      return;
-    }
-    if (state.isConnected) {
-      ref.read(thermalProvider.notifier).connect(state.host, state.port);
-    }
   }
 
   void _closeConnectionChannels() {

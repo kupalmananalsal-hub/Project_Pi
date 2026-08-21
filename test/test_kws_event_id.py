@@ -71,6 +71,7 @@ def load_kws_module():
         )
         module = importlib.util.module_from_spec(spec)
         assert spec.loader is not None
+        sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         return module, previous
     except Exception:

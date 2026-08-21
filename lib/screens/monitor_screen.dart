@@ -8,7 +8,6 @@ import '../models/voice_direction.dart';
 import '../providers/alerts_provider.dart';
 import '../providers/connection_provider.dart';
 import '../providers/monitor_provider.dart';
-import '../providers/settings_provider.dart';
 import '../providers/thermal_provider.dart';
 import '../services/pi_api_service.dart';
 import '../utils/human_detector.dart';
@@ -43,7 +42,6 @@ class _MonitorScreenState extends ConsumerState<MonitorScreen> {
     final monitor = ref.watch(monitorProvider);
     final thermal = ref.watch(thermalProvider);
     final alerts = ref.watch(alertsProvider);
-    final settings = ref.watch(settingsProvider);
     final keywordSpotted = alerts.keywordNotice != null;
     final direction = monitor.direction;
     final voiceNotice = alerts.keywordNotice;
@@ -75,7 +73,6 @@ class _MonitorScreenState extends ConsumerState<MonitorScreen> {
                       const SizedBox(height: 18),
                       _ThermalPanel(
                         thermal: thermal,
-                        monitoringEnabled: settings.thermalMonitoringEnabled,
                       ),
                       const SizedBox(height: 18),
                       _MicrophonePanel(audio: monitor.audioFrame),
@@ -169,21 +166,15 @@ class _DirectionPanel extends StatelessWidget {
 class _ThermalPanel extends ConsumerWidget {
   const _ThermalPanel({
     required this.thermal,
-    required this.monitoringEnabled,
   });
 
   final ThermalState thermal;
-  final bool monitoringEnabled;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final frame = monitoringEnabled ? thermal.frame : null;
-    final detection = monitoringEnabled
-        ? thermal.humanDetection
-        : const HumanDetectionResult(detected: false);
-    final frameLabel = !monitoringEnabled
-        ? 'Phone thermal feed is off'
-        : frame == null
+    final frame = thermal.frame;
+    final detection = thermal.humanDetection;
+    final frameLabel = frame == null
         ? 'MLX90640 · 32×24'
         : 'MLX90640 · ${frame.width}×${frame.height}';
 
@@ -216,50 +207,21 @@ class _ThermalPanel extends ConsumerWidget {
               _HumanPresencePill(detected: detection.detected),
             ],
           ),
-          const SizedBox(height: 26),
-          if (!monitoringEnabled)
-            DecoratedBox(
-              decoration: BoxDecoration(
-                color: const Color(0xFF1C212D),
-                borderRadius: BorderRadius.circular(22),
-                border: Border.all(color: _panelBorder),
-              ),
-              child: const SizedBox(
-                height: 220,
-                child: Center(
-                  child: Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 24),
-                    child: Text(
-                      'Turn On Thermal Camera in Settings to show the phone feed. Raspberry Pi thermal safety fusion stays active.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: _mutedText,
-                        fontSize: 15,
-                        height: 1.35,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            )
-          else ...[
-            _ThermalViewport(
-              frame: frame,
-              minTemp: thermal.displayMinTemp,
-              maxTemp: thermal.displayMaxTemp,
-              selectedX: thermal.selectedX,
-              selectedY: thermal.selectedY,
-              onPixelSelected: ref.read(thermalProvider.notifier).selectPixel,
-            ),
-            const SizedBox(height: 18),
-            _ThermalLegend(
-              minTemp: thermal.displayMinTemp,
-              maxTemp: thermal.displayMaxTemp,
-            ),
-            const SizedBox(height: 22),
-            _ThermalFacts(detection: detection),
-          ],
+          _ThermalViewport(
+            frame: frame,
+            minTemp: thermal.displayMinTemp,
+            maxTemp: thermal.displayMaxTemp,
+            selectedX: thermal.selectedX,
+            selectedY: thermal.selectedY,
+            onPixelSelected: ref.read(thermalProvider.notifier).selectPixel,
+          ),
+          const SizedBox(height: 18),
+          _ThermalLegend(
+            minTemp: thermal.displayMinTemp,
+            maxTemp: thermal.displayMaxTemp,
+          ),
+          const SizedBox(height: 22),
+          _ThermalFacts(detection: detection),
         ],
       ),
     );

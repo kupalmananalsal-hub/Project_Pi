@@ -113,35 +113,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   ),
           ),
           const SizedBox(height: 28),
-          Text(
-            'Thermal Monitoring',
-            style: Theme.of(context).textTheme.titleLarge,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Controls only the phone thermal feed/display. Raspberry Pi thermal safety fusion stays enabled.',
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
-          ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: settings.thermalMonitoringEnabled
-                ? OutlinedButton.icon(
-                    key: const ValueKey('thermal-off-button'),
-                    onPressed: () => _setThermalMonitoring(false),
-                    icon: const Icon(Icons.thermostat_outlined),
-                    label: const Text('Turn Off Thermal Camera'),
-                  )
-                : FilledButton.icon(
-                    key: const ValueKey('thermal-on-button'),
-                    onPressed: () => _setThermalMonitoring(true),
-                    icon: const Icon(Icons.thermostat_rounded),
-                    label: const Text('Turn On Thermal Camera'),
-                  ),
-          ),
-          const SizedBox(height: 28),
           DropdownButtonFormField<AlertSound>(
             initialValue: settings.alertSound,
             decoration: const InputDecoration(
@@ -219,14 +190,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   void _disconnect() {
-    FocusScope.of(context).unfocus();
     ref.read(connectionProvider.notifier).disconnect();
   }
 
-  Future<void> _setThermalMonitoring(bool enabled) async {
-    FocusScope.of(context).unfocus();
-    await ref.read(connectionProvider.notifier).setThermalMonitoring(enabled);
-  }
 }
 
 class _ConnectionStatusRow extends StatelessWidget {

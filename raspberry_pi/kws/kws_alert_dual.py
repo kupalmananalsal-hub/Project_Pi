@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import queue
@@ -42,6 +43,26 @@ TAGALOG_KEYWORD_ALIASES: dict[str, set[str]] = {
     "sunog": {"sunog"},
 }
 TAGALOG_KEYWORDS: tuple[str, ...] = tuple(TAGALOG_KEYWORD_ALIASES)
+
+
+@dataclasses.dataclass
+class KeywordCandidate:
+    """Structured result from the keyword fusion pipeline."""
+
+    keyword: str
+    confidence: float
+    source: str  # "openwakeword", "vosk", "snowboy"
+    accepted: bool
+    reason: str
+    original_confidence: float | None = None
+    verifier_used: bool = False
+    verifier_result: bool | None = None
+
+
+def _debug_scores() -> bool:
+    """Return True when KWS_DEBUG_SCORES=1 env var is set."""
+    return _env_bool("KWS_DEBUG_SCORES", False)
+
 
 
 def _split_env(value: str) -> list[str]:
@@ -655,6 +676,13 @@ def vosk_worker(
             final_confidence = confidence
             context = _event_context(data)
             context["vosk_text"] = text
+            candidate = KeywordCandidate(
+                keyword=tagalog_keyword,
+                confidence=confidence,
+                source="vosk",
+                accepted=True,
+                reason="fallback_accepted",
+            )
             print(
                 "Vosk detection: "
                 f"{tagalog_keyword} confidence={confidence:.2f} text='{text}'",
@@ -674,26 +702,33 @@ def vosk_worker(
                     audio_samples_to_float32(verification_samples),
                     tagalog_keyword,
                 )
-                if not verified:
+                candidate.verifier_used = True
+                candidate.verifier_result = verified
+                if verified:
+                    # wav2vec2 confirmed: boost confidence
                     print(
-                        "wav2vec2 verifier rejected Vosk detection: "
-                        f"{tagalog_keyword}",
+                        "wav2vec2 verifier confirmed Vosk detection: "
+                        f"{tagalog_keyword} confidence={verified_confidence:.2f}",
                         flush=True,
                     )
-                    recognizer.Reset()
-                    recent_audio.clear()
-                    recent_audio_sample_count = 0
-                    continue
-
-                print(
-                    "wav2vec2 verifier confirmed Vosk detection: "
-                    f"{tagalog_keyword} confidence={verified_confidence:.2f}",
-                    flush=True,
-                )
-                context["wav2vec2_verified"] = True
-                context["wav2vec2_backend"] = verifier.backend
-                context["vosk_original_confidence"] = final_confidence
-                final_confidence = verified_confidence
+                    context["wav2vec2_verified"] = True
+                    context["wav2vec2_backend"] = verifier.backend
+                    context["vosk_original_confidence"] = final_confidence
+                    candidate.original_confidence = final_confidence
+                    final_confidence = verified_confidence
+                    candidate.confidence = verified_confidence
+                    candidate.reason = "verifier_boosted"
+                else:
+                    # wav2vec2 did NOT confirm -- proceed at original confidence
+                    # (boost-only: rejection does NOT veto the detection)
+                    print(
+                        "wav2vec2 verifier did not confirm Vosk detection: "
+                        f"{tagalog_keyword} -- proceeding at original "
+                        f"confidence={final_confidence:.2f}",
+                        flush=True,
+                    )
+                    context["wav2vec2_verified"] = False
+                    context["wav2vec2_backend"] = verifier.backend
 
             dispatcher.note_vosk_text(text)
             dispatcher.submit(
@@ -981,7 +1016,7 @@ def main() -> None:
             {
                 "model_path": vosk_model_path,
                 "sample_rate": sample_rate,
-                "confidence": float(os.getenv("VOSK_KEYWORD_CONFIDENCE", "0.40")),
+                "confidence": float(os.getenv("VOSK_KEYWORD_CONFIDENCE", "0.75")),
                 "debug": debug,
                 "wav2vec2_enabled": _env_bool("WAV2VEC2_VERIFIER_ENABLED", True),
                 "wav2vec2_verify_below_confidence": float(
