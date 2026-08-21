@@ -418,10 +418,11 @@ class AlertsController extends Notifier<AlertsState> {
 
   Future<void> _startAuthoritativeEmergencyAlert(AlertEvent event) async {
     if (!event.humanDetected) {
-      // Keyword detected but no thermal human — show status badge only.
-      // No full-screen alert, no alarm sound, no vibration (per alert table).
+      // Keyword detected but no thermal human — show status badge + soft beep.
+      // No full-screen alert, no alarm, no vibration (per alert table Option B).
       if (event.isRecognizedConfiguredKeyword) {
         _showKeywordNotice(event);
+        unawaited(ref.read(alertRuntimeServiceProvider).playSoftThermalBeep());
       }
       return;
     }

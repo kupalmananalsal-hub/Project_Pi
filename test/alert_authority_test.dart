@@ -180,12 +180,13 @@ void main() {
       controller.handleAlertForTest(event);
       await drainAsync();
 
-      // Per alert table: Keyword Only (no human) → status badge only,
-      // NO full-screen, no sound, no vibration.
+      // Per alert table Option B: Keyword Only (no human) → status badge +
+      // soft notification beep. NO full-screen, no alarm, no vibration.
       final state = container.read(alertsProvider);
       expect(state.keywordNotice, event);
       expect(state.activeAlert, isNull);
       expect(runtime.emergencyStarts, 0);
+      expect(runtime.softBeeps, 1);
     },
   );
 
