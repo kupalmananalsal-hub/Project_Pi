@@ -88,7 +88,7 @@ class _AlertOverlayState extends State<AlertOverlay>
                       ),
                       const SizedBox(height: 18),
                       Text(
-                        widget.event.displayKeyword,
+                        'Keyword Spotted!',
                         style: Theme.of(context).textTheme.displaySmall
                             ?.copyWith(
                               color: Colors.white,

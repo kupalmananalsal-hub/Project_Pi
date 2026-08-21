@@ -98,7 +98,7 @@ class _DirectionOverlayState extends State<DirectionOverlay> {
                       ),
                       const SizedBox(height: 12),
                       Text(
-                        event.displayKeyword,
+                        'Keyword Spotted!',
                         style: Theme.of(context).textTheme.displaySmall
                             ?.copyWith(fontWeight: FontWeight.w900),
                       ),

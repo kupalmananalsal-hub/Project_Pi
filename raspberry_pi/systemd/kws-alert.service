@@ -33,9 +33,9 @@ Environment=OPENWAKEWORD_ENABLED=1
 Environment="DATASET_DIR=/home/thesis/Project_Pi/dataset"
 Environment="OPENWAKEWORD_MODEL_DIR=/home/thesis/Project_Pi/dataset/audio/openwakeword_models"
 Environment=OPENWAKEWORD_VAD_THRESHOLD=0.40
-Environment=OPENWAKEWORD_WAKE_THRESHOLD=0.40
-Environment="OPENWAKEWORD_MODEL_THRESHOLDS=tulong=0.30,saklolo=0.30,ang sakit=0.30,agai=0.30,aray=0.30,sunog=0.30,kailangan ko ng tulong=0.30,tulungan mo ako=0.30,tulungan niyo ako=0.30,help=0.45,save me=0.45,help me=0.45,please help=0.45,rescue=0.45,emergency=0.45,over here=0.45,ouch=0.45"
-Environment=OPENWAKEWORD_SCORE_LOG_THRESHOLD=0.30
+Environment=OPENWAKEWORD_WAKE_THRESHOLD=0.20
+Environment="OPENWAKEWORD_MODEL_THRESHOLDS=tulong=0.20,saklolo=0.20,ang sakit=0.20,agai=0.20,aray=0.20,sunog=0.20,kailangan ko ng tulong=0.20,tulungan mo ako=0.20,tulungan niyo ako=0.20,help=0.30,save me=0.30,help me=0.30,please help=0.30,rescue=0.30,emergency=0.30,over here=0.30,ouch=0.30"
+Environment=OPENWAKEWORD_SCORE_LOG_THRESHOLD=0.15
 Environment=OPENWAKEWORD_SPEEX_NOISE_SUPPRESSION=1
 Environment=DIRECTION_THRESHOLD_SECONDS=0.00003
 Environment=SNOWBOY_SWIG_PATH=/home/thesis/snowboy/swig/Python3

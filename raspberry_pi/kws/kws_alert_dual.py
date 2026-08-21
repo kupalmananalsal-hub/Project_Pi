@@ -35,12 +35,19 @@ CHUNK_FRAMES = 1024
 ALERT_FLUSH_INTERVAL_SECONDS = 2.0
 DEFAULT_AUDIO_STATUS_PATH = Path("/tmp/project_pi_audio_status.json")
 TAGALOG_KEYWORD_ALIASES: dict[str, set[str]] = {
-    "tulong": {"tulong", "tolong", "tulon", "tulom", "tulungan"},
-    "saklolo": {"saklolo", "sakolo", "saglolo"},
-    "ang sakit": {"ang sakit", "sakit", "masakit"},
-    "aray": {"aray", "aray ko"},
-    "agai": {"agai", "agay"},
-    "sunog": {"sunog"},
+    "tulong": {
+        "tulong", "tolong", "tulon", "tulom", "tulungan",
+        "tulungan mo", "tulungan mo ako", "tulungan niyo", "tulungan niyo ako",
+    },
+    "saklolo": {"saklolo", "sakolo", "saglolo", "saklola"},
+    "ang sakit": {"ang sakit", "sakit", "masakit", "nanasakit", "sumasakit"},
+    "aray": {"aray", "aray ko", "aray naman"},
+    "agai": {"agai", "agay", "agay ko"},
+    "sunog": {"sunog", "may sunog"},
+    "kailangan ko ng tulong": {
+        "kailangan ko ng tulong", "kailangan tulong", "kailangan ko tulong",
+        "nangangailangan ng tulong",
+    },
 }
 TAGALOG_KEYWORDS: tuple[str, ...] = tuple(TAGALOG_KEYWORD_ALIASES)
 
