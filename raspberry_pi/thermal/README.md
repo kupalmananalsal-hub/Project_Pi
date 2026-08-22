@@ -162,9 +162,72 @@ Runtime environment variables:
 
 ```ini
 Environment=DATASET_DIR=/home/thesis/Project_Pi/dataset
-Environment=THERMAL_HUMAN_MODEL_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_detector.tflite
-Environment=THERMAL_HUMAN_MODEL_METADATA_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_detector.metadata.json
-Environment=THERMAL_HUMAN_MODEL_THRESHOLD=0.55
+
+# Temperature-based model (original)
+Environment=THERMAL_HUMAN_MODEL_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_shape.tflite
+Environment=THERMAL_HUMAN_MODEL_METADATA_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_shape_labels.json
+Environment=THERMAL_HUMAN_MODEL_THRESHOLD=0.65
+
+# Shape-aware model (new) — optional, auto-detected at default path
+Environment=THERMAL_HUMAN_SHAPE_MODEL_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_shape.tflite
+Environment=THERMAL_HUMAN_SHAPE_LABELS_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_shape_labels.json
+Environment=THERMAL_HUMAN_SHAPE_THRESHOLD=0.65
 ```
 
-Use the threshold from `thermal_human_detector.metadata.json` after calibration.
+## Shape-Aware Model
+
+The notebook `notebooks/train_thermal_shape_model.ipynb` trains a lightweight
+9-class CNN (`thermal_human_shape.tflite`) that classifies each 32×24 frame as:
+
+| Index | Class | Meaning |
+|------:|:------|:--------|
+| 0 | `human_full` | Full body visible |
+| 1 | `human_partial` | Partial body visible |
+| 2 | `human_head` | Head only |
+| 3 | `human_torso` | Torso region |
+| 4 | `human_hands` | Hands only |
+| 5 | `human_feet` | Feet only |
+| 6 | `hot_object` | Laptop, cup, heater, etc. |
+| 7 | `background` | Warm wall, sun-heated surface |
+| 8 | `ambiguous` | Inconclusive |
+
+### False-Positive Suppression Rules
+
+| Shape prediction | Confidence ≥ threshold | Action |
+|:-----------------|:----------------------|:-------|
+| `hot_object` | ✅ | Force `human_detected = False` |
+| `background` | ✅ | Force `human_detected = False` |
+| human class (0–5) | ✅ | Boost `confidence_boost`; confirm `human_detected` |
+| `ambiguous` | any | Ignore shape; defer to temperature model |
+| *(model absent)* | — | Graceful fallback to heuristic only |
+
+### New Payload Fields
+
+These are added to the `/ws/thermal` WebSocket payload alongside the
+existing fields (`human_detected`, `body_coverage`, `detected_part`, etc.):
+
+| Field | Type | Description |
+|:------|:-----|:------------|
+| `thermal_shape_human` | bool | Shape model says human present |
+| `thermal_shape_body_part` | str | `full`/`partial`/`head`/`torso`/`hands`/`feet`/`none` |
+| `thermal_shape_hot_object` | bool | Confidently identified as hot object |
+| `thermal_shape_background` | bool | Confidently identified as background heat |
+| `thermal_shape_confidence` | float | Winning class probability (0–1) |
+| `thermal_shape_label` | str | Raw class name |
+| `thermal_shape_available` | bool | Shape model loaded successfully |
+| `thermal_shape_error` | str\|null | Load error message if unavailable |
+
+### Deploy Shape Model Files
+
+Copy the Colab-exported files to the Pi:
+
+```bash
+scp thermal_human_shape.tflite thesis@<pi-ip>:~/
+scp thermal_human_shape_labels.json thesis@<pi-ip>:~/
+ssh thesis@<pi-ip>
+mkdir -p ~/Project_Pi/dataset/thermal/models/
+mv ~/thermal_human_shape.tflite ~/Project_Pi/dataset/thermal/models/
+mv ~/thermal_human_shape_labels.json ~/Project_Pi/dataset/thermal/models/
+sudo systemctl daemon-reload
+sudo systemctl restart thermal-backend.service
+```
