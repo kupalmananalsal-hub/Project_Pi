@@ -76,7 +76,24 @@ dataset/audio/real_clips/**
 dataset/audio/tts_clips/**
 dataset/audio/augmentation/**
 dataset/audio/processed/**
+
+# Project Pi keyword dataset: keep documentation/scripts, never raw recordings,
+# generated training artifacts, prediction dumps, or trained model binaries.
+dataset/audio/keyword_dataset/**/*.wav
+dataset/audio/keyword_dataset/**/*.flac
+dataset/audio/keyword_dataset/**/*.mp3
+dataset/audio/keyword_dataset/metadata.csv
+dataset/audio/keyword_dataset/augmented/**
+dataset/audio/keyword_dataset/splits/**
+dataset/audio/keyword_dataset/models/**
+dataset/audio/keyword_dataset/predictions/**
+dataset/audio/keyword_dataset/evaluation/**
+dataset/audio/keyword_dataset/**/*.onnx
+dataset/audio/keyword_dataset/**/*.onnx.data
+dataset/audio/keyword_dataset/**/*.tflite
+dataset/audio/keyword_dataset/**/*.keras
 !dataset/**/.gitkeep
+!dataset/audio/keyword_dataset/README.md
 
 # Local editor settings
 .vscode/
