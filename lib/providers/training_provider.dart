@@ -322,10 +322,7 @@ class TrainingNotifier extends Notifier<TrainingState> {
     state = state.copyWith(isLoading: true, errorMessage: null);
     try {
       final api = _api;
-      final kwResponse = await api.fetchTrainingKeywords();
-      final keywords = kwResponse
-          .map((json) => TrainingKeyword.fromJson(json))
-          .toList(growable: false);
+      final keywords = await _loadKeywords(api);
       final statsJson = await api.fetchTrainingStatistics();
       final stats = TrainingStatistics.fromJson(statsJson);
       final recordings = await api.fetchTrainingRecordings();
@@ -336,7 +333,25 @@ class TrainingNotifier extends Notifier<TrainingState> {
         isLoading: false,
       );
     } catch (e) {
-      state = state.copyWith(isLoading: false, errorMessage: e.toString());
+      state = state.copyWith(
+        keywords: state.keywords.isEmpty ? fallbackTrainingKeywords : null,
+        isLoading: false,
+        errorMessage:
+            'Could not load training data from the Pi. Using local keyword list. $e',
+      );
+    }
+  }
+
+  Future<List<TrainingKeyword>> _loadKeywords(PiApiService api) async {
+    try {
+      final kwResponse = await api.fetchTrainingKeywords();
+      final keywords = kwResponse
+          .map((json) => TrainingKeyword.fromJson(json))
+          .where((kw) => kw.keyword.isNotEmpty)
+          .toList(growable: false);
+      return keywords.isEmpty ? fallbackTrainingKeywords : keywords;
+    } catch (_) {
+      return fallbackTrainingKeywords;
     }
   }
 

@@ -154,7 +154,13 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                     initialValue: _selectedKeyword,
                     decoration: const InputDecoration(
                       labelText: 'Keyword',
+                      helperText: 'Choose one of the 17 deployed keywords.',
                       border: OutlineInputBorder(),
+                    ),
+                    hint: Text(
+                      training.isLoading && training.keywords.isEmpty
+                          ? 'Loading keywords...'
+                          : 'Select keyword',
                     ),
                     items: training.keywords
                         .map(
@@ -164,8 +170,19 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                           ),
                         )
                         .toList(),
-                    onChanged: (v) => setState(() => _selectedKeyword = v),
+                    onChanged: training.keywords.isEmpty
+                        ? null
+                        : (v) => setState(() => _selectedKeyword = v),
                   ),
+                  if (training.keywords.isEmpty && !training.isLoading) ...[
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: () =>
+                          ref.read(trainingProvider.notifier).refresh(),
+                      icon: const Icon(Icons.refresh_rounded),
+                      label: const Text('Retry Loading Keywords'),
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   Row(
                     children: [
