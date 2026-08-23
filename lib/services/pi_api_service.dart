@@ -15,7 +15,7 @@ class PiApiException implements Exception {
 }
 
 class PiApiService {
-  PiApiService({required this.host, required int port, Dio? dio})
+  PiApiService({required this.host, required int port, Dio? dio, this.apiToken})
     : port = AppSettings.normalizeBackendPort(port),
       _dio =
           dio ??
@@ -31,6 +31,22 @@ class PiApiService {
   final String host;
   final int port;
   final Dio _dio;
+
+  /// Token sent as `Authorization: Bearer <token>` on control-plane endpoints
+  /// (shutdown, reboot, refresh). Matches the `PROJECT_PI_API_TOKEN` env var
+  /// on the Pi backend. Defaults to the well-known dev token so existing
+  /// callers that don't pass a token continue to work against a default-config
+  /// backend.
+  final String? apiToken;
+
+  static const _defaultApiToken = 'project-pi-local-token';
+
+  Options get _controlOptions => Options(
+    headers: {
+      'Authorization': 'Bearer ${apiToken ?? _defaultApiToken}',
+    },
+  );
+
 
   String get _backendBaseUrl =>
       'http://$host:${AppSettings.normalizeBackendPort(port)}';
@@ -93,11 +109,11 @@ class PiApiService {
   }
 
   Future<void> shutdown() async {
-    await _dio.post<void>('$_backendBaseUrl/api/shutdown');
+    await _dio.post<void>('$_backendBaseUrl/api/shutdown', options: _controlOptions);
   }
 
   Future<void> reboot() async {
-    await _dio.post<void>('$_backendBaseUrl/api/reboot');
+    await _dio.post<void>('$_backendBaseUrl/api/reboot', options: _controlOptions);
   }
 
   Future<Map<String, dynamic>> refreshServices({
@@ -107,7 +123,10 @@ class PiApiService {
     final response = await _dio.post<Map<String, dynamic>>(
       '/api/refresh',
       data: {'git_pull': gitPull, 'restart_backend': restartBackend},
-      options: Options(receiveTimeout: const Duration(seconds: 130)),
+      options: Options(
+        headers: {'Authorization': 'Bearer ${apiToken ?? _defaultApiToken}'},
+        receiveTimeout: const Duration(seconds: 130),
+      ),
     );
     return Map<String, dynamic>.from(response.data ?? const {});
   }

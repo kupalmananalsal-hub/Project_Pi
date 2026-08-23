@@ -91,11 +91,17 @@ DEFAULT_AUDIO_SAMPLE_RATE = 16000
 VOICE_SAMPLES_DIR = Path.home() / "voice_samples"
 AUDIO_STATUS_PATH = Path(os.getenv("PROJECT_PI_AUDIO_STATUS_PATH", "/tmp/project_pi_audio_status.json"))
 ALERT_DB_PATH = Path(os.getenv("ALERT_DB_PATH", str(CURRENT_DIR / "alerts.db")))
-DATASET_DIR = PROJECT_ROOT / "dataset"
+DATASET_DIR = Path(os.getenv("DATASET_DIR", str(PROJECT_ROOT / "dataset"))).expanduser()
 KEYWORD_DATASET_DIR = DATASET_DIR / "audio" / "keyword_dataset"
 KEYWORD_METADATA_PATH = KEYWORD_DATASET_DIR / "metadata.csv"
 OPENWAKEWORD_MODEL_DIR = DATASET_DIR / "audio" / "openwakeword_models"
 DATASET_ARCHIVES_DIR = DATASET_DIR / "archives"
+API_TOKEN = os.getenv("PROJECT_PI_API_TOKEN", "project-pi-local-token")
+MAX_TRAINING_WAV_UPLOAD_BYTES = int(os.getenv("TRAINING_WAV_MAX_BYTES", str(8 * 1024 * 1024)))
+MAX_ONNX_UPLOAD_BYTES = int(os.getenv("TRAINING_ONNX_MAX_BYTES", str(128 * 1024 * 1024)))
+MAX_ONNX_DATA_UPLOAD_BYTES = int(
+    os.getenv("TRAINING_ONNX_DATA_MAX_BYTES", str(256 * 1024 * 1024))
+)
 TRAINING_METADATA_LOCK = threading.Lock()
 TRAINING_JOBS: dict[str, dict[str, Any]] = {}
 TRAINING_JOB_TASKS: dict[str, asyncio.Task[Any]] = {}
@@ -107,9 +113,17 @@ TRAINING_NOISE_CONDITIONS = {"quiet", "normal", "noisy"}
 SPEAKER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 app = FastAPI(title="Project Pi Thermal Backend", version="1.0.0")
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "PROJECT_PI_CORS_ORIGINS",
+        "http://localhost,http://127.0.0.1",
+    ).split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins or ["http://localhost"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1000,6 +1014,48 @@ def safe_dataset_path(relative_path: str) -> Path:
     return candidate
 
 
+def require_api_token(request: Request | None) -> None:
+    if request is None:
+        return
+    expected = API_TOKEN.strip()
+    if not expected:
+        return
+    authorization = request.headers.get("authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or token.strip() != expected:
+        raise HTTPException(status_code=401, detail="Missing or invalid API token")
+
+
+async def write_upload_to_path(
+    upload: UploadFile,
+    target_path: Path,
+    *,
+    max_bytes: int,
+) -> int:
+    total = 0
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with target_path.open("wb") as handle:
+            while True:
+                try:
+                    chunk = await upload.read(1024 * 1024)
+                except TypeError:
+                    chunk = await upload.read()
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Uploaded file exceeds {max_bytes} bytes",
+                    )
+                handle.write(chunk)
+    except Exception:
+        target_path.unlink(missing_ok=True)
+        raise
+    return total
+
+
 def read_training_metadata_rows() -> list[dict[str, str]]:
     if not KEYWORD_METADATA_PATH.exists():
         return []
@@ -1623,16 +1679,19 @@ async def upload_training_record(
         distance_m=distance_m,
         noise_condition=noise_condition,
     )
-    upload_bytes = await file.read()
-    if not upload_bytes:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
     ensure_training_dataset_layout(KEYWORD_DATASET_DIR)
     temp_dir = KEYWORD_DATASET_DIR / ".tmp"
     temp_dir.mkdir(parents=True, exist_ok=True)
     temp_path = temp_dir / f"upload_{uuid.uuid4().hex}.wav"
     try:
-        temp_path.write_bytes(upload_bytes)
+        upload_size = await write_upload_to_path(
+            file,
+            temp_path,
+            max_bytes=MAX_TRAINING_WAV_UPLOAD_BYTES,
+        )
+        if upload_size == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
         wav_info = inspect_training_wav(temp_path)
         recording_id = uuid.uuid4().hex[:8]
         keyword_slug = slugify_keyword(metadata["keyword"])
@@ -1900,28 +1959,79 @@ async def training_train(seed: int = 1337):
     return await queue_training_job("training", _run_train)
 
 
+def validate_upload_filename(filename: str | None, suffix: str, label: str) -> None:
+    name = (filename or "").strip().lower()
+    if not name.endswith(suffix):
+        raise HTTPException(status_code=400, detail=f"{label} must end with {suffix}")
+
+
+def restart_kws_alert_service() -> dict[str, Any]:
+    command = ["sudo", "-n", "systemctl", "restart", "kws-alert.service"]
+    if os.name != "posix":
+        return {"skipped": True, "reason": "not running on Linux", "command": command}
+    completed = subprocess.run(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "KWS service restart failed: "
+                + ((completed.stderr or completed.stdout or "").strip() or "unknown error")
+            ),
+        )
+    return {"skipped": False, "command": command}
+
+
 @app.post("/api/training/deploy")
 async def training_deploy(
     onnx_file: UploadFile = File(...),
     onnx_data_file: UploadFile = File(...),
     keyword: str = Form(...),
+    request: Request | None = None,
 ):
     """Deploy a trained .onnx + .onnx.data model pair to the live models directory."""
+    require_api_token(request)
     keyword_slug = slugify_keyword(keyword.strip().lower())
     if keyword.strip().lower() not in TRAINING_KEYWORDS:
         raise HTTPException(status_code=400, detail="Invalid keyword for deployment")
 
-    onnx_bytes = await onnx_file.read()
-    data_bytes = await onnx_data_file.read()
-
-    if not onnx_bytes:
-        raise HTTPException(status_code=400, detail="ONNX model file is empty")
-    if not data_bytes:
-        raise HTTPException(status_code=400, detail="ONNX data file is empty")
+    validate_upload_filename(onnx_file.filename, ".onnx", "ONNX model file")
+    validate_upload_filename(onnx_data_file.filename, ".onnx.data", "ONNX data file")
 
     OPENWAKEWORD_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    temp_onnx = OPENWAKEWORD_MODEL_DIR / f".{keyword_slug}.onnx.{uuid.uuid4().hex}.tmp"
+    temp_data = OPENWAKEWORD_MODEL_DIR / f".{keyword_slug}.onnx.data.{uuid.uuid4().hex}.tmp"
+    onnx_size = await write_upload_to_path(
+        onnx_file,
+        temp_onnx,
+        max_bytes=MAX_ONNX_UPLOAD_BYTES,
+    )
+    data_size = await write_upload_to_path(
+        onnx_data_file,
+        temp_data,
+        max_bytes=MAX_ONNX_DATA_UPLOAD_BYTES,
+    )
+
+    if not onnx_size:
+        temp_onnx.unlink(missing_ok=True)
+        temp_data.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="ONNX model file is empty")
+    if not data_size:
+        temp_onnx.unlink(missing_ok=True)
+        temp_data.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="ONNX data file is empty")
+
     target_onnx = OPENWAKEWORD_MODEL_DIR / f"{keyword_slug}.onnx"
     target_data = OPENWAKEWORD_MODEL_DIR / f"{keyword_slug}.onnx.data"
+    old_onnx_bytes = target_onnx.read_bytes() if target_onnx.exists() else None
+    old_data_bytes = target_data.read_bytes() if target_data.exists() else None
 
     # Create timestamped backups of existing models
     backup_dir = OPENWAKEWORD_MODEL_DIR / "backup"
@@ -1936,25 +2046,27 @@ async def training_deploy(
             backup_data.write_bytes(target_data.read_bytes())
 
     # Atomic write via temp files
-    temp_onnx = OPENWAKEWORD_MODEL_DIR / f".{keyword_slug}.onnx.tmp"
-    temp_data = OPENWAKEWORD_MODEL_DIR / f".{keyword_slug}.onnx.data.tmp"
     try:
-        temp_onnx.write_bytes(onnx_bytes)
-        temp_data.write_bytes(data_bytes)
         os.replace(temp_onnx, target_onnx)
         os.replace(temp_data, target_data)
+        restart_result = restart_kws_alert_service()
     except Exception:
         temp_onnx.unlink(missing_ok=True)
         temp_data.unlink(missing_ok=True)
+        if old_onnx_bytes is not None:
+            target_onnx.write_bytes(old_onnx_bytes)
+        if old_data_bytes is not None:
+            target_data.write_bytes(old_data_bytes)
         raise
 
     return {
         "deployed": True,
         "keyword": keyword.strip().lower(),
         "slug": keyword_slug,
-        "onnx_size": len(onnx_bytes),
-        "data_size": len(data_bytes),
+        "onnx_size": onnx_size,
+        "data_size": data_size,
         "backed_up": backup_dir.exists(),
+        "restart": restart_result,
     }
 
 
@@ -2204,7 +2316,8 @@ async def run_delayed_power_command(action: str, command: list[str]) -> None:
 
 
 @app.post("/api/refresh")
-async def api_refresh(request: RefreshRequest):
+async def api_refresh(request: RefreshRequest, http_request: Request = None):
+    require_api_token(http_request)
     if not REFRESH_SCRIPT.is_file():
         raise HTTPException(status_code=500, detail="Refresh script is missing on the Pi.")
 
@@ -2239,7 +2352,8 @@ async def api_refresh(request: RefreshRequest):
 
 
 @app.post("/api/shutdown")
-async def api_shutdown():
+async def api_shutdown(request: Request = None):
+    require_api_token(request)
     verify_passwordless_sudo()
     asyncio.create_task(
         run_delayed_power_command(
@@ -2251,7 +2365,8 @@ async def api_shutdown():
 
 
 @app.post("/api/reboot")
-async def api_reboot():
+async def api_reboot(request: Request = None):
+    require_api_token(request)
     verify_passwordless_sudo()
     asyncio.create_task(
         run_delayed_power_command("reboot", ["/usr/sbin/reboot"])
