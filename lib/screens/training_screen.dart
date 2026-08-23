@@ -432,12 +432,14 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
         noiseCondition: upload.noiseCondition,
       );
       if (!mounted) return;
+      final errorMessage = ref.read(trainingProvider).errorMessage;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
             uploaded
                 ? 'Recording uploaded.'
-                : 'Upload failed. Check the Pi backend and try again.',
+                : errorMessage ??
+                      'Upload failed. Check the Pi backend and try again.',
           ),
         ),
       );

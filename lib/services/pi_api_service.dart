@@ -5,6 +5,15 @@ import '../models/app_settings.dart';
 import '../models/button_event.dart';
 import '../models/system_status.dart';
 
+class PiApiException implements Exception {
+  const PiApiException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 class PiApiService {
   PiApiService({required this.host, required int port, Dio? dio})
     : port = AppSettings.normalizeBackendPort(port),
@@ -12,8 +21,7 @@ class PiApiService {
           dio ??
           Dio(
             BaseOptions(
-              baseUrl:
-                  'http://$host:${AppSettings.normalizeBackendPort(port)}',
+              baseUrl: 'http://$host:${AppSettings.normalizeBackendPort(port)}',
               connectTimeout: const Duration(seconds: 3),
               receiveTimeout: const Duration(seconds: 5),
               sendTimeout: const Duration(seconds: 3),
@@ -98,10 +106,7 @@ class PiApiService {
   }) async {
     final response = await _dio.post<Map<String, dynamic>>(
       '/api/refresh',
-      data: {
-        'git_pull': gitPull,
-        'restart_backend': restartBackend,
-      },
+      data: {'git_pull': gitPull, 'restart_backend': restartBackend},
       options: Options(receiveTimeout: const Duration(seconds: 130)),
     );
     return Map<String, dynamic>.from(response.data ?? const {});
@@ -110,19 +115,25 @@ class PiApiService {
   // ── Training API ─────────────────────────────────────────────────────
 
   Future<List<Map<String, dynamic>>> fetchTrainingKeywords() async {
-    final response = await _dio.get<Map<String, dynamic>>('/api/training/keywords');
+    final response = await _dio.get<Map<String, dynamic>>(
+      '/api/training/keywords',
+    );
     final keywords = response.data?['keywords'];
     if (keywords is! List) return const [];
     return keywords.cast<Map<String, dynamic>>();
   }
 
   Future<Map<String, dynamic>> fetchTrainingStatistics() async {
-    final response = await _dio.get<Map<String, dynamic>>('/api/training/statistics');
+    final response = await _dio.get<Map<String, dynamic>>(
+      '/api/training/statistics',
+    );
     return Map<String, dynamic>.from(response.data ?? const {});
   }
 
   Future<List<Map<String, dynamic>>> fetchTrainingRecordings() async {
-    final response = await _dio.get<Map<String, dynamic>>('/api/training/recordings');
+    final response = await _dio.get<Map<String, dynamic>>(
+      '/api/training/recordings',
+    );
     final recordings = response.data?['recordings'];
     if (recordings is! List) return const [];
     return recordings.cast<Map<String, dynamic>>();
@@ -137,21 +148,58 @@ class PiApiService {
     required double distanceM,
     required String noiseCondition,
   }) async {
-    final formData = FormData.fromMap({
-      'file': await MultipartFile.fromFile(filePath, filename: 'recording.wav'),
-      'keyword': keyword,
-      'speaker_id': speakerId,
-      'age_group': ageGroup,
-      'gender': gender,
-      'distance_m': distanceM,
-      'noise_condition': noiseCondition,
-    });
-    final response = await _dio.post<Map<String, dynamic>>(
-      '/api/training/record',
-      data: formData,
-      options: Options(receiveTimeout: const Duration(seconds: 30)),
-    );
-    return Map<String, dynamic>.from(response.data ?? const {});
+    try {
+      final formData = FormData.fromMap({
+        'file': await MultipartFile.fromFile(
+          filePath,
+          filename: 'recording.wav',
+        ),
+        'keyword': keyword,
+        'speaker_id': speakerId,
+        'age_group': ageGroup,
+        'gender': gender,
+        'distance_m': distanceM,
+        'noise_condition': noiseCondition,
+      });
+      final response = await _dio.post<Map<String, dynamic>>(
+        '/api/training/record',
+        data: formData,
+        options: Options(
+          sendTimeout: const Duration(seconds: 45),
+          receiveTimeout: const Duration(seconds: 45),
+        ),
+      );
+      return Map<String, dynamic>.from(response.data ?? const {});
+    } on DioException catch (error) {
+      throw PiApiException(_formatDioError(error));
+    }
+  }
+
+  String _formatDioError(DioException error) {
+    final statusCode = error.response?.statusCode;
+    final data = error.response?.data;
+    final detail = switch (data) {
+      {'detail': final Object value} => value.toString(),
+      {'message': final Object value} => value.toString(),
+      String value when value.isNotEmpty => value,
+      _ => null,
+    };
+    if (detail != null && detail.isNotEmpty) {
+      return statusCode == null
+          ? detail
+          : 'Backend rejected upload ($statusCode): $detail';
+    }
+    return switch (error.type) {
+      DioExceptionType.connectionTimeout ||
+      DioExceptionType.sendTimeout ||
+      DioExceptionType.receiveTimeout =>
+        'Upload timed out. Check the Pi IP address and backend service.',
+      DioExceptionType.connectionError =>
+        'Could not connect to the Pi backend. Check the IP address and port.',
+      DioExceptionType.badResponse =>
+        'Backend rejected upload${statusCode == null ? '' : ' ($statusCode)'}.',
+      _ => 'Upload failed: ${error.message ?? error.type.name}',
+    };
   }
 
   Future<void> deleteTrainingRecording(String recordingId) async {
@@ -159,7 +207,9 @@ class PiApiService {
   }
 
   Future<Map<String, dynamic>> startTrainingValidation() async {
-    final response = await _dio.post<Map<String, dynamic>>('/api/training/validate');
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/api/training/validate',
+    );
     return Map<String, dynamic>.from(response.data ?? const {});
   }
 
@@ -174,7 +224,9 @@ class PiApiService {
   }
 
   Future<Map<String, dynamic>> startTrainingExport() async {
-    final response = await _dio.post<Map<String, dynamic>>('/api/training/export');
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/api/training/export',
+    );
     return Map<String, dynamic>.from(response.data ?? const {});
   }
 
@@ -187,7 +239,9 @@ class PiApiService {
   }
 
   Future<Map<String, dynamic>> fetchTrainingJob(String jobId) async {
-    final response = await _dio.get<Map<String, dynamic>>('/api/training/jobs/$jobId');
+    final response = await _dio.get<Map<String, dynamic>>(
+      '/api/training/jobs/$jobId',
+    );
     return Map<String, dynamic>.from(response.data ?? const {});
   }
 

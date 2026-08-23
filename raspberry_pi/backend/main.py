@@ -1675,7 +1675,18 @@ async def upload_training_record(
             "duration_s": wav_info["duration_s"],
             "created_at": created_at,
         }
-    except Exception:
+    except HTTPException as exc:
+        print(
+            "Training upload rejected: "
+            f"keyword={keyword!r} speaker_id={speaker_id!r} detail={exc.detail}"
+        )
+        temp_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        print(
+            "Training upload failed unexpectedly: "
+            f"keyword={keyword!r} speaker_id={speaker_id!r} error={exc}"
+        )
         temp_path.unlink(missing_ok=True)
         raise
 
