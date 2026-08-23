@@ -1041,6 +1041,15 @@ async def write_upload_to_path(
                     chunk = await upload.read(1024 * 1024)
                 except TypeError:
                     chunk = await upload.read()
+                    if chunk:
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise HTTPException(
+                                status_code=413,
+                                detail=f"Uploaded file exceeds {max_bytes} bytes",
+                            )
+                        handle.write(chunk)
+                    break
                 if not chunk:
                     break
                 total += len(chunk)
@@ -1146,15 +1155,22 @@ def training_job_timestamp() -> str:
 
 async def run_training_job(
     job_id: str,
-    operation: Callable[[], Any],
+    operation: Callable[..., Any],
 ) -> None:
     async with TRAINING_HEAVY_JOB_LOCK:
         async with TRAINING_JOBS_LOCK:
             job = TRAINING_JOBS[job_id]
             job["status"] = "running"
             job["started_at"] = training_job_timestamp()
+            job["progress"] = 0
+            job["message"] = "Starting..."
         try:
-            result = await asyncio.to_thread(operation)
+            import inspect
+            sig = inspect.signature(operation)
+            if len(sig.parameters) > 0:
+                result = await asyncio.to_thread(operation, job_id)
+            else:
+                result = await asyncio.to_thread(operation)
         except Exception as exc:
             async with TRAINING_JOBS_LOCK:
                 job = TRAINING_JOBS[job_id]
@@ -1166,13 +1182,14 @@ async def run_training_job(
             job = TRAINING_JOBS[job_id]
             job["status"] = "succeeded"
             job["progress"] = 100
+            job["message"] = "Completed"
             job["result"] = result
             job["finished_at"] = training_job_timestamp()
 
 
 async def queue_training_job(
     job_type: str,
-    operation: Callable[[], Any],
+    operation: Callable[..., Any],
 ) -> dict[str, str]:
     job_id = f"job-{uuid.uuid4().hex[:12]}"
     async with TRAINING_JOBS_LOCK:
@@ -1181,6 +1198,7 @@ async def queue_training_job(
             "job_type": job_type,
             "status": "queued",
             "progress": 0,
+            "message": "Queued in background",
             "result": None,
             "error": None,
             "created_at": training_job_timestamp(),
@@ -1874,7 +1892,32 @@ async def training_augment(copies_per_file: int = 2, seed: int = 1337):
             detail="copies_per_file must be between 1 and 5",
         )
 
-    def _run_augment():
+    # Check available system memory before queueing
+    try:
+        vm = psutil.virtual_memory()
+        min_memory_bytes = 500 * 1024 * 1024  # 500 MB
+        if vm.available < min_memory_bytes:
+            avail_mb = vm.available / (1024 * 1024)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Insufficient system memory for augmentation. "
+                    f"At least 500 MB free RAM required, only {avail_mb:.1f} MB available."
+                ),
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    def _run_augment(job_id: str):
+        def _on_progress(current: int, total: int, msg: str):
+            pct = int((current / max(1, total)) * 100)
+            job = TRAINING_JOBS.get(job_id)
+            if job:
+                job["progress"] = min(99, max(1, pct))
+                job["message"] = msg
+
         from augment_keyword_dataset import augment_dataset
         output_dir = KEYWORD_DATASET_DIR / "augmented"
         return augment_dataset(
@@ -1882,6 +1925,7 @@ async def training_augment(copies_per_file: int = 2, seed: int = 1337):
             output_dir,
             copies_per_file=copies_per_file,
             seed=seed,
+            progress_callback=_on_progress,
         )
 
     return await queue_training_job("augmentation", _run_augment)
@@ -1991,10 +2035,10 @@ def restart_kws_alert_service() -> dict[str, Any]:
 
 @app.post("/api/training/deploy")
 async def training_deploy(
-    request: Request,
     onnx_file: UploadFile = File(...),
     onnx_data_file: UploadFile = File(...),
     keyword: str = Form(...),
+    request: Request = None,
 ):
     """Deploy a trained .onnx + .onnx.data model pair to the live models directory."""
     require_api_token(request)

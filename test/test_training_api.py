@@ -15,8 +15,12 @@ class FakeUploadFile:
     def __init__(self, filename, data):
         self.filename = filename
         self._data = data
+        self._consumed = False
 
-    async def read(self):
+    async def read(self, size: int = -1):
+        if self._consumed:
+            return b""
+        self._consumed = True
         return self._data
 
 

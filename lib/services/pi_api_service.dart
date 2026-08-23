@@ -235,31 +235,59 @@ class PiApiService {
   Future<Map<String, dynamic>> startTrainingAugmentation({
     int copiesPerFile = 2,
   }) async {
-    final response = await _dio.post<Map<String, dynamic>>(
-      '/api/training/augment',
-      queryParameters: {'copies_per_file': copiesPerFile},
-    );
-    return Map<String, dynamic>.from(response.data ?? const {});
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        '/api/training/augment',
+        queryParameters: {'copies_per_file': copiesPerFile},
+        options: Options(
+          sendTimeout: const Duration(seconds: 15),
+          receiveTimeout: const Duration(seconds: 20),
+        ),
+      );
+      return Map<String, dynamic>.from(response.data ?? const {});
+    } on DioException catch (error) {
+      throw PiApiException(_formatDioError(error));
+    }
   }
 
   Future<Map<String, dynamic>> startTrainingExport() async {
-    final response = await _dio.post<Map<String, dynamic>>(
-      '/api/training/export',
-    );
-    return Map<String, dynamic>.from(response.data ?? const {});
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        '/api/training/export',
+        options: Options(
+          sendTimeout: const Duration(seconds: 15),
+          receiveTimeout: const Duration(seconds: 20),
+        ),
+      );
+      return Map<String, dynamic>.from(response.data ?? const {});
+    } on DioException catch (error) {
+      throw PiApiException(_formatDioError(error));
+    }
   }
 
   Future<Map<String, dynamic>> startTrainingTrain({int seed = 1337}) async {
-    final response = await _dio.post<Map<String, dynamic>>(
-      '/api/training/train',
-      queryParameters: {'seed': seed},
-    );
-    return Map<String, dynamic>.from(response.data ?? const {});
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        '/api/training/train',
+        queryParameters: {'seed': seed},
+        options: Options(
+          sendTimeout: const Duration(seconds: 15),
+          receiveTimeout: const Duration(seconds: 20),
+        ),
+      );
+      return Map<String, dynamic>.from(response.data ?? const {});
+    } on DioException catch (error) {
+      throw PiApiException(_formatDioError(error));
+    }
   }
 
   Future<Map<String, dynamic>> fetchTrainingJob(String jobId) async {
     final response = await _dio.get<Map<String, dynamic>>(
       '/api/training/jobs/$jobId',
+      options: Options(
+        connectTimeout: const Duration(seconds: 8),
+        receiveTimeout: const Duration(seconds: 12),
+      ),
     );
     return Map<String, dynamic>.from(response.data ?? const {});
   }

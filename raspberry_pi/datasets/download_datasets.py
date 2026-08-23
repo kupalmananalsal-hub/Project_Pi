@@ -157,13 +157,27 @@ def _extract_archive(archive_path: Path, destination: Path) -> None:
         return
 
     destination.mkdir(parents=True, exist_ok=True)
+    dest_resolved = destination.resolve()
+
     if archive_path.suffix == ".zip":
         with zipfile.ZipFile(archive_path) as archive:
+            for member in archive.infolist():
+                member_path = (dest_resolved / member.filename).resolve()
+                if not str(member_path).startswith(str(dest_resolved) + os.sep) and member_path != dest_resolved:
+                    raise ValueError(
+                        f"Unsafe path in ZIP archive: {member.filename!r}"
+                    )
             archive.extractall(destination)
         return
 
     if archive_path.suffixes[-2:] == [".tar", ".gz"] or archive_path.suffix == ".tgz":
         with tarfile.open(archive_path, "r:gz") as archive:
+            for member in archive.getmembers():
+                member_path = (dest_resolved / member.name).resolve()
+                if not str(member_path).startswith(str(dest_resolved) + os.sep) and member_path != dest_resolved:
+                    raise ValueError(
+                        f"Unsafe path in tar archive: {member.name!r}"
+                    )
             archive.extractall(destination)
         return
 

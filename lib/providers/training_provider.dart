@@ -568,9 +568,13 @@ class TrainingNotifier extends Notifier<TrainingState> {
 
   void _startPolling(String jobId) {
     _pollTimer?.cancel();
+    var consecutiveErrors = 0;
+    const maxConsecutiveErrors = 12;
+
     _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
       try {
         final jobJson = await _api.fetchTrainingJob(jobId);
+        consecutiveErrors = 0;
         final job = TrainingJob.fromJson(jobJson);
         state = state.copyWith(activeJob: job);
         if (!job.isRunning) {
@@ -578,9 +582,28 @@ class TrainingNotifier extends Notifier<TrainingState> {
           _pollTimer = null;
           await refresh();
         }
-      } catch (_) {
-        _pollTimer?.cancel();
-        _pollTimer = null;
+      } catch (e) {
+        consecutiveErrors++;
+        // If Pi is heavily loaded, allow up to maxConsecutiveErrors attempts before aborting
+        if (consecutiveErrors >= maxConsecutiveErrors) {
+          _pollTimer?.cancel();
+          _pollTimer = null;
+          state = state.copyWith(
+            errorMessage: 'Lost connection while checking job status: $e',
+          );
+        } else if (state.activeJob != null && state.activeJob!.isRunning) {
+          // Keep active job running state with a busy notification
+          state = state.copyWith(
+            activeJob: TrainingJob(
+              jobId: state.activeJob!.jobId,
+              type: state.activeJob!.type,
+              status: 'running',
+              progress: state.activeJob!.progress,
+              message: 'Pi is busy processing (waiting for response...)',
+              createdAt: state.activeJob!.createdAt,
+            ),
+          );
+        }
       }
     });
   }

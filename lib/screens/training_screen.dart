@@ -710,11 +710,50 @@ class _JobStatusCard extends StatelessWidget {
                 ),
               ],
             ),
-            if (status == 'running' || status == 'queued')
-              const Padding(
-                padding: EdgeInsets.only(top: 8),
-                child: LinearProgressIndicator(),
+            if (status == 'running' || status == 'queued') ...[
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: job.progress > 0 && status == 'running'
+                    ? LinearProgressIndicator(value: job.progress / 100.0)
+                    : const LinearProgressIndicator(),
               ),
+              if (job.progress > 0 && status == 'running')
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      if (job.message != null)
+                        Expanded(
+                          child: Text(
+                            job.message!,
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                  color: Colors.grey.shade600,
+                                ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      Text(
+                        '${job.progress}%',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              fontWeight: FontWeight.bold,
+                              color: chipColor,
+                            ),
+                      ),
+                    ],
+                  ),
+                )
+              else if (job.message != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    job.message!,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Colors.grey.shade600,
+                        ),
+                  ),
+                ),
+            ],
             if (error != null)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
