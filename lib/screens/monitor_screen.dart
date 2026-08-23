@@ -76,8 +76,6 @@ class _MonitorScreenState extends ConsumerState<MonitorScreen> {
                       ),
                       const SizedBox(height: 18),
                       _MicrophonePanel(audio: monitor.audioFrame),
-                      const SizedBox(height: 18),
-                      _RecentDetectionsPanel(alerts: alerts.history),
                       const SizedBox(height: 26),
                       _DistressButton(),
                     ],
@@ -251,36 +249,6 @@ class _MicrophonePanel extends StatelessWidget {
   }
 }
 
-class _RecentDetectionsPanel extends StatelessWidget {
-  const _RecentDetectionsPanel({required this.alerts});
-
-  final List<AlertEvent> alerts;
-
-  @override
-  Widget build(BuildContext context) {
-    final recent = alerts.take(4).toList(growable: false);
-    return _MonitorPanel(
-      padding: const EdgeInsets.fromLTRB(28, 28, 28, 30),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const _SectionTitle('RECENT DETECTIONS'),
-          const SizedBox(height: 20),
-          if (recent.isEmpty)
-            Text(
-              'No detections yet. Trigger a test call for help below.',
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                color: _mutedText,
-                height: 1.35,
-              ),
-            )
-          else
-            for (final event in recent) _DetectionLogRow(event: event),
-        ],
-      ),
-    );
-  }
-}
 
 class _DistressButton extends ConsumerWidget {
   @override
@@ -966,84 +934,4 @@ class _MicLevelRow extends StatelessWidget {
   }
 }
 
-class _DetectionLogRow extends StatelessWidget {
-  const _DetectionLogRow({required this.event});
 
-  final AlertEvent event;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  event.displayKeyword,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  '${_formatTime(event.timestamp)} · ${event.directionLabel}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyMedium?.copyWith(color: _mutedText),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          _AlertLevelPill(level: event.alertLevel),
-        ],
-      ),
-    );
-  }
-
-  String _formatTime(DateTime timestamp) {
-    final local = timestamp.toLocal();
-    final hour = local.hour.toString().padLeft(2, '0');
-    final minute = local.minute.toString().padLeft(2, '0');
-    return '$hour:$minute';
-  }
-}
-
-class _AlertLevelPill extends StatelessWidget {
-  const _AlertLevelPill({required this.level});
-
-  final String level;
-
-  @override
-  Widget build(BuildContext context) {
-    final (label, color) = switch (level) {
-      'full_alert' => ('FULL', _alertRed),
-      'visual_only' => ('VISUAL', const Color(0xFFFFC857)),
-      _ => ('SUPPRESSED', _mutedText),
-    };
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.14),
-        borderRadius: BorderRadius.circular(18),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-        child: Text(
-          label,
-          style: Theme.of(context).textTheme.labelLarge?.copyWith(
-            color: color,
-            fontWeight: FontWeight.w800,
-          ),
-        ),
-      ),
-    );
-  }
-}

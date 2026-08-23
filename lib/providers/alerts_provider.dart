@@ -244,6 +244,7 @@ class AlertsController extends Notifier<AlertsState> {
         _clearPendingVoiceState();
         if (event.isRecognizedConfiguredKeyword) {
           _showKeywordNotice(event);
+          unawaited(ref.read(alertRuntimeServiceProvider).playSoftThermalBeep());
         }
         return;
       case AlertDecisionState.confirmed:
@@ -293,6 +294,7 @@ class AlertsController extends Notifier<AlertsState> {
 
     if (event.isRecognizedConfiguredKeyword) {
       _showKeywordNotice(event);
+      unawaited(ref.read(alertRuntimeServiceProvider).playSoftThermalBeep());
     }
     _startThermalConfirmationWindow(event);
   }
@@ -417,9 +419,10 @@ class AlertsController extends Notifier<AlertsState> {
   }
 
   Future<void> _startAuthoritativeEmergencyAlert(AlertEvent event) async {
-    if (!event.humanDetected) {
+    final hasHuman = event.humanDetected || _hasThermalPresenceFor(event);
+    if (!hasHuman) {
       // Keyword detected but no thermal human — show status badge + soft beep.
-      // No full-screen alert, no alarm, no vibration (per alert table Option B).
+      // No full-screen alert, no alarm, no vibration.
       if (event.isRecognizedConfiguredKeyword) {
         _showKeywordNotice(event);
         unawaited(ref.read(alertRuntimeServiceProvider).playSoftThermalBeep());

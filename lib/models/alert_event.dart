@@ -284,8 +284,7 @@ class AlertEvent {
     return voiceDirection.label;
   }
 
-  String get emergencyTitle =>
-      isEmergencyKeyword ? '$displayKeyword detected' : 'Keyword detected';
+  String get emergencyTitle => 'EMERGENCY ALERT';
 
   String get detectedPartLabel {
     switch (detectedPart) {

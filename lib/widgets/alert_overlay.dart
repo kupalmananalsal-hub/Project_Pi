@@ -83,20 +83,11 @@ class _AlertOverlayState extends State<AlertOverlay>
                         style: Theme.of(context).textTheme.headlineMedium
                             ?.copyWith(
                               color: Colors.white,
-                              fontWeight: FontWeight.w800,
+                              fontWeight: FontWeight.w900,
                               letterSpacing: 1.5,
                             ),
                       ),
                       const SizedBox(height: 18),
-                      Text(
-                        'Keyword Spotted!',
-                        style: Theme.of(context).textTheme.displaySmall
-                            ?.copyWith(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w900,
-                            ),
-                      ),
-                      const SizedBox(height: 8),
                       _AlertDirection(event: widget.event),
                       const SizedBox(height: 12),
                       Text(

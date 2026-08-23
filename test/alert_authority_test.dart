@@ -134,7 +134,7 @@ void main() {
     expect(state.keywordNotice, event);
     expect(state.activeAlert, isNull);
     expect(runtime.emergencyStarts, 0);
-    expect(runtime.softBeeps, 0);
+    expect(runtime.softBeeps, 1);
   });
 
   test(
