@@ -106,4 +106,98 @@ class PiApiService {
     );
     return Map<String, dynamic>.from(response.data ?? const {});
   }
+
+  // ── Training API ─────────────────────────────────────────────────────
+
+  Future<List<Map<String, dynamic>>> fetchTrainingKeywords() async {
+    final response = await _dio.get<Map<String, dynamic>>('/api/training/keywords');
+    final keywords = response.data?['keywords'];
+    if (keywords is! List) return const [];
+    return keywords.cast<Map<String, dynamic>>();
+  }
+
+  Future<Map<String, dynamic>> fetchTrainingStatistics() async {
+    final response = await _dio.get<Map<String, dynamic>>('/api/training/statistics');
+    return Map<String, dynamic>.from(response.data ?? const {});
+  }
+
+  Future<List<Map<String, dynamic>>> fetchTrainingRecordings() async {
+    final response = await _dio.get<Map<String, dynamic>>('/api/training/recordings');
+    final recordings = response.data?['recordings'];
+    if (recordings is! List) return const [];
+    return recordings.cast<Map<String, dynamic>>();
+  }
+
+  Future<Map<String, dynamic>> uploadTrainingRecording({
+    required String filePath,
+    required String keyword,
+    required String speakerId,
+    required String ageGroup,
+    required String gender,
+    required double distanceM,
+    required String noiseCondition,
+  }) async {
+    final formData = FormData.fromMap({
+      'file': await MultipartFile.fromFile(filePath, filename: 'recording.wav'),
+      'keyword': keyword,
+      'speaker_id': speakerId,
+      'age_group': ageGroup,
+      'gender': gender,
+      'distance_m': distanceM,
+      'noise_condition': noiseCondition,
+    });
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/api/training/record',
+      data: formData,
+      options: Options(receiveTimeout: const Duration(seconds: 30)),
+    );
+    return Map<String, dynamic>.from(response.data ?? const {});
+  }
+
+  Future<void> deleteTrainingRecording(String recordingId) async {
+    await _dio.delete<void>('/api/training/recordings/$recordingId');
+  }
+
+  Future<Map<String, dynamic>> startTrainingValidation() async {
+    final response = await _dio.post<Map<String, dynamic>>('/api/training/validate');
+    return Map<String, dynamic>.from(response.data ?? const {});
+  }
+
+  Future<Map<String, dynamic>> startTrainingAugmentation({
+    int copiesPerFile = 2,
+  }) async {
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/api/training/augment',
+      queryParameters: {'copies_per_file': copiesPerFile},
+    );
+    return Map<String, dynamic>.from(response.data ?? const {});
+  }
+
+  Future<Map<String, dynamic>> startTrainingExport() async {
+    final response = await _dio.post<Map<String, dynamic>>('/api/training/export');
+    return Map<String, dynamic>.from(response.data ?? const {});
+  }
+
+  Future<Map<String, dynamic>> startTrainingTrain({int seed = 1337}) async {
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/api/training/train',
+      queryParameters: {'seed': seed},
+    );
+    return Map<String, dynamic>.from(response.data ?? const {});
+  }
+
+  Future<Map<String, dynamic>> fetchTrainingJob(String jobId) async {
+    final response = await _dio.get<Map<String, dynamic>>('/api/training/jobs/$jobId');
+    return Map<String, dynamic>.from(response.data ?? const {});
+  }
+
+  Future<Map<String, dynamic>> fetchTrainingEvaluation({
+    double threshold = 0.5,
+  }) async {
+    final response = await _dio.get<Map<String, dynamic>>(
+      '/api/training/evaluate',
+      queryParameters: {'threshold': threshold},
+    );
+    return Map<String, dynamic>.from(response.data ?? const {});
+  }
 }

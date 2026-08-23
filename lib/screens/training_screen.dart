@@ -1,0 +1,586 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../models/training_keyword.dart';
+import '../providers/connection_provider.dart';
+import '../providers/training_provider.dart';
+
+/// Training data collection and pipeline management screen.
+class TrainingScreen extends ConsumerStatefulWidget {
+  const TrainingScreen({super.key});
+
+  @override
+  ConsumerState<TrainingScreen> createState() => _TrainingScreenState();
+}
+
+class _TrainingScreenState extends ConsumerState<TrainingScreen> {
+  String? _selectedKeyword;
+  final _speakerController = TextEditingController(text: 'speaker_01');
+  final _distanceController = TextEditingController(text: '1.0');
+  String _ageGroup = 'adult';
+  String _gender = 'male';
+  String _noiseCondition = 'quiet';
+
+  @override
+  void initState() {
+    super.initState();
+    // Load data on first build.
+    Future.microtask(() => ref.read(trainingProvider.notifier).refresh());
+  }
+
+  @override
+  void dispose() {
+    _speakerController.dispose();
+    _distanceController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final training = ref.watch(trainingProvider);
+    final isConnected = ref.watch(
+      connectionProvider.select((c) => c.isConnected),
+    );
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+
+    if (!isConnected) {
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.cloud_off_rounded, size: 64, color: Colors.grey),
+            SizedBox(height: 16),
+            Text('Connect to Pi to access training'),
+          ],
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: () => ref.read(trainingProvider.notifier).refresh(),
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          // ── Error Banner ──
+          if (training.errorMessage != null)
+            Card(
+              color: colorScheme.errorContainer,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    Icon(Icons.error_outline, color: colorScheme.error),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        training.errorMessage!,
+                        style: TextStyle(color: colorScheme.onErrorContainer),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: () =>
+                          ref.read(trainingProvider.notifier).clearError(),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+          // ── Loading Indicator ──
+          if (training.isLoading) const LinearProgressIndicator(),
+
+          // ── Dataset Overview ──
+          _SectionHeader(title: 'Dataset Overview', icon: Icons.dataset_rounded),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              _StatChip(
+                label: 'Recordings',
+                value: '${training.statistics?.totalRecordings ?? 0}',
+                icon: Icons.mic,
+              ),
+              const SizedBox(width: 8),
+              _StatChip(
+                label: 'Speakers',
+                value: '${training.statistics?.bySpeaker.length ?? 0}',
+                icon: Icons.people,
+              ),
+              const SizedBox(width: 8),
+              _StatChip(
+                label: 'Keywords',
+                value: '${training.keywords.length}',
+                icon: Icons.label,
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          // ── Keyword Grid ──
+          if (training.keywords.isNotEmpty) ...[
+            _SectionHeader(
+              title: 'Keywords',
+              icon: Icons.translate_rounded,
+            ),
+            const SizedBox(height: 8),
+            _KeywordGrid(
+              keywords: training.keywords,
+              counts: training.statistics?.byKeyword ?? const {},
+            ),
+            const SizedBox(height: 16),
+          ],
+
+          // ── Record Section ──
+          _SectionHeader(title: 'Record Sample', icon: Icons.mic_rounded),
+          const SizedBox(height: 8),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  DropdownButtonFormField<String>(
+                    initialValue: _selectedKeyword,
+                    decoration: const InputDecoration(
+                      labelText: 'Keyword',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: training.keywords
+                        .map(
+                          (kw) => DropdownMenuItem(
+                            value: kw.keyword,
+                            child: Text('${kw.keyword} (${kw.language})'),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (v) => setState(() => _selectedKeyword = v),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _speakerController,
+                          decoration: const InputDecoration(
+                            labelText: 'Speaker ID',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: TextField(
+                          controller: _distanceController,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(
+                            labelText: 'Distance (m)',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: DropdownButtonFormField<String>(
+                          initialValue: _ageGroup,
+                          decoration: const InputDecoration(
+                            labelText: 'Age Group',
+                            border: OutlineInputBorder(),
+                          ),
+                          items: const [
+                            DropdownMenuItem(value: 'child', child: Text('Child')),
+                            DropdownMenuItem(value: 'teen', child: Text('Teen')),
+                            DropdownMenuItem(value: 'adult', child: Text('Adult')),
+                            DropdownMenuItem(value: 'elder', child: Text('Elder')),
+                          ],
+                          onChanged: (v) =>
+                              setState(() => _ageGroup = v ?? 'adult'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: DropdownButtonFormField<String>(
+                          initialValue: _gender,
+                          decoration: const InputDecoration(
+                            labelText: 'Gender',
+                            border: OutlineInputBorder(),
+                          ),
+                          items: const [
+                            DropdownMenuItem(value: 'male', child: Text('Male')),
+                            DropdownMenuItem(value: 'female', child: Text('Female')),
+                            DropdownMenuItem(value: 'other', child: Text('Other')),
+                          ],
+                          onChanged: (v) =>
+                              setState(() => _gender = v ?? 'male'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: _noiseCondition,
+                    decoration: const InputDecoration(
+                      labelText: 'Noise Condition',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 'quiet', child: Text('Quiet')),
+                      DropdownMenuItem(value: 'normal', child: Text('Normal')),
+                      DropdownMenuItem(value: 'noisy', child: Text('Noisy')),
+                    ],
+                    onChanged: (v) =>
+                        setState(() => _noiseCondition = v ?? 'quiet'),
+                  ),
+                  const SizedBox(height: 16),
+                  FilledButton.icon(
+                    onPressed: () {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Recording not yet supported on this device. '
+                            'Use the record package integration to enable.',
+                          ),
+                        ),
+                      );
+                    },
+                    icon: const Icon(Icons.mic),
+                    label: const Text('Record Sample'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          // ── Pipeline Actions ──
+          _SectionHeader(
+            title: 'Pipeline',
+            icon: Icons.play_circle_outline_rounded,
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _PipelineButton(
+                label: 'Validate',
+                icon: Icons.check_circle_outline,
+                color: Colors.blue,
+                onPressed: training.isLoading
+                    ? null
+                    : () => ref
+                          .read(trainingProvider.notifier)
+                          .startJob('validation'),
+              ),
+              _PipelineButton(
+                label: 'Augment',
+                icon: Icons.auto_fix_high,
+                color: Colors.purple,
+                onPressed: training.isLoading
+                    ? null
+                    : () => ref
+                          .read(trainingProvider.notifier)
+                          .startJob('augmentation'),
+              ),
+              _PipelineButton(
+                label: 'Export',
+                icon: Icons.archive_outlined,
+                color: Colors.teal,
+                onPressed: training.isLoading
+                    ? null
+                    : () => ref
+                          .read(trainingProvider.notifier)
+                          .startJob('export'),
+              ),
+              _PipelineButton(
+                label: 'Train',
+                icon: Icons.model_training,
+                color: Colors.orange,
+                onPressed: training.isLoading
+                    ? null
+                    : () => ref
+                          .read(trainingProvider.notifier)
+                          .startJob('training'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          // ── Active Job Status ──
+          if (training.activeJob != null) ...[
+            _SectionHeader(
+              title: 'Job Status',
+              icon: Icons.pending_actions_rounded,
+            ),
+            const SizedBox(height: 8),
+            _JobStatusCard(job: training.activeJob!),
+            const SizedBox(height: 16),
+          ],
+
+          // ── Speaker Distribution ──
+          if (training.statistics != null &&
+              training.statistics!.bySpeaker.isNotEmpty) ...[
+            _SectionHeader(
+              title: 'Speaker Distribution',
+              icon: Icons.bar_chart_rounded,
+            ),
+            const SizedBox(height: 8),
+            _DistributionCard(
+              data: training.statistics!.bySpeaker,
+              color: Colors.indigo,
+            ),
+          ],
+
+          const SizedBox(height: 32),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Private Widgets ──────────────────────────────────────────────────────────
+
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader({required this.title, required this.icon});
+
+  final String title;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 20, color: Theme.of(context).colorScheme.primary),
+        const SizedBox(width: 8),
+        Text(
+          title,
+          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.bold,
+              ),
+        ),
+      ],
+    );
+  }
+}
+
+class _StatChip extends StatelessWidget {
+  const _StatChip({
+    required this.label,
+    required this.value,
+    required this.icon,
+  });
+
+  final String label;
+  final String value;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+          child: Column(
+            children: [
+              Icon(icon, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(height: 4),
+              Text(
+                value,
+                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
+              ),
+              Text(label, style: Theme.of(context).textTheme.bodySmall),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _KeywordGrid extends StatelessWidget {
+  const _KeywordGrid({required this.keywords, required this.counts});
+
+  final List<TrainingKeyword> keywords;
+  final Map<String, int> counts;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: keywords.map((kw) {
+        final count = counts[kw.slug] ?? 0;
+        return Chip(
+          avatar: CircleAvatar(
+            backgroundColor: kw.language == 'fil'
+                ? Colors.blue.shade100
+                : Colors.green.shade100,
+            child: Text(
+              kw.language.toUpperCase(),
+              style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
+            ),
+          ),
+          label: Text('${kw.keyword} ($count)'),
+        );
+      }).toList(),
+    );
+  }
+}
+
+class _PipelineButton extends StatelessWidget {
+  const _PipelineButton({
+    required this.label,
+    required this.icon,
+    required this.color,
+    required this.onPressed,
+  });
+
+  final String label;
+  final IconData icon;
+  final Color color;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return FilledButton.tonalIcon(
+      onPressed: onPressed,
+      icon: Icon(icon, color: color),
+      label: Text(label),
+    );
+  }
+}
+
+class _JobStatusCard extends StatelessWidget {
+  const _JobStatusCard({required this.job});
+
+  final dynamic job; // TrainingJob
+
+  @override
+  Widget build(BuildContext context) {
+    final status = (job as dynamic).status as String;
+    final type = (job as dynamic).type as String;
+    final error = (job as dynamic).error as String?;
+    final result = (job as dynamic).result as Map<String, dynamic>?;
+
+    final (Color chipColor, IconData chipIcon) = switch (status) {
+      'queued' => (Colors.orange, Icons.schedule),
+      'running' => (Colors.blue, Icons.sync),
+      'succeeded' => (Colors.green, Icons.check_circle),
+      'failed' => (Colors.red, Icons.error),
+      _ => (Colors.grey, Icons.help_outline),
+    };
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(chipIcon, color: chipColor),
+                const SizedBox(width: 8),
+                Text(
+                  type.toUpperCase(),
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                ),
+                const Spacer(),
+                Chip(
+                  label: Text(status),
+                  backgroundColor: chipColor.withValues(alpha: 0.15),
+                  side: BorderSide(color: chipColor),
+                ),
+              ],
+            ),
+            if (status == 'running' || status == 'queued')
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: LinearProgressIndicator(),
+              ),
+            if (error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  error,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.error,
+                  ),
+                ),
+              ),
+            if (result != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  result.entries
+                      .map((e) => '${e.key}: ${e.value}')
+                      .join('\n'),
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DistributionCard extends StatelessWidget {
+  const _DistributionCard({required this.data, required this.color});
+
+  final Map<String, int> data;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final sorted = data.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final maxVal = sorted.isEmpty ? 1 : sorted.first.value;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: sorted.map((entry) {
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 100,
+                    child: Text(
+                      entry.key,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                  Expanded(
+                    child: LinearProgressIndicator(
+                      value: entry.value / maxVal,
+                      color: color,
+                      backgroundColor: color.withValues(alpha: 0.1),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '${entry.value}',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                  ),
+                ],
+              ),
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+}
