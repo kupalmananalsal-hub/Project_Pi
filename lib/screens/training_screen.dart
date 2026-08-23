@@ -102,7 +102,10 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
           if (training.isLoading) const LinearProgressIndicator(),
 
           // ── Dataset Overview ──
-          _SectionHeader(title: 'Dataset Overview', icon: Icons.dataset_rounded),
+          _SectionHeader(
+            title: 'Dataset Overview',
+            icon: Icons.dataset_rounded,
+          ),
           const SizedBox(height: 8),
           Row(
             children: [
@@ -129,10 +132,7 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
 
           // ── Keyword Grid ──
           if (training.keywords.isNotEmpty) ...[
-            _SectionHeader(
-              title: 'Keywords',
-              icon: Icons.translate_rounded,
-            ),
+            _SectionHeader(title: 'Keywords', icon: Icons.translate_rounded),
             const SizedBox(height: 8),
             _KeywordGrid(
               keywords: training.keywords,
@@ -202,10 +202,22 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                             border: OutlineInputBorder(),
                           ),
                           items: const [
-                            DropdownMenuItem(value: 'child', child: Text('Child')),
-                            DropdownMenuItem(value: 'teen', child: Text('Teen')),
-                            DropdownMenuItem(value: 'adult', child: Text('Adult')),
-                            DropdownMenuItem(value: 'elder', child: Text('Elder')),
+                            DropdownMenuItem(
+                              value: 'child',
+                              child: Text('Child'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'teen',
+                              child: Text('Teen'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'adult',
+                              child: Text('Adult'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'elder',
+                              child: Text('Elder'),
+                            ),
                           ],
                           onChanged: (v) =>
                               setState(() => _ageGroup = v ?? 'adult'),
@@ -220,9 +232,18 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                             border: OutlineInputBorder(),
                           ),
                           items: const [
-                            DropdownMenuItem(value: 'male', child: Text('Male')),
-                            DropdownMenuItem(value: 'female', child: Text('Female')),
-                            DropdownMenuItem(value: 'other', child: Text('Other')),
+                            DropdownMenuItem(
+                              value: 'male',
+                              child: Text('Male'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'female',
+                              child: Text('Female'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'other',
+                              child: Text('Other'),
+                            ),
                           ],
                           onChanged: (v) =>
                               setState(() => _gender = v ?? 'male'),
@@ -246,19 +267,31 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                         setState(() => _noiseCondition = v ?? 'quiet'),
                   ),
                   const SizedBox(height: 16),
-                  _RecordingStatusBanner(status: training.recordingStatus),
+                  _RecordingStatusBanner(
+                    status: training.recordingStatus,
+                    elapsed: training.recordingElapsed,
+                  ),
                   if (training.recordingStatus ==
                       TrainingRecordingStatus.error) ...[
                     const SizedBox(height: 8),
-                    OutlinedButton.icon(
-                      onPressed: training.isLoading
-                          ? null
-                          : () => ref
-                                .read(trainingProvider.notifier)
-                                .retryUpload(),
-                      icon: const Icon(Icons.refresh_rounded),
-                      label: const Text('Retry Upload'),
-                    ),
+                    if (training.microphonePermissionDenied)
+                      OutlinedButton.icon(
+                        onPressed: () => ref
+                            .read(trainingProvider.notifier)
+                            .openMicrophoneSettings(),
+                        icon: const Icon(Icons.settings_rounded),
+                        label: const Text('Open App Settings'),
+                      )
+                    else
+                      OutlinedButton.icon(
+                        onPressed: training.isLoading
+                            ? null
+                            : () => ref
+                                  .read(trainingProvider.notifier)
+                                  .retryUpload(),
+                        icon: const Icon(Icons.refresh_rounded),
+                        label: const Text('Retry Upload'),
+                      ),
                   ],
                   const SizedBox(height: 12),
                   FilledButton.icon(
@@ -270,15 +303,12 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                           ? Icons.stop_circle_rounded
                           : Icons.mic_rounded,
                     ),
-                    label: Text(
-                      switch (training.recordingStatus) {
-                        TrainingRecordingStatus.recording =>
-                          'Stop and Upload',
-                        TrainingRecordingStatus.stopping => 'Stopping...',
-                        TrainingRecordingStatus.uploading => 'Uploading...',
-                        _ => 'Record Sample',
-                      },
-                    ),
+                    label: Text(switch (training.recordingStatus) {
+                      TrainingRecordingStatus.recording => 'Stop and Upload',
+                      TrainingRecordingStatus.stopping => 'Stopping...',
+                      TrainingRecordingStatus.uploading => 'Uploading...',
+                      _ => 'Record Sample',
+                    }),
                   ),
                 ],
               ),
@@ -434,9 +464,9 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
   }
 
   void _showFormError(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 }
 
@@ -456,9 +486,9 @@ class _SectionHeader extends StatelessWidget {
         const SizedBox(width: 8),
         Text(
           title,
-          style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                fontWeight: FontWeight.bold,
-              ),
+          style: Theme.of(
+            context,
+          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
         ),
       ],
     );
@@ -489,8 +519,8 @@ class _StatChip extends StatelessWidget {
               Text(
                 value,
                 style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
+                  fontWeight: FontWeight.bold,
+                ),
               ),
               Text(label, style: Theme.of(context).textTheme.bodySmall),
             ],
@@ -555,44 +585,45 @@ class _PipelineButton extends StatelessWidget {
 }
 
 class _RecordingStatusBanner extends StatelessWidget {
-  const _RecordingStatusBanner({required this.status});
+  const _RecordingStatusBanner({required this.status, required this.elapsed});
 
   final TrainingRecordingStatus status;
+  final Duration elapsed;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final (IconData icon, String label, Color color) = switch (status) {
       TrainingRecordingStatus.recording => (
-          Icons.fiber_manual_record_rounded,
-          'Recording...',
-          theme.colorScheme.error,
-        ),
+        Icons.fiber_manual_record_rounded,
+        'Recording... ${_formatElapsed(elapsed)}',
+        theme.colorScheme.error,
+      ),
       TrainingRecordingStatus.stopping => (
-          Icons.stop_circle_outlined,
-          'Stopping recording...',
-          theme.colorScheme.primary,
-        ),
+        Icons.stop_circle_outlined,
+        'Stopping recording...',
+        theme.colorScheme.primary,
+      ),
       TrainingRecordingStatus.uploading => (
-          Icons.cloud_upload_outlined,
-          'Uploading sample...',
-          theme.colorScheme.primary,
-        ),
+        Icons.cloud_upload_outlined,
+        'Uploading sample...',
+        theme.colorScheme.primary,
+      ),
       TrainingRecordingStatus.success => (
-          Icons.check_circle_outline,
-          'Sample uploaded.',
-          Colors.green,
-        ),
+        Icons.check_circle_outline,
+        'Sample uploaded.',
+        Colors.green,
+      ),
       TrainingRecordingStatus.error => (
-          Icons.error_outline,
-          'Recording or upload failed.',
-          theme.colorScheme.error,
-        ),
+        Icons.error_outline,
+        'Recording or upload failed.',
+        theme.colorScheme.error,
+      ),
       TrainingRecordingStatus.idle => (
-          Icons.mic_none_rounded,
-          'Ready to record 16 kHz mono WAV.',
-          theme.colorScheme.onSurfaceVariant,
-        ),
+        Icons.mic_none_rounded,
+        'Ready to record 16 kHz mono WAV.',
+        theme.colorScheme.onSurfaceVariant,
+      ),
     };
 
     return Row(
@@ -607,6 +638,12 @@ class _RecordingStatusBanner extends StatelessWidget {
         ),
       ],
     );
+  }
+
+  String _formatElapsed(Duration duration) {
+    final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$minutes:$seconds';
   }
 }
 
@@ -642,9 +679,9 @@ class _JobStatusCard extends StatelessWidget {
                 const SizedBox(width: 8),
                 Text(
                   type.toUpperCase(),
-                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.bold,
-                      ),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold),
                 ),
                 const Spacer(),
                 Chip(
@@ -664,18 +701,14 @@ class _JobStatusCard extends StatelessWidget {
                 padding: const EdgeInsets.only(top: 8),
                 child: Text(
                   error,
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.error,
-                  ),
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
               ),
             if (result != null)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
                 child: Text(
-                  result.entries
-                      .map((e) => '${e.key}: ${e.value}')
-                      .join('\n'),
+                  result.entries.map((e) => '${e.key}: ${e.value}').join('\n'),
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
               ),
@@ -726,8 +759,8 @@ class _DistributionCard extends StatelessWidget {
                   Text(
                     '${entry.value}',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          fontWeight: FontWeight.bold,
-                        ),
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ],
               ),

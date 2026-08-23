@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 
 import '../models/training_job.dart';
@@ -51,6 +52,9 @@ class TrainingState {
     this.recordingStatus = TrainingRecordingStatus.idle,
     this.recordingPath,
     this.lastUploadPath,
+    this.recordingStartedAt,
+    this.recordingElapsed = Duration.zero,
+    this.microphonePermissionDenied = false,
   });
 
   final List<TrainingKeyword> keywords;
@@ -62,6 +66,9 @@ class TrainingState {
   final TrainingRecordingStatus recordingStatus;
   final String? recordingPath;
   final String? lastUploadPath;
+  final DateTime? recordingStartedAt;
+  final Duration recordingElapsed;
+  final bool microphonePermissionDenied;
 
   bool get isRecording => recordingStatus == TrainingRecordingStatus.recording;
   bool get isRecordingBusy =>
@@ -78,6 +85,9 @@ class TrainingState {
     TrainingRecordingStatus? recordingStatus,
     String? recordingPath,
     String? lastUploadPath,
+    Object? recordingStartedAt = _unset,
+    Duration? recordingElapsed,
+    bool? microphonePermissionDenied,
   }) {
     return TrainingState(
       keywords: keywords ?? this.keywords,
@@ -89,6 +99,12 @@ class TrainingState {
       recordingStatus: recordingStatus ?? this.recordingStatus,
       recordingPath: recordingPath ?? this.recordingPath,
       lastUploadPath: lastUploadPath ?? this.lastUploadPath,
+      recordingStartedAt: recordingStartedAt == _unset
+          ? this.recordingStartedAt
+          : recordingStartedAt as DateTime?,
+      recordingElapsed: recordingElapsed ?? this.recordingElapsed,
+      microphonePermissionDenied:
+          microphonePermissionDenied ?? this.microphonePermissionDenied,
     );
   }
 }
@@ -101,6 +117,7 @@ class TrainingNotifier extends Notifier<TrainingState> {
   }
 
   Timer? _pollTimer;
+  Timer? _recordingTimer;
   final AudioRecorder _recorder = AudioRecorder();
   TrainingRecordingUpload? _pendingUpload;
 
@@ -108,6 +125,7 @@ class TrainingNotifier extends Notifier<TrainingState> {
   TrainingState build() {
     ref.onDispose(() {
       _pollTimer?.cancel();
+      _recordingTimer?.cancel();
       _recorder.dispose();
     });
     return const TrainingState();
@@ -119,12 +137,7 @@ class TrainingNotifier extends Notifier<TrainingState> {
     }
 
     try {
-      final hasPermission = await _recorder.hasPermission();
-      if (!hasPermission) {
-        state = state.copyWith(
-          recordingStatus: TrainingRecordingStatus.error,
-          errorMessage: 'Microphone permission was denied.',
-        );
+      if (!await _requestMicrophonePermission()) {
         return false;
       }
 
@@ -139,10 +152,15 @@ class TrainingNotifier extends Notifier<TrainingState> {
         ),
         path: path,
       );
+      final startedAt = DateTime.now();
+      _startRecordingTimer(startedAt);
       state = state.copyWith(
         recordingStatus: TrainingRecordingStatus.recording,
         recordingPath: path,
         lastUploadPath: path,
+        recordingStartedAt: startedAt,
+        recordingElapsed: Duration.zero,
+        microphonePermissionDenied: false,
         errorMessage: null,
       );
       return true;
@@ -170,8 +188,11 @@ class TrainingNotifier extends Notifier<TrainingState> {
     state = state.copyWith(
       recordingStatus: TrainingRecordingStatus.stopping,
       errorMessage: null,
+      microphonePermissionDenied: false,
     );
     try {
+      _recordingTimer?.cancel();
+      _recordingTimer = null;
       final path = await _recorder.stop();
       if (path == null || path.isEmpty) {
         state = state.copyWith(
@@ -221,6 +242,7 @@ class TrainingNotifier extends Notifier<TrainingState> {
       errorMessage: null,
       recordingPath: upload.filePath,
       lastUploadPath: upload.filePath,
+      microphonePermissionDenied: false,
     );
     final ok = await uploadRecording(
       filePath: upload.filePath,
@@ -239,6 +261,9 @@ class TrainingNotifier extends Notifier<TrainingState> {
         errorMessage: null,
         recordingPath: upload.filePath,
         lastUploadPath: upload.filePath,
+        recordingStartedAt: null,
+        recordingElapsed: Duration.zero,
+        microphonePermissionDenied: false,
       );
     } else {
       state = state.copyWith(
@@ -247,6 +272,49 @@ class TrainingNotifier extends Notifier<TrainingState> {
       );
     }
     return ok;
+  }
+
+  Future<bool> _requestMicrophonePermission() async {
+    final current = await Permission.microphone.status;
+    final requested = current.isGranted
+        ? current
+        : await Permission.microphone.request();
+    if (!requested.isGranted) {
+      state = state.copyWith(
+        recordingStatus: TrainingRecordingStatus.error,
+        errorMessage: requested.isPermanentlyDenied
+            ? 'Microphone permission is disabled. Enable microphone access in phone Settings to record keyword samples.'
+            : 'Microphone permission is required to record keyword samples.',
+        microphonePermissionDenied: true,
+      );
+      return false;
+    }
+
+    final recorderReady = await _recorder.hasPermission();
+    if (!recorderReady) {
+      state = state.copyWith(
+        recordingStatus: TrainingRecordingStatus.error,
+        errorMessage:
+            'Microphone permission is required. Enable microphone access in phone Settings and try again.',
+        microphonePermissionDenied: true,
+      );
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> openMicrophoneSettings() async {
+    await openAppSettings();
+  }
+
+  void _startRecordingTimer(DateTime startedAt) {
+    _recordingTimer?.cancel();
+    _recordingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!state.isRecording) return;
+      state = state.copyWith(
+        recordingElapsed: DateTime.now().difference(startedAt),
+      );
+    });
   }
 
   /// Load keywords and statistics from the Pi.
@@ -363,5 +431,8 @@ class TrainingNotifier extends Notifier<TrainingState> {
   }
 }
 
-final trainingProvider =
-    NotifierProvider<TrainingNotifier, TrainingState>(TrainingNotifier.new);
+final trainingProvider = NotifierProvider<TrainingNotifier, TrainingState>(
+  TrainingNotifier.new,
+);
+
+const _unset = Object();
