@@ -1991,10 +1991,10 @@ def restart_kws_alert_service() -> dict[str, Any]:
 
 @app.post("/api/training/deploy")
 async def training_deploy(
+    request: Request,
     onnx_file: UploadFile = File(...),
     onnx_data_file: UploadFile = File(...),
     keyword: str = Form(...),
-    request: Request | None = None,
 ):
     """Deploy a trained .onnx + .onnx.data model pair to the live models directory."""
     require_api_token(request)
@@ -2316,7 +2316,7 @@ async def run_delayed_power_command(action: str, command: list[str]) -> None:
 
 
 @app.post("/api/refresh")
-async def api_refresh(request: RefreshRequest, http_request: Request = None):
+async def api_refresh(request: RefreshRequest, http_request: Request):
     require_api_token(http_request)
     if not REFRESH_SCRIPT.is_file():
         raise HTTPException(status_code=500, detail="Refresh script is missing on the Pi.")
@@ -2352,7 +2352,7 @@ async def api_refresh(request: RefreshRequest, http_request: Request = None):
 
 
 @app.post("/api/shutdown")
-async def api_shutdown(request: Request = None):
+async def api_shutdown(request: Request):
     require_api_token(request)
     verify_passwordless_sudo()
     asyncio.create_task(
@@ -2365,7 +2365,7 @@ async def api_shutdown(request: Request = None):
 
 
 @app.post("/api/reboot")
-async def api_reboot(request: Request = None):
+async def api_reboot(request: Request):
     require_api_token(request)
     verify_passwordless_sudo()
     asyncio.create_task(
