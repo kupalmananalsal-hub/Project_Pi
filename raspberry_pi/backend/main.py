@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -21,12 +23,23 @@ import wave
 import numpy as np
 import psutil
 import pyaudio
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 CURRENT_DIR = Path(__file__).resolve().parent
 RASPBERRY_PI_ROOT = CURRENT_DIR.parent
+PROJECT_ROOT = RASPBERRY_PI_ROOT.parent
 for extra_path in (
     RASPBERRY_PI_ROOT,
     RASPBERRY_PI_ROOT / "kws",
@@ -44,6 +57,13 @@ from noise_suppressor import (
     NoiseSuppressor,
 )
 from thermal_confidence import ThermalConfidenceScorer
+from keyword_dataset_common import (
+    KEYWORDS as TRAINING_KEYWORDS,
+    METADATA_COLUMNS as TRAINING_METADATA_COLUMNS,
+    append_metadata as append_training_metadata,
+    ensure_dataset_layout as ensure_training_dataset_layout,
+    slugify_keyword,
+)
 
 try:
     import adafruit_mlx90640
@@ -71,6 +91,20 @@ DEFAULT_AUDIO_SAMPLE_RATE = 16000
 VOICE_SAMPLES_DIR = Path.home() / "voice_samples"
 AUDIO_STATUS_PATH = Path(os.getenv("PROJECT_PI_AUDIO_STATUS_PATH", "/tmp/project_pi_audio_status.json"))
 ALERT_DB_PATH = Path(os.getenv("ALERT_DB_PATH", str(CURRENT_DIR / "alerts.db")))
+DATASET_DIR = PROJECT_ROOT / "dataset"
+KEYWORD_DATASET_DIR = DATASET_DIR / "audio" / "keyword_dataset"
+KEYWORD_METADATA_PATH = KEYWORD_DATASET_DIR / "metadata.csv"
+OPENWAKEWORD_MODEL_DIR = DATASET_DIR / "audio" / "openwakeword_models"
+DATASET_ARCHIVES_DIR = DATASET_DIR / "archives"
+TRAINING_METADATA_LOCK = threading.Lock()
+TRAINING_JOBS: dict[str, dict[str, Any]] = {}
+TRAINING_JOB_TASKS: dict[str, asyncio.Task[Any]] = {}
+TRAINING_JOBS_LOCK = asyncio.Lock()
+TRAINING_HEAVY_JOB_LOCK = asyncio.Lock()
+TRAINING_AGE_GROUPS = {"child", "teen", "adult", "elder"}
+TRAINING_GENDERS = {"male", "female", "other"}
+TRAINING_NOISE_CONDITIONS = {"quiet", "normal", "noisy"}
+SPEAKER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 app = FastAPI(title="Project Pi Thermal Backend", version="1.0.0")
 app.add_middleware(
@@ -888,6 +922,221 @@ def read_shared_audio_status(max_age_seconds: float = 1.5) -> dict[str, Any] | N
     return normalize_audio_payload(payload)
 
 
+def validate_training_metadata(
+    *,
+    keyword: str,
+    speaker_id: str,
+    age_group: str,
+    gender: str,
+    distance_m: float,
+    noise_condition: str,
+) -> dict[str, Any]:
+    keyword = keyword.strip().lower()
+    speaker_id = speaker_id.strip()
+    age_group = age_group.strip().lower()
+    gender = gender.strip().lower()
+    noise_condition = noise_condition.strip().lower()
+    if keyword not in TRAINING_KEYWORDS:
+        raise HTTPException(status_code=400, detail="Invalid training keyword")
+    if not SPEAKER_ID_PATTERN.fullmatch(speaker_id):
+        raise HTTPException(status_code=400, detail="Invalid speaker_id")
+    if age_group not in TRAINING_AGE_GROUPS:
+        raise HTTPException(status_code=400, detail="Invalid age_group")
+    if gender not in TRAINING_GENDERS:
+        raise HTTPException(status_code=400, detail="Invalid gender")
+    if noise_condition not in TRAINING_NOISE_CONDITIONS:
+        raise HTTPException(status_code=400, detail="Invalid noise_condition")
+    distance = float(distance_m)
+    if not math.isfinite(distance) or distance < 0.5 or distance > 5.0:
+        raise HTTPException(status_code=400, detail="distance_m must be between 0.5 and 5.0")
+    return {
+        "keyword": keyword,
+        "speaker_id": speaker_id,
+        "age_group": age_group,
+        "gender": gender,
+        "distance_m": distance,
+        "noise_condition": noise_condition,
+    }
+
+
+def inspect_training_wav(path: Path) -> dict[str, Any]:
+    try:
+        with wave.open(str(path), "rb") as wav_file:
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            sample_rate = wav_file.getframerate()
+            frame_count = wav_file.getnframes()
+            compression = wav_file.getcomptype()
+    except (wave.Error, EOFError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid WAV file: {exc}") from exc
+    duration = frame_count / float(sample_rate or 1)
+    if compression != "NONE":
+        raise HTTPException(status_code=400, detail="WAV must use PCM encoding")
+    if channels != 1:
+        raise HTTPException(status_code=400, detail="WAV must be mono")
+    if sample_width != 2:
+        raise HTTPException(status_code=400, detail="WAV must be 16-bit PCM")
+    if sample_rate != 16000:
+        raise HTTPException(status_code=400, detail="WAV sample rate must be 16000 Hz")
+    if duration < 1.0 or duration > 5.0:
+        raise HTTPException(status_code=400, detail="WAV duration must be 1.0 through 5.0 seconds")
+    return {
+        "sample_rate": sample_rate,
+        "channels": channels,
+        "duration_s": round(duration, 2),
+    }
+
+
+def distance_slug(distance_m: float) -> str:
+    text = f"{distance_m:.1f}".rstrip("0").rstrip(".")
+    return text.replace(".", "p")
+
+
+def safe_dataset_path(relative_path: str) -> Path:
+    candidate = (KEYWORD_DATASET_DIR / relative_path).resolve()
+    root = KEYWORD_DATASET_DIR.resolve()
+    if root != candidate and root not in candidate.parents:
+        raise HTTPException(status_code=400, detail="Unsafe dataset path")
+    return candidate
+
+
+def read_training_metadata_rows() -> list[dict[str, str]]:
+    if not KEYWORD_METADATA_PATH.exists():
+        return []
+    with KEYWORD_METADATA_PATH.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def rewrite_training_metadata_rows(rows: list[dict[str, str]]) -> None:
+    KEYWORD_METADATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = KEYWORD_METADATA_PATH.with_name(
+        f".{KEYWORD_METADATA_PATH.name}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        with temp_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=TRAINING_METADATA_COLUMNS)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(
+                    {column: row.get(column, "") for column in TRAINING_METADATA_COLUMNS}
+                )
+        os.replace(temp_path, KEYWORD_METADATA_PATH)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def training_source_path_from_notes(notes: str) -> str | None:
+    for token in notes.split(";"):
+        key, separator, value = token.strip().partition("=")
+        if separator and key == "source" and value:
+            return value
+    return None
+
+
+def training_record_id(row: dict[str, str]) -> str:
+    stem = Path(row.get("path", "")).stem
+    return stem.rsplit("_", 1)[-1] if "_" in stem else stem
+
+
+def training_record_from_row(row: dict[str, str]) -> dict[str, Any]:
+    payload = {column: row.get(column, "") for column in TRAINING_METADATA_COLUMNS}
+    payload["id"] = training_record_id(row)
+    payload["distance_m"] = _as_float(payload.get("distance_m"), 0.0)
+    payload["duration_s"] = _as_float(payload.get("duration_s"), 0.0)
+    payload["sample_rate"] = int(_as_float(payload.get("sample_rate"), 0.0))
+    return payload
+
+
+def calculate_training_statistics() -> dict[str, Any]:
+    rows = read_training_metadata_rows()
+    by_keyword: dict[str, int] = {}
+    by_speaker: dict[str, int] = {}
+    by_age_group: dict[str, int] = {}
+    by_noise_condition: dict[str, int] = {}
+    unique_real_speakers = set()
+    original = 0
+    augmented = 0
+    for row in rows:
+        source = row.get("source", "")
+        keyword_slug = slugify_keyword(row.get("keyword", "unknown"))
+        speaker = row.get("speaker_id", "unknown")
+        by_keyword[keyword_slug] = by_keyword.get(keyword_slug, 0) + 1
+        by_speaker[speaker] = by_speaker.get(speaker, 0) + 1
+        age_group = row.get("age_group", "unknown")
+        noise = row.get("noise_condition", "unknown")
+        by_age_group[age_group] = by_age_group.get(age_group, 0) + 1
+        by_noise_condition[noise] = by_noise_condition.get(noise, 0) + 1
+        if source == "augmentation":
+            augmented += 1
+        else:
+            original += 1
+        if source == "real" and speaker:
+            unique_real_speakers.add(speaker)
+    return {
+        "total_recordings": len(rows),
+        "original_recordings": original,
+        "augmented_recordings": augmented,
+        "unique_real_speakers": len(unique_real_speakers),
+        "by_keyword": dict(sorted(by_keyword.items())),
+        "by_speaker": dict(sorted(by_speaker.items())),
+        "by_age_group": dict(sorted(by_age_group.items())),
+        "by_noise_condition": dict(sorted(by_noise_condition.items())),
+    }
+
+
+def training_job_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+async def run_training_job(
+    job_id: str,
+    operation: Callable[[], Any],
+) -> None:
+    async with TRAINING_HEAVY_JOB_LOCK:
+        async with TRAINING_JOBS_LOCK:
+            job = TRAINING_JOBS[job_id]
+            job["status"] = "running"
+            job["started_at"] = training_job_timestamp()
+        try:
+            result = await asyncio.to_thread(operation)
+        except Exception as exc:
+            async with TRAINING_JOBS_LOCK:
+                job = TRAINING_JOBS[job_id]
+                job["status"] = "failed"
+                job["error"] = str(exc) or exc.__class__.__name__
+                job["finished_at"] = training_job_timestamp()
+            return
+        async with TRAINING_JOBS_LOCK:
+            job = TRAINING_JOBS[job_id]
+            job["status"] = "succeeded"
+            job["progress"] = 100
+            job["result"] = result
+            job["finished_at"] = training_job_timestamp()
+
+
+async def queue_training_job(
+    job_type: str,
+    operation: Callable[[], Any],
+) -> dict[str, str]:
+    job_id = f"job-{uuid.uuid4().hex[:12]}"
+    async with TRAINING_JOBS_LOCK:
+        TRAINING_JOBS[job_id] = {
+            "job_id": job_id,
+            "job_type": job_type,
+            "status": "queued",
+            "progress": 0,
+            "result": None,
+            "error": None,
+            "created_at": training_job_timestamp(),
+            "started_at": None,
+            "finished_at": None,
+        }
+    TRAINING_JOB_TASKS[job_id] = asyncio.create_task(
+        run_training_job(job_id, operation)
+    )
+    return {"job_id": job_id, "status": "queued"}
+
+
 def voice_sample_metadata_files(keyword: str | None = None):
     search_dir = VOICE_SAMPLES_DIR / sanitize_token(keyword) if keyword else VOICE_SAMPLES_DIR
     if not search_dir.exists():
@@ -1354,6 +1603,367 @@ async def api_alert_history(limit: int = 100):
 async def api_clear_alert_history():
     deleted = await asyncio.to_thread(alert_store.clear)
     return {"ok": True, "deleted_count": deleted}
+
+
+@app.post("/api/training/record", status_code=status.HTTP_201_CREATED)
+async def upload_training_record(
+    file: UploadFile = File(...),
+    keyword: str = Form(...),
+    speaker_id: str = Form(...),
+    age_group: str = Form(...),
+    gender: str = Form(...),
+    distance_m: float = Form(...),
+    noise_condition: str = Form(...),
+):
+    metadata = validate_training_metadata(
+        keyword=keyword,
+        speaker_id=speaker_id,
+        age_group=age_group,
+        gender=gender,
+        distance_m=distance_m,
+        noise_condition=noise_condition,
+    )
+    upload_bytes = await file.read()
+    if not upload_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    ensure_training_dataset_layout(KEYWORD_DATASET_DIR)
+    temp_dir = KEYWORD_DATASET_DIR / ".tmp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = temp_dir / f"upload_{uuid.uuid4().hex}.wav"
+    try:
+        temp_path.write_bytes(upload_bytes)
+        wav_info = inspect_training_wav(temp_path)
+        recording_id = uuid.uuid4().hex[:8]
+        keyword_slug = slugify_keyword(metadata["keyword"])
+        distance_text = distance_slug(metadata["distance_m"])
+        filename = (
+            f"{keyword_slug}_{metadata['speaker_id']}_{metadata['age_group']}_"
+            f"{metadata['gender']}_{distance_text}m_"
+            f"{metadata['noise_condition']}_{recording_id}.wav"
+        )
+        relative_path = f"positive/{keyword_slug}/{filename}"
+        final_path = safe_dataset_path(relative_path)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(temp_path, final_path)
+        created_at = datetime.now(timezone.utc).isoformat()
+        with TRAINING_METADATA_LOCK:
+            append_training_metadata(
+                KEYWORD_METADATA_PATH,
+                {
+                    "path": relative_path,
+                    "keyword": metadata["keyword"],
+                    "label": metadata["keyword"],
+                    "speaker_id": metadata["speaker_id"],
+                    "age_group": metadata["age_group"],
+                    "gender": metadata["gender"],
+                    "distance_m": str(metadata["distance_m"]),
+                    "noise_condition": metadata["noise_condition"],
+                    "source": "real",
+                    "sample_rate": str(wav_info["sample_rate"]),
+                    "duration_s": f"{wav_info['duration_s']:.2f}",
+                    "notes": "",
+                },
+            )
+        return {
+            "id": recording_id,
+            "path": relative_path,
+            "keyword": metadata["keyword"],
+            "speaker_id": metadata["speaker_id"],
+            "sample_rate": wav_info["sample_rate"],
+            "channels": wav_info["channels"],
+            "duration_s": wav_info["duration_s"],
+            "created_at": created_at,
+        }
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+@app.get("/api/training/statistics")
+async def training_statistics():
+    with TRAINING_METADATA_LOCK:
+        return calculate_training_statistics()
+
+
+@app.get("/api/training/recordings")
+async def training_recordings():
+    with TRAINING_METADATA_LOCK:
+        rows = read_training_metadata_rows()
+        recordings = []
+        for row in rows:
+            relative_path = row.get("path", "")
+            if relative_path:
+                safe_dataset_path(relative_path)
+            recordings.append(training_record_from_row(row))
+        return {"total": len(recordings), "recordings": recordings}
+
+
+@app.delete("/api/training/recordings/{recording_id}")
+async def delete_training_recording(recording_id: str):
+    if not re.fullmatch(r"[A-Fa-f0-9]{8,32}", recording_id):
+        raise HTTPException(status_code=404, detail="Training recording not found")
+
+    with TRAINING_METADATA_LOCK:
+        rows = read_training_metadata_rows()
+        original = next(
+            (
+                row
+                for row in rows
+                if row.get("source") != "augmentation"
+                and training_record_id(row) == recording_id
+            ),
+            None,
+        )
+        if original is None:
+            raise HTTPException(status_code=404, detail="Training recording not found")
+
+        original_path = original.get("path", "")
+        augmented = [
+            row
+            for row in rows
+            if row.get("source") == "augmentation"
+            and training_source_path_from_notes(row.get("notes", "")) == original_path
+        ]
+        removed_paths = {
+            row.get("path", "")
+            for row in [original, *augmented]
+            if row.get("path", "")
+        }
+        remaining = [row for row in rows if row.get("path", "") not in removed_paths]
+        rewrite_training_metadata_rows(remaining)
+
+        for relative_path in removed_paths:
+            safe_dataset_path(relative_path).unlink(missing_ok=True)
+
+    return {
+        "deleted": True,
+        "recording_id": recording_id,
+        "deleted_originals": 1,
+        "deleted_augmented": len(augmented),
+    }
+
+
+@app.get("/api/training/jobs/{job_id}")
+async def training_job_status(job_id: str):
+    async with TRAINING_JOBS_LOCK:
+        job = TRAINING_JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Training job not found")
+        return dict(job)
+
+
+
+
+# ---------------------------------------------------------------------------
+#  Training Pipeline Endpoints (Phase 2: validate, augment, export, train,
+#  deploy, evaluate, keywords)
+# ---------------------------------------------------------------------------
+
+TRAINING_KEYWORD_LANG = {
+    "help": "en", "help me": "en", "save me": "en", "please help": "en",
+    "emergency": "en", "rescue": "en", "over here": "en", "ouch": "en",
+    "tulong": "fil", "saklolo": "fil", "tulungan niyo ako": "fil",
+    "tulungan mo ako": "fil", "kailangan ko ng tulong": "fil",
+    "ang sakit": "fil", "aray": "fil", "sunog": "fil", "agai": "fil",
+}
+
+
+@app.get("/api/training/keywords")
+async def training_keywords():
+    """Return the canonical 17-keyword inventory with language tags."""
+    return {
+        "keywords": [
+            {
+                "keyword": kw,
+                "slug": slugify_keyword(kw),
+                "language": TRAINING_KEYWORD_LANG.get(kw, "unknown"),
+            }
+            for kw in TRAINING_KEYWORDS
+        ],
+        "total": len(TRAINING_KEYWORDS),
+    }
+
+
+@app.post("/api/training/validate", status_code=status.HTTP_202_ACCEPTED)
+async def training_validate():
+    """Launch an async dataset validation job."""
+    def _run_validation():
+        from validate_keyword_dataset import validate_dataset
+        return validate_dataset(KEYWORD_DATASET_DIR)
+
+    return await queue_training_job("validation", _run_validation)
+
+
+@app.post("/api/training/augment", status_code=status.HTTP_202_ACCEPTED)
+async def training_augment(copies_per_file: int = 2, seed: int = 1337):
+    """Launch an async augmentation job."""
+    if not 1 <= copies_per_file <= 5:
+        raise HTTPException(
+            status_code=400,
+            detail="copies_per_file must be between 1 and 5",
+        )
+
+    def _run_augment():
+        from augment_keyword_dataset import augment_dataset
+        output_dir = KEYWORD_DATASET_DIR / "augmented"
+        return augment_dataset(
+            KEYWORD_DATASET_DIR,
+            output_dir,
+            copies_per_file=copies_per_file,
+            seed=seed,
+        )
+
+    return await queue_training_job("augmentation", _run_augment)
+
+
+@app.post("/api/training/export", status_code=status.HTTP_202_ACCEPTED)
+async def training_export():
+    """Package the dataset as a dated ZIP archive."""
+    import shutil
+    import zipfile
+
+    def _run_export():
+        with TRAINING_METADATA_LOCK:
+            rows = read_training_metadata_rows()
+        real_speakers = {
+            row.get("speaker_id", "").strip()
+            for row in rows
+            if row.get("source", "").strip().lower() == "real"
+            and row.get("speaker_id", "").strip()
+        }
+        if len(real_speakers) < 3:
+            raise ValueError(
+                f"Export requires at least 3 real speakers, found {len(real_speakers)}: "
+                + ", ".join(sorted(real_speakers))
+            )
+
+        from train_openwakeword_models import build_split_manifest, write_manifest
+        manifest = build_split_manifest(KEYWORD_DATASET_DIR)
+        manifest_path = KEYWORD_DATASET_DIR / "splits" / "openwakeword_split.json"
+        write_manifest(manifest, manifest_path)
+
+        DATASET_ARCHIVES_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        archive_path = DATASET_ARCHIVES_DIR / f"keyword_dataset_{timestamp}.zip"
+
+        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            if KEYWORD_METADATA_PATH.exists():
+                zf.write(KEYWORD_METADATA_PATH, "metadata.csv")
+            zf.write(manifest_path, "splits/openwakeword_split.json")
+            for wav in KEYWORD_DATASET_DIR.rglob("*.wav"):
+                rel = wav.relative_to(KEYWORD_DATASET_DIR)
+                zf.write(wav, str(rel))
+
+        return {
+            "archive": str(archive_path.relative_to(PROJECT_ROOT)),
+            "size_bytes": archive_path.stat().st_size,
+            "recordings": len(rows),
+            "speakers": len(real_speakers),
+        }
+
+    return await queue_training_job("export", _run_export)
+
+
+@app.post("/api/training/train", status_code=status.HTTP_202_ACCEPTED)
+async def training_train(seed: int = 1337):
+    """Generate a training manifest and launch the training pipeline."""
+    def _run_train():
+        from train_openwakeword_models import build_split_manifest, write_manifest
+
+        manifest = build_split_manifest(KEYWORD_DATASET_DIR, seed=seed)
+        manifest_path = KEYWORD_DATASET_DIR / "splits" / "openwakeword_split.json"
+        write_manifest(manifest, manifest_path)
+
+        keyword_count = len(manifest.get("keywords", {}))
+        speaker_info = manifest.get("speakers", {})
+        return {
+            "manifest_path": str(manifest_path.relative_to(PROJECT_ROOT)),
+            "keywords_with_samples": keyword_count,
+            "speakers": {
+                split: len(ids) for split, ids in speaker_info.items()
+            },
+            "note": "Manifest created. Run openWakeWord training in Colab with this manifest.",
+        }
+
+    return await queue_training_job("training", _run_train)
+
+
+@app.post("/api/training/deploy")
+async def training_deploy(
+    onnx_file: UploadFile = File(...),
+    onnx_data_file: UploadFile = File(...),
+    keyword: str = Form(...),
+):
+    """Deploy a trained .onnx + .onnx.data model pair to the live models directory."""
+    keyword_slug = slugify_keyword(keyword.strip().lower())
+    if keyword.strip().lower() not in TRAINING_KEYWORDS:
+        raise HTTPException(status_code=400, detail="Invalid keyword for deployment")
+
+    onnx_bytes = await onnx_file.read()
+    data_bytes = await onnx_data_file.read()
+
+    if not onnx_bytes:
+        raise HTTPException(status_code=400, detail="ONNX model file is empty")
+    if not data_bytes:
+        raise HTTPException(status_code=400, detail="ONNX data file is empty")
+
+    OPENWAKEWORD_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    target_onnx = OPENWAKEWORD_MODEL_DIR / f"{keyword_slug}.onnx"
+    target_data = OPENWAKEWORD_MODEL_DIR / f"{keyword_slug}.onnx.data"
+
+    # Create timestamped backups of existing models
+    backup_dir = OPENWAKEWORD_MODEL_DIR / "backup"
+    if target_onnx.exists() or target_data.exists():
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        if target_onnx.exists():
+            backup_onnx = backup_dir / f"{keyword_slug}_{timestamp}.onnx"
+            backup_onnx.write_bytes(target_onnx.read_bytes())
+        if target_data.exists():
+            backup_data = backup_dir / f"{keyword_slug}_{timestamp}.onnx.data"
+            backup_data.write_bytes(target_data.read_bytes())
+
+    # Atomic write via temp files
+    temp_onnx = OPENWAKEWORD_MODEL_DIR / f".{keyword_slug}.onnx.tmp"
+    temp_data = OPENWAKEWORD_MODEL_DIR / f".{keyword_slug}.onnx.data.tmp"
+    try:
+        temp_onnx.write_bytes(onnx_bytes)
+        temp_data.write_bytes(data_bytes)
+        os.replace(temp_onnx, target_onnx)
+        os.replace(temp_data, target_data)
+    except Exception:
+        temp_onnx.unlink(missing_ok=True)
+        temp_data.unlink(missing_ok=True)
+        raise
+
+    return {
+        "deployed": True,
+        "keyword": keyword.strip().lower(),
+        "slug": keyword_slug,
+        "onnx_size": len(onnx_bytes),
+        "data_size": len(data_bytes),
+        "backed_up": backup_dir.exists(),
+    }
+
+
+@app.get("/api/training/evaluate")
+async def training_evaluate(threshold: float = 0.5):
+    """Return evaluation metrics from prediction files, if available."""
+    predictions_dir = KEYWORD_DATASET_DIR / "predictions"
+    if not predictions_dir.exists() or not any(predictions_dir.iterdir()):
+        raise HTTPException(
+            status_code=409,
+            detail="No prediction files found. Run model evaluation first.",
+        )
+
+    from evaluate_keyword_models import evaluate_prediction_dir
+    results = evaluate_prediction_dir(
+        predictions_dir,
+        threshold=threshold,
+        negative_hours=None,
+    )
+    return results
 
 
 @app.post("/api/voice/sample", response_model=VoiceSampleResponse)

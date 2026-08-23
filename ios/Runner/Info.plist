@@ -28,6 +28,8 @@
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Connect to the Raspberry Pi thermal and audio monitor on your local network.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Record keyword samples for the Project Pi research dataset.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_http._tcp</string>

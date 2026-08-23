@@ -1,0 +1,367 @@
+import 'dart:async';
+
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
+
+import '../models/training_job.dart';
+import '../models/training_keyword.dart';
+import '../models/training_statistics.dart';
+import '../services/pi_api_service.dart';
+import 'connection_provider.dart';
+
+enum TrainingRecordingStatus {
+  idle,
+  recording,
+  stopping,
+  uploading,
+  success,
+  error,
+}
+
+class TrainingRecordingUpload {
+  const TrainingRecordingUpload({
+    required this.filePath,
+    required this.keyword,
+    required this.speakerId,
+    required this.ageGroup,
+    required this.gender,
+    required this.distanceM,
+    required this.noiseCondition,
+  });
+
+  final String filePath;
+  final String keyword;
+  final String speakerId;
+  final String ageGroup;
+  final String gender;
+  final double distanceM;
+  final String noiseCondition;
+}
+
+/// State for the training tab.
+class TrainingState {
+  const TrainingState({
+    this.keywords = const [],
+    this.statistics,
+    this.recordings = const [],
+    this.activeJob,
+    this.isLoading = false,
+    this.errorMessage,
+    this.recordingStatus = TrainingRecordingStatus.idle,
+    this.recordingPath,
+    this.lastUploadPath,
+  });
+
+  final List<TrainingKeyword> keywords;
+  final TrainingStatistics? statistics;
+  final List<Map<String, dynamic>> recordings;
+  final TrainingJob? activeJob;
+  final bool isLoading;
+  final String? errorMessage;
+  final TrainingRecordingStatus recordingStatus;
+  final String? recordingPath;
+  final String? lastUploadPath;
+
+  bool get isRecording => recordingStatus == TrainingRecordingStatus.recording;
+  bool get isRecordingBusy =>
+      recordingStatus == TrainingRecordingStatus.stopping ||
+      recordingStatus == TrainingRecordingStatus.uploading;
+
+  TrainingState copyWith({
+    List<TrainingKeyword>? keywords,
+    TrainingStatistics? statistics,
+    List<Map<String, dynamic>>? recordings,
+    TrainingJob? activeJob,
+    bool? isLoading,
+    String? errorMessage,
+    TrainingRecordingStatus? recordingStatus,
+    String? recordingPath,
+    String? lastUploadPath,
+  }) {
+    return TrainingState(
+      keywords: keywords ?? this.keywords,
+      statistics: statistics ?? this.statistics,
+      recordings: recordings ?? this.recordings,
+      activeJob: activeJob ?? this.activeJob,
+      isLoading: isLoading ?? this.isLoading,
+      errorMessage: errorMessage,
+      recordingStatus: recordingStatus ?? this.recordingStatus,
+      recordingPath: recordingPath ?? this.recordingPath,
+      lastUploadPath: lastUploadPath ?? this.lastUploadPath,
+    );
+  }
+}
+
+/// Notifier for the training workflow.
+class TrainingNotifier extends Notifier<TrainingState> {
+  PiApiService get _api {
+    final conn = ref.read(connectionProvider);
+    return PiApiService(host: conn.host, port: conn.port);
+  }
+
+  Timer? _pollTimer;
+  final AudioRecorder _recorder = AudioRecorder();
+  TrainingRecordingUpload? _pendingUpload;
+
+  @override
+  TrainingState build() {
+    ref.onDispose(() {
+      _pollTimer?.cancel();
+      _recorder.dispose();
+    });
+    return const TrainingState();
+  }
+
+  Future<bool> startRecording() async {
+    if (state.isRecording || state.isRecordingBusy || state.isLoading) {
+      return false;
+    }
+
+    try {
+      final hasPermission = await _recorder.hasPermission();
+      if (!hasPermission) {
+        state = state.copyWith(
+          recordingStatus: TrainingRecordingStatus.error,
+          errorMessage: 'Microphone permission was denied.',
+        );
+        return false;
+      }
+
+      final directory = await getTemporaryDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final path = '${directory.path}/project_pi_keyword_$timestamp.wav';
+      await _recorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.wav,
+          sampleRate: 16000,
+          numChannels: 1,
+        ),
+        path: path,
+      );
+      state = state.copyWith(
+        recordingStatus: TrainingRecordingStatus.recording,
+        recordingPath: path,
+        lastUploadPath: path,
+        errorMessage: null,
+      );
+      return true;
+    } catch (e) {
+      state = state.copyWith(
+        recordingStatus: TrainingRecordingStatus.error,
+        errorMessage: e.toString(),
+      );
+      return false;
+    }
+  }
+
+  Future<bool> stopRecordingAndUpload({
+    required String keyword,
+    required String speakerId,
+    required String ageGroup,
+    required String gender,
+    required double distanceM,
+    required String noiseCondition,
+  }) async {
+    if (!state.isRecording) {
+      return false;
+    }
+
+    state = state.copyWith(
+      recordingStatus: TrainingRecordingStatus.stopping,
+      errorMessage: null,
+    );
+    try {
+      final path = await _recorder.stop();
+      if (path == null || path.isEmpty) {
+        state = state.copyWith(
+          recordingStatus: TrainingRecordingStatus.error,
+          errorMessage: 'Recording failed: no WAV file was produced.',
+        );
+        return false;
+      }
+
+      _pendingUpload = TrainingRecordingUpload(
+        filePath: path,
+        keyword: keyword,
+        speakerId: speakerId,
+        ageGroup: ageGroup,
+        gender: gender,
+        distanceM: distanceM,
+        noiseCondition: noiseCondition,
+      );
+      return _uploadPendingRecording();
+    } catch (e) {
+      state = state.copyWith(
+        recordingStatus: TrainingRecordingStatus.error,
+        errorMessage: e.toString(),
+      );
+      return false;
+    }
+  }
+
+  Future<bool> retryUpload() async {
+    if (_pendingUpload == null) {
+      state = state.copyWith(
+        recordingStatus: TrainingRecordingStatus.error,
+        errorMessage: 'No recorded sample is available to retry.',
+      );
+      return false;
+    }
+    return _uploadPendingRecording();
+  }
+
+  Future<bool> _uploadPendingRecording() async {
+    final upload = _pendingUpload;
+    if (upload == null) return false;
+
+    state = state.copyWith(
+      recordingStatus: TrainingRecordingStatus.uploading,
+      isLoading: true,
+      errorMessage: null,
+      recordingPath: upload.filePath,
+      lastUploadPath: upload.filePath,
+    );
+    final ok = await uploadRecording(
+      filePath: upload.filePath,
+      keyword: upload.keyword,
+      speakerId: upload.speakerId,
+      ageGroup: upload.ageGroup,
+      gender: upload.gender,
+      distanceM: upload.distanceM,
+      noiseCondition: upload.noiseCondition,
+    );
+    if (ok) {
+      _pendingUpload = null;
+      state = state.copyWith(
+        recordingStatus: TrainingRecordingStatus.success,
+        isLoading: false,
+        errorMessage: null,
+        recordingPath: upload.filePath,
+        lastUploadPath: upload.filePath,
+      );
+    } else {
+      state = state.copyWith(
+        recordingStatus: TrainingRecordingStatus.error,
+        isLoading: false,
+      );
+    }
+    return ok;
+  }
+
+  /// Load keywords and statistics from the Pi.
+  Future<void> refresh() async {
+    state = state.copyWith(isLoading: true, errorMessage: null);
+    try {
+      final api = _api;
+      final kwResponse = await api.fetchTrainingKeywords();
+      final keywords = kwResponse
+          .map((json) => TrainingKeyword.fromJson(json))
+          .toList(growable: false);
+      final statsJson = await api.fetchTrainingStatistics();
+      final stats = TrainingStatistics.fromJson(statsJson);
+      final recordings = await api.fetchTrainingRecordings();
+      state = state.copyWith(
+        keywords: keywords,
+        statistics: stats,
+        recordings: recordings,
+        isLoading: false,
+      );
+    } catch (e) {
+      state = state.copyWith(isLoading: false, errorMessage: e.toString());
+    }
+  }
+
+  /// Upload a recorded WAV file.
+  Future<bool> uploadRecording({
+    required String filePath,
+    required String keyword,
+    required String speakerId,
+    required String ageGroup,
+    required String gender,
+    required double distanceM,
+    required String noiseCondition,
+  }) async {
+    state = state.copyWith(isLoading: true, errorMessage: null);
+    try {
+      await _api.uploadTrainingRecording(
+        filePath: filePath,
+        keyword: keyword,
+        speakerId: speakerId,
+        ageGroup: ageGroup,
+        gender: gender,
+        distanceM: distanceM,
+        noiseCondition: noiseCondition,
+      );
+      await refresh();
+      return true;
+    } catch (e) {
+      state = state.copyWith(isLoading: false, errorMessage: e.toString());
+      return false;
+    }
+  }
+
+  /// Start a pipeline job and begin polling for completion.
+  Future<void> startJob(String jobType) async {
+    state = state.copyWith(isLoading: true, errorMessage: null);
+    try {
+      final Map<String, dynamic> result;
+      switch (jobType) {
+        case 'validation':
+          result = await _api.startTrainingValidation();
+        case 'augmentation':
+          result = await _api.startTrainingAugmentation();
+        case 'export':
+          result = await _api.startTrainingExport();
+        case 'training':
+          result = await _api.startTrainingTrain();
+        default:
+          throw ArgumentError('Unknown job type: $jobType');
+      }
+      final jobId = result['job_id'] as String?;
+      if (jobId != null) {
+        final job = TrainingJob.fromJson(result);
+        state = state.copyWith(activeJob: job, isLoading: false);
+        _startPolling(jobId);
+      }
+    } catch (e) {
+      state = state.copyWith(isLoading: false, errorMessage: e.toString());
+    }
+  }
+
+  void _startPolling(String jobId) {
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      try {
+        final jobJson = await _api.fetchTrainingJob(jobId);
+        final job = TrainingJob.fromJson(jobJson);
+        state = state.copyWith(activeJob: job);
+        if (!job.isRunning) {
+          _pollTimer?.cancel();
+          _pollTimer = null;
+          await refresh();
+        }
+      } catch (_) {
+        _pollTimer?.cancel();
+        _pollTimer = null;
+      }
+    });
+  }
+
+  /// Delete a recording by ID.
+  Future<void> deleteRecording(String recordingId) async {
+    try {
+      await _api.deleteTrainingRecording(recordingId);
+      await refresh();
+    } catch (e) {
+      state = state.copyWith(errorMessage: e.toString());
+    }
+  }
+
+  void clearError() {
+    state = state.copyWith(errorMessage: null);
+  }
+}
+
+final trainingProvider =
+    NotifierProvider<TrainingNotifier, TrainingState>(TrainingNotifier.new);

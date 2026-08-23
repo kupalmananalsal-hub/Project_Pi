@@ -310,6 +310,9 @@ void main() {
     expect(connectCalls.length, 2);
     expect(container.read(connectionProvider).userRequestedDisconnect, isFalse);
 
+    container.read(connectionProvider.notifier).disconnect();
+    await tester.pump(const Duration(seconds: 4));
+
     container.dispose();
   });
 

@@ -217,9 +217,16 @@ def install_backend_stubs():
     }
     stubs["fastapi"].FastAPI = FakeFastAPI
     stubs["fastapi"].HTTPException = FakeHTTPException
+    stubs["fastapi"].File = field
+    stubs["fastapi"].Form = field
     stubs["fastapi"].Request = type("Request", (), {})
+    stubs["fastapi"].UploadFile = type("UploadFile", (), {})
     stubs["fastapi"].WebSocket = type("WebSocket", (), {})
     stubs["fastapi"].WebSocketDisconnect = type("WebSocketDisconnect", (Exception,), {})
+    stubs["fastapi"].status = types.SimpleNamespace(
+        HTTP_201_CREATED=201,
+        HTTP_202_ACCEPTED=202,
+    )
     stubs["fastapi.middleware.cors"].CORSMiddleware = type("CORSMiddleware", (), {})
     stubs["pydantic"].BaseModel = FakeBaseModel
     stubs["pydantic"].Field = field

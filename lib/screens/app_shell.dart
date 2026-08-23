@@ -8,6 +8,7 @@ import 'controls_screen.dart';
 import 'history_screen.dart';
 import 'monitor_screen.dart';
 import 'settings_screen.dart';
+import 'training_screen.dart';
 
 class AppShell extends ConsumerStatefulWidget {
   const AppShell({super.key});
@@ -19,7 +20,12 @@ class AppShell extends ConsumerStatefulWidget {
 class _AppShellState extends ConsumerState<AppShell> {
   int _selectedIndex = 0;
 
-  static const _screens = [MonitorScreen(), HistoryScreen(), ControlsScreen()];
+  static const _screens = [
+    MonitorScreen(),
+    HistoryScreen(),
+    ControlsScreen(),
+    TrainingScreen(),
+  ];
 
   @override
   Widget build(BuildContext context) {
@@ -57,7 +63,7 @@ class _AppShellState extends ConsumerState<AppShell> {
               ),
             ],
           ),
-          body: _screens[_selectedIndex],
+          body: IndexedStack(index: _selectedIndex, children: _screens),
           bottomNavigationBar: NavigationBar(
             selectedIndex: _selectedIndex,
             onDestinationSelected: (index) {
@@ -75,6 +81,10 @@ class _AppShellState extends ConsumerState<AppShell> {
               NavigationDestination(
                 icon: Icon(Icons.tune_rounded),
                 label: 'Controls',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.model_training_rounded),
+                label: 'Training',
               ),
             ],
           ),
