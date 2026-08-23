@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -9,6 +11,7 @@ import '../models/training_job.dart';
 import '../models/training_keyword.dart';
 import '../models/training_statistics.dart';
 import '../services/pi_api_service.dart';
+import '../services/wav_converter.dart';
 import 'connection_provider.dart';
 
 enum TrainingRecordingStatus {
@@ -40,6 +43,38 @@ class TrainingRecordingUpload {
   final String noiseCondition;
 }
 
+class TrainingWavInfo {
+  const TrainingWavInfo({
+    required this.sampleRate,
+    required this.channels,
+    required this.bitsPerSample,
+    required this.audioFormat,
+    required this.duration,
+    required this.fileSizeBytes,
+  });
+
+  final int sampleRate;
+  final int channels;
+  final int bitsPerSample;
+  final int audioFormat;
+  final Duration duration;
+  final int fileSizeBytes;
+
+  bool get matchesBackendFormat =>
+      sampleRate == 16000 &&
+      channels == 1 &&
+      bitsPerSample == 16 &&
+      audioFormat == 1 &&
+      duration >= const Duration(seconds: 1) &&
+      duration <= const Duration(seconds: 5);
+
+  String get summary {
+    final seconds = (duration.inMilliseconds / 1000).toStringAsFixed(2);
+    final format = audioFormat == 1 ? 'PCM' : 'format $audioFormat';
+    return '$sampleRate Hz, $channels channel(s), $bitsPerSample-bit $format, ${seconds}s, $fileSizeBytes bytes';
+  }
+}
+
 /// State for the training tab.
 class TrainingState {
   const TrainingState({
@@ -55,6 +90,7 @@ class TrainingState {
     this.recordingStartedAt,
     this.recordingElapsed = Duration.zero,
     this.microphonePermissionDenied = false,
+    this.lastWavInfo,
   });
 
   final List<TrainingKeyword> keywords;
@@ -69,6 +105,7 @@ class TrainingState {
   final DateTime? recordingStartedAt;
   final Duration recordingElapsed;
   final bool microphonePermissionDenied;
+  final TrainingWavInfo? lastWavInfo;
 
   bool get isRecording => recordingStatus == TrainingRecordingStatus.recording;
   bool get isRecordingBusy =>
@@ -88,6 +125,7 @@ class TrainingState {
     Object? recordingStartedAt = _unset,
     Duration? recordingElapsed,
     bool? microphonePermissionDenied,
+    Object? lastWavInfo = _unset,
   }) {
     return TrainingState(
       keywords: keywords ?? this.keywords,
@@ -105,6 +143,9 @@ class TrainingState {
       recordingElapsed: recordingElapsed ?? this.recordingElapsed,
       microphonePermissionDenied:
           microphonePermissionDenied ?? this.microphonePermissionDenied,
+      lastWavInfo: lastWavInfo == _unset
+          ? this.lastWavInfo
+          : lastWavInfo as TrainingWavInfo?,
     );
   }
 }
@@ -202,8 +243,52 @@ class TrainingNotifier extends Notifier<TrainingState> {
         return false;
       }
 
+      final wavInfo = await _inspectRecordedWav(path);
+      if (wavInfo == null) {
+        state = state.copyWith(
+          recordingStatus: TrainingRecordingStatus.error,
+          errorMessage:
+              'Recording failed: saved file is not a readable WAV. Path: $path',
+          recordingPath: path,
+          lastUploadPath: path,
+          lastWavInfo: null,
+        );
+        return false;
+      }
+      state = state.copyWith(lastWavInfo: wavInfo);
+
+      // ── Auto-convert if the recorded WAV doesn't match backend format ──
+      String uploadPath = path;
+      if (!wavInfo.matchesBackendFormat) {
+        debugPrint(
+          'Training recording WAV format mismatch – converting: '
+          '${wavInfo.summary}',
+        );
+        try {
+          final result = await WavConverter.convert(path);
+          uploadPath = result.outputPath;
+          if (result.converted) {
+            debugPrint('WAV conversion complete: ${result.summary}');
+            // Re-inspect after conversion to update the displayed info.
+            final convertedInfo = await _inspectRecordedWav(uploadPath);
+            if (convertedInfo != null) {
+              state = state.copyWith(lastWavInfo: convertedInfo);
+            }
+          }
+        } catch (e) {
+          debugPrint('WAV conversion failed: $e');
+          state = state.copyWith(
+            recordingStatus: TrainingRecordingStatus.error,
+            errorMessage:
+                'Audio format conversion failed: $e. '
+                'Original WAV: ${wavInfo.summary}',
+          );
+          return false;
+        }
+      }
+
       _pendingUpload = TrainingRecordingUpload(
-        filePath: path,
+        filePath: uploadPath,
         keyword: keyword,
         speakerId: speakerId,
         ageGroup: ageGroup,
@@ -215,7 +300,7 @@ class TrainingNotifier extends Notifier<TrainingState> {
     } catch (e) {
       state = state.copyWith(
         recordingStatus: TrainingRecordingStatus.error,
-        errorMessage: e.toString(),
+        errorMessage: _uploadErrorWithWavInfo(e.toString()),
       );
       return false;
     }
@@ -264,11 +349,13 @@ class TrainingNotifier extends Notifier<TrainingState> {
         recordingStartedAt: null,
         recordingElapsed: Duration.zero,
         microphonePermissionDenied: false,
+        lastWavInfo: state.lastWavInfo,
       );
     } else {
       state = state.copyWith(
         recordingStatus: TrainingRecordingStatus.error,
         isLoading: false,
+        errorMessage: _uploadErrorWithWavInfo(state.errorMessage ?? ''),
       );
     }
     return ok;
@@ -315,6 +402,73 @@ class TrainingNotifier extends Notifier<TrainingState> {
         recordingElapsed: DateTime.now().difference(startedAt),
       );
     });
+  }
+
+  Future<TrainingWavInfo?> _inspectRecordedWav(String path) async {
+    final file = File(path);
+    if (!await file.exists()) return null;
+    final bytes = await file.readAsBytes();
+    if (bytes.length < 44) return null;
+    final data = ByteData.sublistView(bytes);
+    if (_fourCc(bytes, 0) != 'RIFF' || _fourCc(bytes, 8) != 'WAVE') {
+      return null;
+    }
+
+    int offset = 12;
+    int? audioFormat;
+    int? channels;
+    int? sampleRate;
+    int? bitsPerSample;
+    int? dataSize;
+    while (offset + 8 <= bytes.length) {
+      final chunkId = _fourCc(bytes, offset);
+      final chunkSize = data.getUint32(offset + 4, Endian.little);
+      final chunkDataOffset = offset + 8;
+      if (chunkDataOffset + chunkSize > bytes.length) break;
+      if (chunkId == 'fmt ' && chunkSize >= 16) {
+        audioFormat = data.getUint16(chunkDataOffset, Endian.little);
+        channels = data.getUint16(chunkDataOffset + 2, Endian.little);
+        sampleRate = data.getUint32(chunkDataOffset + 4, Endian.little);
+        bitsPerSample = data.getUint16(chunkDataOffset + 14, Endian.little);
+      } else if (chunkId == 'data') {
+        dataSize = chunkSize;
+      }
+      offset = chunkDataOffset + chunkSize + (chunkSize.isOdd ? 1 : 0);
+    }
+
+    if (audioFormat == null ||
+        channels == null ||
+        sampleRate == null ||
+        bitsPerSample == null ||
+        dataSize == null ||
+        channels == 0 ||
+        sampleRate == 0 ||
+        bitsPerSample == 0) {
+      return null;
+    }
+
+    final bytesPerFrame = channels * (bitsPerSample / 8);
+    final durationSeconds = dataSize / bytesPerFrame / sampleRate;
+    return TrainingWavInfo(
+      sampleRate: sampleRate,
+      channels: channels,
+      bitsPerSample: bitsPerSample,
+      audioFormat: audioFormat,
+      duration: Duration(milliseconds: (durationSeconds * 1000).round()),
+      fileSizeBytes: bytes.length,
+    );
+  }
+
+  String _fourCc(Uint8List bytes, int offset) {
+    if (offset + 4 > bytes.length) return '';
+    return String.fromCharCodes(bytes.sublist(offset, offset + 4));
+  }
+
+  String _uploadErrorWithWavInfo(String error) {
+    final wavInfo = state.lastWavInfo;
+    if (wavInfo == null) return error;
+    final prefix = error.isEmpty ? 'Upload failed.' : error;
+    return '$prefix Recorded WAV: ${wavInfo.summary}.';
   }
 
   /// Load keywords and statistics from the Pi.
