@@ -425,6 +425,227 @@ class TrainingApiTest(unittest.TestCase):
             finally:
                 self.cleanup(module, previous)
 
+    def test_keywords_returns_canonical_list_with_language_tags(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                result = asyncio.run(module.training_keywords())
+                self.assertEqual(result["total"], 17)
+                keywords = result["keywords"]
+                self.assertEqual(len(keywords), 17)
+                slugs = {kw["slug"] for kw in keywords}
+                self.assertIn("help", slugs)
+                self.assertIn("tulong", slugs)
+                self.assertIn("kailangan_ko_ng_tulong", slugs)
+                languages = {kw["language"] for kw in keywords}
+                self.assertEqual(languages, {"en", "fil"})
+            finally:
+                self.cleanup(module, previous)
+
+    def test_validate_endpoint_starts_job(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                module.ensure_training_dataset_layout(module.KEYWORD_DATASET_DIR)
+
+                async def _run():
+                    result = await module.training_validate()
+                    self.assertIn("job_id", result)
+                    self.assertEqual(result["status"], "queued")
+                    await asyncio.gather(*module.TRAINING_JOB_TASKS.values())
+                    job = module.TRAINING_JOBS[result["job_id"]]
+                    self.assertEqual(job["status"], "succeeded")
+                    self.assertIn("total_files", job["result"])
+
+                asyncio.run(_run())
+            finally:
+                self.cleanup(module, previous)
+
+    def test_augment_rejects_invalid_copies_count(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                with self.assertRaises(module.HTTPException) as raised:
+                    asyncio.run(module.training_augment(copies_per_file=10))
+                self.assertEqual(raised.exception.status_code, 400)
+            finally:
+                self.cleanup(module, previous)
+
+    def test_train_endpoint_creates_manifest(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                module.ensure_training_dataset_layout(module.KEYWORD_DATASET_DIR)
+                # Need at least one WAV for the manifest
+                keyword_dir = module.KEYWORD_DATASET_DIR / "positive" / "help"
+                keyword_dir.mkdir(parents=True, exist_ok=True)
+                for i in range(3):
+                    wav_path = keyword_dir / f"help_sp{i:02d}_real_001.wav"
+                    wav_path.write_bytes(wav_bytes())
+
+                async def _run():
+                    result = await module.training_train(seed=42)
+                    self.assertIn("job_id", result)
+                    await asyncio.gather(*module.TRAINING_JOB_TASKS.values())
+                    job = module.TRAINING_JOBS[result["job_id"]]
+                    self.assertEqual(job["status"], "succeeded")
+                    self.assertIn("manifest_path", job["result"])
+
+                asyncio.run(_run())
+            finally:
+                self.cleanup(module, previous)
+
+    def test_deploy_rejects_empty_onnx_file(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                with self.assertRaises(module.HTTPException) as raised:
+                    asyncio.run(
+                        module.training_deploy(
+                            onnx_file=FakeUploadFile("help.onnx", b""),
+                            onnx_data_file=FakeUploadFile("help.onnx.data", b"data"),
+                            keyword="help",
+                        )
+                    )
+                self.assertEqual(raised.exception.status_code, 400)
+            finally:
+                self.cleanup(module, previous)
+
+    def test_deploy_rejects_invalid_keyword(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                with self.assertRaises(module.HTTPException) as raised:
+                    asyncio.run(
+                        module.training_deploy(
+                            onnx_file=FakeUploadFile("bad.onnx", b"model"),
+                            onnx_data_file=FakeUploadFile("bad.onnx.data", b"data"),
+                            keyword="not-a-keyword",
+                        )
+                    )
+                self.assertEqual(raised.exception.status_code, 400)
+            finally:
+                self.cleanup(module, previous)
+
+    def test_deploy_writes_paired_files_atomically(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                onnx_content = b"ONNX_MODEL_BINARY_DATA"
+                data_content = b"ONNX_WEIGHTS_DATA"
+                result = asyncio.run(
+                    module.training_deploy(
+                        onnx_file=FakeUploadFile("help.onnx", onnx_content),
+                        onnx_data_file=FakeUploadFile("help.onnx.data", data_content),
+                        keyword="help",
+                    )
+                )
+                self.assertTrue(result["deployed"])
+                self.assertEqual(result["keyword"], "help")
+                self.assertEqual(result["onnx_size"], len(onnx_content))
+                self.assertEqual(result["data_size"], len(data_content))
+
+                target_onnx = module.OPENWAKEWORD_MODEL_DIR / "help.onnx"
+                target_data = module.OPENWAKEWORD_MODEL_DIR / "help.onnx.data"
+                self.assertTrue(target_onnx.exists())
+                self.assertTrue(target_data.exists())
+                self.assertEqual(target_onnx.read_bytes(), onnx_content)
+                self.assertEqual(target_data.read_bytes(), data_content)
+            finally:
+                self.cleanup(module, previous)
+
+    def test_deploy_creates_backup_of_existing_model(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                # Deploy initial model
+                asyncio.run(
+                    module.training_deploy(
+                        onnx_file=FakeUploadFile("help.onnx", b"old_model"),
+                        onnx_data_file=FakeUploadFile("help.onnx.data", b"old_data"),
+                        keyword="help",
+                    )
+                )
+                # Deploy replacement
+                result = asyncio.run(
+                    module.training_deploy(
+                        onnx_file=FakeUploadFile("help.onnx", b"new_model"),
+                        onnx_data_file=FakeUploadFile("help.onnx.data", b"new_data"),
+                        keyword="help",
+                    )
+                )
+                self.assertTrue(result["backed_up"])
+                backup_dir = module.OPENWAKEWORD_MODEL_DIR / "backup"
+                backups = list(backup_dir.glob("help_*.onnx"))
+                self.assertGreaterEqual(len(backups), 1)
+                # Verify the live model is the new one
+                self.assertEqual(
+                    (module.OPENWAKEWORD_MODEL_DIR / "help.onnx").read_bytes(),
+                    b"new_model",
+                )
+            finally:
+                self.cleanup(module, previous)
+
+    def test_evaluate_returns_409_when_no_predictions(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                with self.assertRaises(module.HTTPException) as raised:
+                    asyncio.run(module.training_evaluate())
+                self.assertEqual(raised.exception.status_code, 409)
+            finally:
+                self.cleanup(module, previous)
+
+    def test_evaluate_returns_metrics_from_prediction_files(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                predictions_dir = module.KEYWORD_DATASET_DIR / "predictions"
+                predictions_dir.mkdir(parents=True, exist_ok=True)
+                import json
+                predictions = [
+                    {"label": 1, "score": 0.9},
+                    {"label": 0, "score": 0.1},
+                ]
+                (predictions_dir / "help.json").write_text(
+                    json.dumps(predictions), encoding="utf-8"
+                )
+                result = asyncio.run(module.training_evaluate(threshold=0.5))
+                self.assertIn("keywords", result)
+                self.assertIn("help", result["keywords"])
+                self.assertEqual(result["keywords"]["help"]["true_positives"], 1)
+                self.assertEqual(result["keywords"]["help"]["true_negatives"], 1)
+            finally:
+                self.cleanup(module, previous)
+
+    def test_export_rejects_fewer_than_3_speakers(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                module.ensure_training_dataset_layout(module.KEYWORD_DATASET_DIR)
+
+                async def _run():
+                    # Upload with only 1 speaker
+                    await module.upload_training_record(
+                        file=FakeUploadFile("help.wav", wav_bytes()),
+                        keyword="help",
+                        speaker_id="sp01",
+                        age_group="adult",
+                        gender="female",
+                        distance_m=1.0,
+                        noise_condition="quiet",
+                    )
+                    result = await module.training_export()
+                    self.assertIn("job_id", result)
+                    await asyncio.gather(*module.TRAINING_JOB_TASKS.values())
+                    job = module.TRAINING_JOBS[result["job_id"]]
+                    self.assertEqual(job["status"], "failed")
+                    self.assertIn("3 real speakers", job["error"])
+
+                asyncio.run(_run())
+            finally:
+                self.cleanup(module, previous)
+
 
 if __name__ == "__main__":
     unittest.main()

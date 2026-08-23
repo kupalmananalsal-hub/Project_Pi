@@ -1753,6 +1753,219 @@ async def training_job_status(job_id: str):
         return dict(job)
 
 
+
+
+# ---------------------------------------------------------------------------
+#  Training Pipeline Endpoints (Phase 2: validate, augment, export, train,
+#  deploy, evaluate, keywords)
+# ---------------------------------------------------------------------------
+
+TRAINING_KEYWORD_LANG = {
+    "help": "en", "help me": "en", "save me": "en", "please help": "en",
+    "emergency": "en", "rescue": "en", "over here": "en", "ouch": "en",
+    "tulong": "fil", "saklolo": "fil", "tulungan niyo ako": "fil",
+    "tulungan mo ako": "fil", "kailangan ko ng tulong": "fil",
+    "ang sakit": "fil", "aray": "fil", "sunog": "fil", "agai": "fil",
+}
+
+
+@app.get("/api/training/keywords")
+async def training_keywords():
+    """Return the canonical 17-keyword inventory with language tags."""
+    return {
+        "keywords": [
+            {
+                "keyword": kw,
+                "slug": slugify_keyword(kw),
+                "language": TRAINING_KEYWORD_LANG.get(kw, "unknown"),
+            }
+            for kw in TRAINING_KEYWORDS
+        ],
+        "total": len(TRAINING_KEYWORDS),
+    }
+
+
+@app.post("/api/training/validate", status_code=status.HTTP_202_ACCEPTED)
+async def training_validate():
+    """Launch an async dataset validation job."""
+    def _run_validation():
+        from validate_keyword_dataset import validate_dataset
+        return validate_dataset(KEYWORD_DATASET_DIR)
+
+    return await queue_training_job("validation", _run_validation)
+
+
+@app.post("/api/training/augment", status_code=status.HTTP_202_ACCEPTED)
+async def training_augment(copies_per_file: int = 2, seed: int = 1337):
+    """Launch an async augmentation job."""
+    if not 1 <= copies_per_file <= 5:
+        raise HTTPException(
+            status_code=400,
+            detail="copies_per_file must be between 1 and 5",
+        )
+
+    def _run_augment():
+        from augment_keyword_dataset import augment_dataset
+        output_dir = KEYWORD_DATASET_DIR / "augmented"
+        return augment_dataset(
+            KEYWORD_DATASET_DIR,
+            output_dir,
+            copies_per_file=copies_per_file,
+            seed=seed,
+        )
+
+    return await queue_training_job("augmentation", _run_augment)
+
+
+@app.post("/api/training/export", status_code=status.HTTP_202_ACCEPTED)
+async def training_export():
+    """Package the dataset as a dated ZIP archive."""
+    import shutil
+    import zipfile
+
+    def _run_export():
+        with TRAINING_METADATA_LOCK:
+            rows = read_training_metadata_rows()
+        real_speakers = {
+            row.get("speaker_id", "").strip()
+            for row in rows
+            if row.get("source", "").strip().lower() == "real"
+            and row.get("speaker_id", "").strip()
+        }
+        if len(real_speakers) < 3:
+            raise ValueError(
+                f"Export requires at least 3 real speakers, found {len(real_speakers)}: "
+                + ", ".join(sorted(real_speakers))
+            )
+
+        from train_openwakeword_models import build_split_manifest, write_manifest
+        manifest = build_split_manifest(KEYWORD_DATASET_DIR)
+        manifest_path = KEYWORD_DATASET_DIR / "splits" / "openwakeword_split.json"
+        write_manifest(manifest, manifest_path)
+
+        DATASET_ARCHIVES_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        archive_path = DATASET_ARCHIVES_DIR / f"keyword_dataset_{timestamp}.zip"
+
+        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            if KEYWORD_METADATA_PATH.exists():
+                zf.write(KEYWORD_METADATA_PATH, "metadata.csv")
+            zf.write(manifest_path, "splits/openwakeword_split.json")
+            for wav in KEYWORD_DATASET_DIR.rglob("*.wav"):
+                rel = wav.relative_to(KEYWORD_DATASET_DIR)
+                zf.write(wav, str(rel))
+
+        return {
+            "archive": str(archive_path.relative_to(PROJECT_ROOT)),
+            "size_bytes": archive_path.stat().st_size,
+            "recordings": len(rows),
+            "speakers": len(real_speakers),
+        }
+
+    return await queue_training_job("export", _run_export)
+
+
+@app.post("/api/training/train", status_code=status.HTTP_202_ACCEPTED)
+async def training_train(seed: int = 1337):
+    """Generate a training manifest and launch the training pipeline."""
+    def _run_train():
+        from train_openwakeword_models import build_split_manifest, write_manifest
+
+        manifest = build_split_manifest(KEYWORD_DATASET_DIR, seed=seed)
+        manifest_path = KEYWORD_DATASET_DIR / "splits" / "openwakeword_split.json"
+        write_manifest(manifest, manifest_path)
+
+        keyword_count = len(manifest.get("keywords", {}))
+        speaker_info = manifest.get("speakers", {})
+        return {
+            "manifest_path": str(manifest_path.relative_to(PROJECT_ROOT)),
+            "keywords_with_samples": keyword_count,
+            "speakers": {
+                split: len(ids) for split, ids in speaker_info.items()
+            },
+            "note": "Manifest created. Run openWakeWord training in Colab with this manifest.",
+        }
+
+    return await queue_training_job("training", _run_train)
+
+
+@app.post("/api/training/deploy")
+async def training_deploy(
+    onnx_file: UploadFile = File(...),
+    onnx_data_file: UploadFile = File(...),
+    keyword: str = Form(...),
+):
+    """Deploy a trained .onnx + .onnx.data model pair to the live models directory."""
+    keyword_slug = slugify_keyword(keyword.strip().lower())
+    if keyword.strip().lower() not in TRAINING_KEYWORDS:
+        raise HTTPException(status_code=400, detail="Invalid keyword for deployment")
+
+    onnx_bytes = await onnx_file.read()
+    data_bytes = await onnx_data_file.read()
+
+    if not onnx_bytes:
+        raise HTTPException(status_code=400, detail="ONNX model file is empty")
+    if not data_bytes:
+        raise HTTPException(status_code=400, detail="ONNX data file is empty")
+
+    OPENWAKEWORD_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    target_onnx = OPENWAKEWORD_MODEL_DIR / f"{keyword_slug}.onnx"
+    target_data = OPENWAKEWORD_MODEL_DIR / f"{keyword_slug}.onnx.data"
+
+    # Create timestamped backups of existing models
+    backup_dir = OPENWAKEWORD_MODEL_DIR / "backup"
+    if target_onnx.exists() or target_data.exists():
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        if target_onnx.exists():
+            backup_onnx = backup_dir / f"{keyword_slug}_{timestamp}.onnx"
+            backup_onnx.write_bytes(target_onnx.read_bytes())
+        if target_data.exists():
+            backup_data = backup_dir / f"{keyword_slug}_{timestamp}.onnx.data"
+            backup_data.write_bytes(target_data.read_bytes())
+
+    # Atomic write via temp files
+    temp_onnx = OPENWAKEWORD_MODEL_DIR / f".{keyword_slug}.onnx.tmp"
+    temp_data = OPENWAKEWORD_MODEL_DIR / f".{keyword_slug}.onnx.data.tmp"
+    try:
+        temp_onnx.write_bytes(onnx_bytes)
+        temp_data.write_bytes(data_bytes)
+        os.replace(temp_onnx, target_onnx)
+        os.replace(temp_data, target_data)
+    except Exception:
+        temp_onnx.unlink(missing_ok=True)
+        temp_data.unlink(missing_ok=True)
+        raise
+
+    return {
+        "deployed": True,
+        "keyword": keyword.strip().lower(),
+        "slug": keyword_slug,
+        "onnx_size": len(onnx_bytes),
+        "data_size": len(data_bytes),
+        "backed_up": backup_dir.exists(),
+    }
+
+
+@app.get("/api/training/evaluate")
+async def training_evaluate(threshold: float = 0.5):
+    """Return evaluation metrics from prediction files, if available."""
+    predictions_dir = KEYWORD_DATASET_DIR / "predictions"
+    if not predictions_dir.exists() or not any(predictions_dir.iterdir()):
+        raise HTTPException(
+            status_code=409,
+            detail="No prediction files found. Run model evaluation first.",
+        )
+
+    from evaluate_keyword_models import evaluate_prediction_dir
+    results = evaluate_prediction_dir(
+        predictions_dir,
+        threshold=threshold,
+        negative_hours=None,
+    )
+    return results
+
+
 @app.post("/api/voice/sample", response_model=VoiceSampleResponse)
 async def upload_voice_sample(
     request: Request,
