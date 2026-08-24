@@ -127,6 +127,13 @@ class ThermalConfidenceScorer:
     MAX_TEMP_VARIANCE = 3.0
     MAX_CLUSTER_STD = 2.0
     REQUIRED_CONSECUTIVE_FRAMES = 3
+    # Dominant cluster height/width must lie within this range.
+    # Wide, flat objects (laptops, heaters) typically have ratios < 0.3.
+    MIN_CLUSTER_ASPECT_RATIO = 0.3
+    MAX_CLUSTER_ASPECT_RATIO = 5.0
+    # Reject detections whose warm-pixel coverage exceeds this fraction.
+    # A real human body never fills more than ~40 % of the 32×24 field of view.
+    MAX_BODY_COVERAGE = 0.40
 
     FINGER_THRESHOLD = 0.02
     HAND_THRESHOLD = 0.05
@@ -423,8 +430,16 @@ class ThermalConfidenceScorer:
             shape_boost = min(0.10, shape_conf * 0.08)
             merged["confidence_boost"] = round(min(0.25, existing_boost + shape_boost), 4)
             if not merged.get('human_detected'):
-                merged["human_detected"] = True
-                merged["detected_part"] = shape.get("thermal_shape_body_part", "none")
+                # The shape model must not bypass the temporal consistency gate.
+                # A single-frame shape hit from a transient hot object must not
+                # escalate to a full human detection.
+                temporal_ok = (
+                    not self.temporal_required
+                    or self.consecutive_human_frames >= self.REQUIRED_CONSECUTIVE_FRAMES
+                )
+                if temporal_ok:
+                    merged["human_detected"] = True
+                    merged["detected_part"] = shape.get("thermal_shape_body_part", "none")
             details2: dict[str, object] = dict(merged.get('details') or {})
             details2["shape_confirmed"] = True
             details2["shape_label"] = shape.get("thermal_shape_label")
@@ -445,10 +460,18 @@ class ThermalConfidenceScorer:
             return self._no_human("insufficient_warm_pixels")
         if body_coverage < self.MIN_BODY_COVERAGE:
             return self._no_human("coverage_below_threshold")
+        if body_coverage > self.MAX_BODY_COVERAGE:
+            return self._no_human(f'coverage_exceeds_maximum_{body_coverage:.3f}')
         clusters = self._clusters(human_mask, temps)
         dominant = max(clusters, key=lambda item: item.pixel_count, default=None)
         if dominant is None or dominant.pixel_count < self.MIN_CLUSTER_SIZE:
             return self._no_human("no_connected_cluster")
+        # Reject blobs whose shape is implausible for a human body part.
+        # Flat wide objects (laptops, heaters) produce aspect ratios well below 0.3.
+        if dominant.width > 0:
+            aspect_ratio = dominant.height / dominant.width
+            if not (self.MIN_CLUSTER_ASPECT_RATIO <= aspect_ratio <= self.MAX_CLUSTER_ASPECT_RATIO):
+                return self._no_human(f'aspect_ratio_rejected_{aspect_ratio:.2f}')
         human_temps = temps[human_mask]
         temp_variance = float(np.std(human_temps))
         if temp_variance > self.MAX_TEMP_VARIANCE:
@@ -639,6 +662,15 @@ class ThermalConfidenceScorer:
     ) -> dict[str, object]:
         confidence = float(model_result['thermal_model_confidence'])
         model_detected = confidence >= self.model_threshold
+        # Honour temporal consistency requirement in the TFLite model path.
+        # consecutive_human_frames was already updated by _analyze_heuristic,
+        # so this guard reuses the same counter without double-counting.
+        if (
+            model_detected
+            and self.temporal_required
+            and self.consecutive_human_frames < self.REQUIRED_CONSECUTIVE_FRAMES
+        ):
+            model_detected = False
         model_coverage = float(model_result.get('thermal_model_coverage') or 0.0)
         heuristic_coverage = float(heuristic.get('body_coverage') or 0.0)
         body_coverage = max(model_coverage, heuristic_coverage)
