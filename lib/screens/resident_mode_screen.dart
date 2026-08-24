@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 
 import '../services/resident_alert_service.dart';
 
+import 'resident_settings_screen.dart';
+
 class ResidentModeScreen extends StatefulWidget {
   const ResidentModeScreen({
     super.key,
@@ -28,6 +30,14 @@ class _ResidentModeScreenState extends State<ResidentModeScreen> {
   void initState() {
     super.initState();
     _alertService = widget.alertService ?? ResidentAlertService();
+  }
+
+  void _openSettings() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => const ResidentSettingsScreen(),
+      ),
+    );
   }
 
   Future<void> _handleHelpPressed() async {
@@ -90,38 +100,63 @@ class _ResidentModeScreenState extends State<ResidentModeScreen> {
 
     return Scaffold(
       backgroundColor: Colors.black,
-      body: Center(
-        child: SizedBox(
-          width: buttonSize,
-          height: buttonSize,
-          child: GestureDetector(
-            onTap: _handleHelpPressed,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
-              decoration: BoxDecoration(
-                color: _isPressed ? _darkerRed : _idleRed,
-                shape: BoxShape.circle,
-                boxShadow: [
-                  BoxShadow(
-                    color: (_isPressed ? _darkerRed : _idleRed).withValues(alpha: 0.5),
-                    blurRadius: _isPressed ? 12 : 28,
-                    spreadRadius: _isPressed ? 2 : 6,
+      body: Stack(
+        children: [
+          // Centered HELP button
+          Center(
+            child: SizedBox(
+              width: buttonSize,
+              height: buttonSize,
+              child: GestureDetector(
+                onTap: _handleHelpPressed,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 150),
+                  decoration: BoxDecoration(
+                    color: _isPressed ? _darkerRed : _idleRed,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: (_isPressed ? _darkerRed : _idleRed).withValues(alpha: 0.5),
+                        blurRadius: _isPressed ? 12 : 28,
+                        spreadRadius: _isPressed ? 2 : 6,
+                      ),
+                    ],
                   ),
-                ],
-              ),
-              alignment: Alignment.center,
-              child: const Text(
-                'HELP',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w900,
-                  fontSize: 38,
-                  letterSpacing: 2.0,
+                  alignment: Alignment.center,
+                  child: const Text(
+                    'HELP',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w900,
+                      fontSize: 38,
+                      letterSpacing: 2.0,
+                    ),
+                  ),
                 ),
               ),
             ),
           ),
-        ),
+
+          // Small unobtrusive gear icon in top-right corner
+          SafeArea(
+            child: Align(
+              alignment: Alignment.topRight,
+              child: Padding(
+                padding: const EdgeInsets.all(12.0),
+                child: IconButton(
+                  key: const ValueKey('resident-settings-button'),
+                  icon: const Icon(
+                    Icons.settings_outlined,
+                    color: Colors.white60,
+                    size: 26,
+                  ),
+                  tooltip: 'Settings',
+                  onPressed: _openSettings,
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

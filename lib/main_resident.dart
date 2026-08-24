@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'screens/resident_mode_screen.dart';
+import 'screens/resident_settings_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -27,7 +29,57 @@ class ResidentApp extends StatelessWidget {
           surface: Colors.black,
         ),
       ),
-      home: const ResidentModeScreen(),
+      routes: {
+        '/': (_) => const _ResidentHomeWrapper(),
+        '/settings': (_) => const ResidentSettingsScreen(),
+      },
+    );
+  }
+}
+
+class _ResidentHomeWrapper extends StatefulWidget {
+  const _ResidentHomeWrapper();
+
+  @override
+  State<_ResidentHomeWrapper> createState() => _ResidentHomeWrapperState();
+}
+
+class _ResidentHomeWrapperState extends State<_ResidentHomeWrapper> {
+  late final Future<bool> _hasSavedHostFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _hasSavedHostFuture = _checkSavedHost();
+  }
+
+  Future<bool> _checkSavedHost() async {
+    final prefs = await SharedPreferences.getInstance();
+    final host = prefs.getString('host');
+    return host != null && host.trim().isNotEmpty;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<bool>(
+      future: _hasSavedHostFuture,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            backgroundColor: Colors.black,
+            body: Center(
+              child: CircularProgressIndicator(
+                color: Color(0xFFE53935),
+              ),
+            ),
+          );
+        }
+        final hasSavedHost = snapshot.data ?? false;
+        if (!hasSavedHost) {
+          return const ResidentSettingsScreen(isInitialSetup: true);
+        }
+        return const ResidentModeScreen();
+      },
     );
   }
 }

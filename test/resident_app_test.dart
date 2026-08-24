@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:thermal_audio_monitor/main_resident.dart';
 import 'package:thermal_audio_monitor/screens/resident_mode_screen.dart';
+import 'package:thermal_audio_monitor/screens/resident_settings_screen.dart';
 import 'package:thermal_audio_monitor/services/resident_alert_service.dart';
 
 class FakeResidentAlertService extends ResidentAlertService {
@@ -38,7 +39,7 @@ void main() {
     });
   });
 
-  testWidgets('ResidentModeScreen renders pure black screen with large HELP button', (
+  testWidgets('ResidentModeScreen renders pure black screen with large HELP button and gear icon', (
     tester,
   ) async {
     final fakeService = FakeResidentAlertService();
@@ -57,10 +58,43 @@ void main() {
     // Verify HELP button text
     expect(find.text('HELP'), findsOneWidget);
 
-    // Verify no app bar or bottom navigation
-    expect(find.byType(AppBar), findsNothing);
-    expect(find.byType(NavigationBar), findsNothing);
-    expect(find.byType(BottomNavigationBar), findsNothing);
+    // Verify gear settings icon in top-right
+    expect(find.byKey(const ValueKey('resident-settings-button')), findsOneWidget);
+  });
+
+  testWidgets('Tapping gear icon opens ResidentSettingsScreen', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: ResidentModeScreen(),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('resident-settings-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ResidentSettingsScreen), findsOneWidget);
+    expect(find.text('Pi Connection Settings'), findsOneWidget);
+    expect(find.byKey(const ValueKey('pi-ip-field')), findsOneWidget);
+    expect(find.byKey(const ValueKey('pi-port-field')), findsOneWidget);
+  });
+
+  testWidgets('Saving new IP and port updates SharedPreferences', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: ResidentSettingsScreen(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byKey(const ValueKey('pi-ip-field')), '192.168.1.50');
+    await tester.enterText(find.byKey(const ValueKey('pi-port-field')), '9000');
+    await tester.tap(find.byKey(const ValueKey('save-settings-button')));
+    await tester.pumpAndSettle();
+
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('host'), '192.168.1.50');
+    expect(prefs.getInt('port'), 9000);
   });
 
   testWidgets('Tapping HELP button triggers alert and shows Alert sent toast', (
@@ -107,13 +141,26 @@ void main() {
     expect(find.text('Failed to send'), findsOneWidget);
   });
 
-  testWidgets('ResidentApp builds successfully with black theme', (
+  testWidgets('ResidentApp builds successfully with black theme and saved host', (
     tester,
   ) async {
     await tester.pumpWidget(const ResidentApp());
     await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(find.byType(ResidentModeScreen), findsOneWidget);
     expect(find.text('HELP'), findsOneWidget);
+  });
+
+  testWidgets('ResidentApp shows settings screen first if no host is saved', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+
+    await tester.pumpWidget(const ResidentApp());
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ResidentSettingsScreen), findsOneWidget);
   });
 }
