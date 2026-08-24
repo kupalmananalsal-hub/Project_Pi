@@ -922,6 +922,41 @@ class BackendAlertSmokeTest(unittest.TestCase):
             finally:
                 self.cleanup_backend(module, previous)
 
+    def test_manual_alert_endpoint_creates_alert(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_backend_module(temp_dir)
+            try:
+                self.prepare_backend(module)
+                module.audio.latest = {"direction": "front", "snr_db": 25.0}
+                module.thermal = FakeThermal(
+                    module,
+                    {
+                        "thermal_state": "unavailable",
+                        "human_detected": False,
+                        "body_coverage": 0.0,
+                        "detected_part": "no_human",
+                        "confidence_boost": 0.0,
+                        "thermal_model_confidence": 0.0,
+                        "temperatures": [24.0] * 768,
+                    },
+                )
+
+                manual_req = module.ManualAlertIn(
+                    keyword="manual",
+                    confidence=1.0,
+                    source="manual_button",
+                )
+                response = asyncio.run(module.api_alerts_manual(manual_req))
+                self.assertTrue(response["ok"])
+                event = response["event"]
+                self.assertEqual(event["keyword"], "manual")
+                self.assertEqual(event["source"], "manual_button")
+                self.assertEqual(event["confidence"], 1.0)
+                self.assertEqual(len(module.alerts.published), 1)
+                self.assertEqual(module.alerts.published[0]["keyword"], "manual")
+            finally:
+                self.cleanup_backend(module, previous)
+
 
 if __name__ == "__main__":
     unittest.main()

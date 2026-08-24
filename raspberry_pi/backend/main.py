@@ -166,6 +166,13 @@ class AlertIn(BaseModel):
     decision_factors: dict[str, Any] | None = None
 
 
+class ManualAlertIn(BaseModel):
+    keyword: str = "manual"
+    confidence: float = 1.0
+    source: str = "manual_button"
+    direction: str = "center"
+
+
 class RefreshRequest(BaseModel):
     git_pull: bool = False
     restart_backend: bool = False
@@ -2307,6 +2314,18 @@ async def api_alerts(event: AlertIn):
     except Exception as exc:
         await alert_idempotency.fail(event_id, exc)
         raise
+
+
+@app.post("/api/alerts/manual")
+async def api_alerts_manual(manual: ManualAlertIn | None = None):
+    req = manual or ManualAlertIn()
+    event = AlertIn(
+        keyword=req.keyword or "manual",
+        confidence=req.confidence if req.confidence is not None else 1.0,
+        source=req.source or "manual_button",
+        direction=req.direction or "center",
+    )
+    return await api_alerts(event)
 
 
 REFRESH_SCRIPT = RASPBERRY_PI_ROOT / "scripts" / "pi_refresh.sh"

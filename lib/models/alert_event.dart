@@ -186,6 +186,7 @@ class AlertEvent {
         'saklolo',
         'emergency',
         'ambulance',
+        'manual',
       }.contains,
     );
   }
@@ -223,7 +224,8 @@ class AlertEvent {
         source == 'openwakeword' ||
         source == 'vosk' ||
         source == 'snowboy' ||
-        source == 'wav2vec2';
+        source == 'wav2vec2' ||
+        source == 'manual_button';
   }
 
   bool get hasAuthoritativeDecision =>
