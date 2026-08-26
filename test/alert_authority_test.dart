@@ -59,6 +59,7 @@ void main() {
 
   AlertEvent eventFrom({
     required String decisionState,
+    String source = 'openwakeword',
     String alertLevel = 'visual_only',
     String alertModality = 'voice_only',
     String thermalState = 'negative',
@@ -72,7 +73,7 @@ void main() {
       'keyword': 'help',
       'confidence': confidence,
       'final_confidence': confidence,
-      'source': 'openwakeword',
+      'source': source,
       'direction': 'left',
       'alert_level': alertLevel,
       'human_detected': humanDetected,
@@ -187,6 +188,32 @@ void main() {
       expect(state.activeAlert, isNull);
       expect(runtime.emergencyStarts, 0);
       expect(runtime.softBeeps, 1);
+    },
+  );
+
+  test(
+    'critical manual button bypasses thermal gate and starts full emergency',
+    () async {
+      final runtime = FakeAlertRuntimeService();
+      final container = makeContainer(runtime);
+      final controller = container.read(alertsProvider.notifier);
+      final event = eventFrom(
+        decisionState: 'critical',
+        alertLevel: 'full_alert',
+        alertModality: 'voice_only',
+        thermalState: 'negative',
+        confidence: 1.0,
+        source: 'manual_button',
+      );
+
+      controller.handleAlertForTest(event);
+      await drainAsync();
+
+      final state = container.read(alertsProvider);
+      expect(state.activeAlert, event);
+      expect(state.activeAlertHumanDetected, isTrue);
+      expect(runtime.emergencyStarts, 1);
+      expect(runtime.softBeeps, 0);
     },
   );
 

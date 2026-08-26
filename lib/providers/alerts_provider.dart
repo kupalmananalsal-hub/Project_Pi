@@ -419,7 +419,9 @@ class AlertsController extends Notifier<AlertsState> {
   }
 
   Future<void> _startAuthoritativeEmergencyAlert(AlertEvent event) async {
-    final hasHuman = event.humanDetected || _hasThermalPresenceFor(event);
+    final isManualButton = event.source == 'manual_button';
+    final hasHuman =
+        isManualButton || event.humanDetected || _hasThermalPresenceFor(event);
     if (!hasHuman) {
       // Keyword detected but no thermal human — show status badge + soft beep.
       // No full-screen alert, no alarm, no vibration.
