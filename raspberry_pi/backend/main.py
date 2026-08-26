@@ -1214,10 +1214,11 @@ async def run_training_job(
         try:
             import inspect
             sig = inspect.signature(operation)
-            if len(sig.parameters) > 0:
-                result = await asyncio.to_thread(operation, job_id)
+            operation_args = (job_id,) if len(sig.parameters) > 0 else ()
+            if inspect.iscoroutinefunction(operation):
+                result = await operation(*operation_args)
             else:
-                result = await asyncio.to_thread(operation)
+                result = await asyncio.to_thread(operation, *operation_args)
         except Exception as exc:
             async with TRAINING_JOBS_LOCK:
                 job = TRAINING_JOBS[job_id]
@@ -1957,23 +1958,36 @@ async def training_augment(copies_per_file: int = 2, seed: int = 1337):
     except Exception:
         pass
 
-    def _run_augment(job_id: str):
-        def _on_progress(current: int, total: int, msg: str):
-            pct = int((current / max(1, total)) * 100)
-            job = TRAINING_JOBS.get(job_id)
-            if job:
-                job["progress"] = min(99, max(1, pct))
-                job["message"] = msg
-
-        from augment_keyword_dataset import augment_dataset
+    async def _run_augment(job_id: str):
         output_dir = KEYWORD_DATASET_DIR / "augmented"
-        return augment_dataset(
-            KEYWORD_DATASET_DIR,
-            output_dir,
-            copies_per_file=copies_per_file,
-            seed=seed,
-            progress_callback=_on_progress,
+        script_path = CURRENT_DIR.parent / "kws" / "augment_keyword_dataset.py"
+        async with TRAINING_JOBS_LOCK:
+            TRAINING_JOBS[job_id]["message"] = "Running augmentation subprocess..."
+
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(script_path),
+            "--dataset-dir",
+            str(KEYWORD_DATASET_DIR),
+            "--output-dir",
+            str(output_dir),
+            "--copies-per-file",
+            str(copies_per_file),
+            "--seed",
+            str(seed),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            detail = (stderr or stdout).decode(errors="replace").strip()
+            raise RuntimeError(
+                f"Augmentation subprocess failed with exit code {process.returncode}"
+                + (f": {detail[-2000:]}" if detail else ".")
+            )
+        return {
+            "output": (stdout or b"").decode(errors="replace").strip(),
+        }
 
     return await queue_training_job("augmentation", _run_augment)
 
