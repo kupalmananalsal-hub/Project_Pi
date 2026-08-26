@@ -24,6 +24,11 @@ class FakeUploadFile:
         return self._data
 
 
+class FakeRequest:
+    def __init__(self, headers=None):
+        self.headers = headers or {}
+
+
 def wav_bytes(
     sample_rate=16000,
     channels=1,
@@ -531,6 +536,36 @@ class TrainingApiTest(unittest.TestCase):
             finally:
                 self.cleanup(module, previous)
 
+    def test_sensitive_training_routes_require_api_token(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                bad_request = FakeRequest(headers={})
+                with self.assertRaises(module.HTTPException) as raised:
+                    asyncio.run(
+                        module.training_deploy(
+                            onnx_file=FakeUploadFile("help.onnx", b"model"),
+                            onnx_data_file=FakeUploadFile("help.onnx.data", b"data"),
+                            keyword="help",
+                            request=bad_request,
+                        )
+                    )
+                self.assertEqual(raised.exception.status_code, 401)
+
+                with self.assertRaises(module.HTTPException) as raised:
+                    asyncio.run(module.api_refresh(module.RefreshRequest(), bad_request))
+                self.assertEqual(raised.exception.status_code, 401)
+
+                with self.assertRaises(module.HTTPException) as raised:
+                    asyncio.run(module.api_shutdown(bad_request))
+                self.assertEqual(raised.exception.status_code, 401)
+
+                with self.assertRaises(module.HTTPException) as raised:
+                    asyncio.run(module.api_reboot(bad_request))
+                self.assertEqual(raised.exception.status_code, 401)
+            finally:
+                self.cleanup(module, previous)
+
     def test_deploy_writes_paired_files_atomically(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             module, previous = self.load_module(temp_dir)
@@ -555,6 +590,26 @@ class TrainingApiTest(unittest.TestCase):
                 self.assertTrue(target_data.exists())
                 self.assertEqual(target_onnx.read_bytes(), onnx_content)
                 self.assertEqual(target_data.read_bytes(), data_content)
+            finally:
+                self.cleanup(module, previous)
+
+    def test_deploy_model_import_alias_uses_same_validation(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                token_request = FakeRequest(
+                    headers={"authorization": "Bearer project-pi-local-token"}
+                )
+                result = asyncio.run(
+                    module.training_model_import(
+                        onnx_file=FakeUploadFile("help.onnx", b"model"),
+                        onnx_data_file=FakeUploadFile("help.onnx.data", b"data"),
+                        keyword="help",
+                        request=token_request,
+                    )
+                )
+                self.assertTrue(result["deployed"])
+                self.assertEqual(result["keyword"], "help")
             finally:
                 self.cleanup(module, previous)
 

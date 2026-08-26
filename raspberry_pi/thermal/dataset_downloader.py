@@ -145,22 +145,37 @@ def _extract_archive(archive_path: Path, destination: Path) -> None:
         with zipfile.ZipFile(archive_path) as archive:
             for member in archive.infolist():
                 member_path = (dest_resolved / member.filename).resolve()
-                if not str(member_path).startswith(str(dest_resolved) + os.sep) and member_path != dest_resolved:
+                if member_path != dest_resolved and dest_resolved not in member_path.parents:
                     raise ValueError(
                         f"Unsafe path in ZIP archive: {member.filename!r}"
                     )
-            archive.extractall(destination)
+                if member.is_dir():
+                    member_path.mkdir(parents=True, exist_ok=True)
+                    continue
+                member_path.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as source, member_path.open("wb") as target:
+                    shutil.copyfileobj(source, target)
         return
 
     if suffixes[-2:] == [".tar", ".gz"] or archive_path.suffix.lower() == ".tgz":
         with tarfile.open(archive_path, "r:gz") as archive:
             for member in archive.getmembers():
                 member_path = (dest_resolved / member.name).resolve()
-                if not str(member_path).startswith(str(dest_resolved) + os.sep) and member_path != dest_resolved:
+                if member_path != dest_resolved and dest_resolved not in member_path.parents:
                     raise ValueError(
                         f"Unsafe path in tar archive: {member.name!r}"
                     )
-            archive.extractall(destination)
+                if member.isdir():
+                    member_path.mkdir(parents=True, exist_ok=True)
+                    continue
+                if not member.isfile():
+                    continue
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    continue
+                member_path.parent.mkdir(parents=True, exist_ok=True)
+                with extracted, member_path.open("wb") as target:
+                    shutil.copyfileobj(extracted, target)
         return
 
     raise ValueError(f"Unsupported archive type: {archive_path}")

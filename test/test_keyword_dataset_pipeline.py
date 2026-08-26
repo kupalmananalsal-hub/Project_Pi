@@ -1,8 +1,11 @@
+import io
 import csv
 import importlib.util
 import json
 import tempfile
 import unittest
+import tarfile
+import zipfile
 import wave
 from pathlib import Path
 
@@ -13,6 +16,13 @@ ROOT = Path(__file__).resolve().parents[1]
 def load_script(name):
     path = ROOT / "raspberry_pi" / "kws" / name
     spec = importlib.util.spec_from_file_location(name.replace(".py", ""), path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_script_from_path(path: Path):
+    spec = importlib.util.spec_from_file_location(path.stem, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -395,6 +405,36 @@ class KeywordDatasetPipelineTest(unittest.TestCase):
         metrics = evaluator.compute_binary_metrics([], threshold=0.5)
 
         json.dumps(metrics)
+
+    def test_dataset_downloaders_reject_archive_traversal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            zip_path = root / "evil.zip"
+            with zipfile.ZipFile(zip_path, "w") as archive:
+                archive.writestr("../escape.txt", "boom")
+            tar_path = root / "evil.tar.gz"
+            with tarfile.open(tar_path, "w:gz") as archive:
+                info = tarfile.TarInfo("../escape.txt")
+                payload = b"boom"
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
+
+            thermal_downloader = load_script_from_path(
+                ROOT / "raspberry_pi" / "thermal" / "dataset_downloader.py"
+            )
+            dataset_downloader = load_script_from_path(
+                ROOT / "raspberry_pi" / "datasets" / "download_datasets.py"
+            )
+            destination = root / "output"
+
+            with self.assertRaises(ValueError):
+                thermal_downloader._extract_archive(zip_path, destination / "thermal")
+            with self.assertRaises(ValueError):
+                dataset_downloader._extract_archive(zip_path, destination / "datasets")
+            with self.assertRaises(ValueError):
+                thermal_downloader._extract_archive(tar_path, destination / "thermal")
+            with self.assertRaises(ValueError):
+                dataset_downloader._extract_archive(tar_path, destination / "datasets")
 
 
 if __name__ == "__main__":

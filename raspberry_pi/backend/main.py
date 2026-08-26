@@ -10,6 +10,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import shutil
 import sys
 import threading
 import time
@@ -1072,6 +1073,45 @@ async def write_upload_to_path(
     return total
 
 
+def safe_extract_zip(archive: zipfile.ZipFile, destination: Path) -> None:
+    dest_resolved = destination.resolve()
+    for member in archive.infolist():
+        member_target = (dest_resolved / member.filename).resolve()
+        if member_target != dest_resolved and dest_resolved not in member_target.parents:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsafe path in ZIP archive: {member.filename!r}",
+            )
+        if member.is_dir():
+            member_target.mkdir(parents=True, exist_ok=True)
+            continue
+        member_target.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(member) as source, member_target.open("wb") as target:
+            shutil.copyfileobj(source, target)
+
+
+def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
+    dest_resolved = destination.resolve()
+    for member in archive.getmembers():
+        member_target = (dest_resolved / member.name).resolve()
+        if member_target != dest_resolved and dest_resolved not in member_target.parents:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsafe path in tar archive: {member.name!r}",
+            )
+        if member.isdir():
+            member_target.mkdir(parents=True, exist_ok=True)
+            continue
+        if not member.isfile():
+            continue
+        extracted = archive.extractfile(member)
+        if extracted is None:
+            continue
+        member_target.parent.mkdir(parents=True, exist_ok=True)
+        with extracted, member_target.open("wb") as target:
+            shutil.copyfileobj(extracted, target)
+
+
 def read_training_metadata_rows() -> list[dict[str, str]]:
     if not KEYWORD_METADATA_PATH.exists():
         return []
@@ -2045,7 +2085,7 @@ async def training_deploy(
     onnx_file: UploadFile = File(...),
     onnx_data_file: UploadFile = File(...),
     keyword: str = Form(...),
-    request: Request = None,
+    request: Request | None = None,
 ):
     """Deploy a trained .onnx + .onnx.data model pair to the live models directory."""
     require_api_token(request)
@@ -2119,6 +2159,22 @@ async def training_deploy(
         "backed_up": backup_dir.exists(),
         "restart": restart_result,
     }
+
+
+@app.post("/api/training/models/import")
+async def training_model_import(
+    onnx_file: UploadFile = File(...),
+    onnx_data_file: UploadFile = File(...),
+    keyword: str = Form(...),
+    request: Request | None = None,
+):
+    require_api_token(request)
+    return await training_deploy(
+        onnx_file=onnx_file,
+        onnx_data_file=onnx_data_file,
+        keyword=keyword,
+        request=request,
+    )
 
 
 @app.get("/api/training/evaluate")
