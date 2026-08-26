@@ -24,9 +24,9 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
   @override
   void initState() {
     super.initState();
-    Future.microtask(() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
       if (ref.read(connectionProvider).isConnected) {
-        ref.read(trainingProvider.notifier).refresh();
+        ref.read(trainingProvider.notifier).initialize();
       }
     });
   }
@@ -58,13 +58,6 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
           ],
         ),
       );
-    }
-
-    if (!training.isLoading &&
-        training.keywords.isEmpty &&
-        training.statistics == null &&
-        training.errorMessage == null) {
-      Future.microtask(() => ref.read(trainingProvider.notifier).refresh());
     }
 
     return RefreshIndicator(
@@ -383,9 +376,69 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                           .read(trainingProvider.notifier)
                           .startJob('training'),
               ),
+              _PipelineButton(
+                label: 'Evaluate',
+                icon: Icons.analytics_outlined,
+                color: Colors.deepPurple,
+                onPressed: training.isLoading || training.activeJob != null
+                    ? null
+                    : () => ref.read(trainingProvider.notifier).evaluate(),
+              ),
+              _PipelineButton(
+                label: 'Deploy',
+                icon: Icons.upload_file_outlined,
+                color: Colors.green,
+                onPressed: training.isLoading || training.activeJob != null
+                    ? null
+                    : _showDeployDialog,
+              ),
             ],
           ),
           const SizedBox(height: 16),
+
+          if (training.evaluation != null) ...[
+            _SectionHeader(title: 'Evaluation', icon: Icons.analytics_rounded),
+            const SizedBox(height: 8),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(training.evaluation.toString()),
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
+
+          if (training.recordings.isNotEmpty) ...[
+            _SectionHeader(
+              title: 'Recordings',
+              icon: Icons.library_music_rounded,
+            ),
+            const SizedBox(height: 8),
+            ...training.recordings.map((recording) {
+              final id =
+                  recording['id']?.toString() ??
+                  recording['recording_id']?.toString();
+              return Card(
+                child: ListTile(
+                  title: Text(recording['keyword']?.toString() ?? 'Recording'),
+                  subtitle: Text(recording['speaker_id']?.toString() ?? ''),
+                  trailing: id == null
+                      ? null
+                      : IconButton(
+                          tooltip: 'Delete recording',
+                          icon: const Icon(Icons.delete_outline),
+                          onPressed:
+                              training.isLoading || training.activeJob != null
+                              ? null
+                              : () => ref
+                                    .read(trainingProvider.notifier)
+                                    .deleteRecording(id),
+                        ),
+                ),
+              );
+            }),
+            const SizedBox(height: 16),
+          ],
 
           // ── Active Job Status ──
           if (training.activeJob != null) ...[
@@ -416,6 +469,82 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
         ],
       ),
     );
+  }
+
+  Future<void> _showDeployDialog() async {
+    final keywordController = TextEditingController(
+      text: _selectedKeyword ?? '',
+    );
+    final onnxController = TextEditingController();
+    final dataController = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    final request = await showDialog<(String, String, String)>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Deploy ONNX model pair'),
+        content: Form(
+          key: formKey,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: keywordController,
+                  decoration: const InputDecoration(labelText: 'Keyword'),
+                  validator: (v) =>
+                      v == null || v.trim().isEmpty ? 'Required' : null,
+                ),
+                TextFormField(
+                  controller: onnxController,
+                  decoration: const InputDecoration(
+                    labelText: '.onnx file path',
+                  ),
+                  validator: (v) =>
+                      v == null || v.trim().isEmpty ? 'Required' : null,
+                ),
+                TextFormField(
+                  controller: dataController,
+                  decoration: const InputDecoration(
+                    labelText: '.onnx.data file path',
+                  ),
+                  validator: (v) =>
+                      v == null || v.trim().isEmpty ? 'Required' : null,
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (formKey.currentState!.validate()) {
+                Navigator.pop(context, (
+                  keywordController.text.trim(),
+                  onnxController.text.trim(),
+                  dataController.text.trim(),
+                ));
+              }
+            },
+            child: const Text('Deploy'),
+          ),
+        ],
+      ),
+    );
+    keywordController.dispose();
+    onnxController.dispose();
+    dataController.dispose();
+    if (request == null || !mounted) return;
+    await ref
+        .read(trainingProvider.notifier)
+        .deployModel(
+          keyword: request.$1,
+          onnxPath: request.$2,
+          onnxDataPath: request.$3,
+        );
   }
 
   Future<void> _handleRecordButton(TrainingState training) async {
@@ -727,18 +856,17 @@ class _JobStatusCard extends StatelessWidget {
                         Expanded(
                           child: Text(
                             job.message!,
-                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                  color: Colors.grey.shade600,
-                                ),
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: Colors.grey.shade600),
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
                       Text(
                         '${job.progress}%',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              fontWeight: FontWeight.bold,
-                              color: chipColor,
-                            ),
+                          fontWeight: FontWeight.bold,
+                          color: chipColor,
+                        ),
                       ),
                     ],
                   ),
@@ -749,8 +877,8 @@ class _JobStatusCard extends StatelessWidget {
                   child: Text(
                     job.message!,
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Colors.grey.shade600,
-                        ),
+                      color: Colors.grey.shade600,
+                    ),
                   ),
                 ),
             ],

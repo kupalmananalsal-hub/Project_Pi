@@ -42,11 +42,8 @@ class PiApiService {
   static const _defaultApiToken = 'project-pi-local-token';
 
   Options get _controlOptions => Options(
-    headers: {
-      'Authorization': 'Bearer ${apiToken ?? _defaultApiToken}',
-    },
+    headers: {'Authorization': 'Bearer ${apiToken ?? _defaultApiToken}'},
   );
-
 
   String get _backendBaseUrl =>
       'http://$host:${AppSettings.normalizeBackendPort(port)}';
@@ -109,11 +106,17 @@ class PiApiService {
   }
 
   Future<void> shutdown() async {
-    await _dio.post<void>('$_backendBaseUrl/api/shutdown', options: _controlOptions);
+    await _dio.post<void>(
+      '$_backendBaseUrl/api/shutdown',
+      options: _controlOptions,
+    );
   }
 
   Future<void> reboot() async {
-    await _dio.post<void>('$_backendBaseUrl/api/reboot', options: _controlOptions);
+    await _dio.post<void>(
+      '$_backendBaseUrl/api/reboot',
+      options: _controlOptions,
+    );
   }
 
   Future<Map<String, dynamic>> refreshServices({
@@ -298,6 +301,27 @@ class PiApiService {
     final response = await _dio.get<Map<String, dynamic>>(
       '/api/training/evaluate',
       queryParameters: {'threshold': threshold},
+    );
+    return Map<String, dynamic>.from(response.data ?? const {});
+  }
+
+  Future<Map<String, dynamic>> deployTrainingModel({
+    required String keyword,
+    required String onnxPath,
+    required String onnxDataPath,
+  }) async {
+    final formData = FormData.fromMap({
+      'keyword': keyword,
+      'onnx_file': await MultipartFile.fromFile(onnxPath),
+      'onnx_data_file': await MultipartFile.fromFile(onnxDataPath),
+    });
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/api/training/deploy',
+      data: formData,
+      options: _controlOptions.copyWith(
+        sendTimeout: const Duration(seconds: 45),
+        receiveTimeout: const Duration(seconds: 45),
+      ),
     );
     return Map<String, dynamic>.from(response.data ?? const {});
   }

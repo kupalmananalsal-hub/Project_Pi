@@ -91,6 +91,7 @@ class TrainingState {
     this.recordingElapsed = Duration.zero,
     this.microphonePermissionDenied = false,
     this.lastWavInfo,
+    this.evaluation,
   });
 
   final List<TrainingKeyword> keywords;
@@ -106,6 +107,7 @@ class TrainingState {
   final Duration recordingElapsed;
   final bool microphonePermissionDenied;
   final TrainingWavInfo? lastWavInfo;
+  final Map<String, dynamic>? evaluation;
 
   bool get isRecording => recordingStatus == TrainingRecordingStatus.recording;
   bool get isRecordingBusy =>
@@ -116,7 +118,7 @@ class TrainingState {
     List<TrainingKeyword>? keywords,
     TrainingStatistics? statistics,
     List<Map<String, dynamic>>? recordings,
-    TrainingJob? activeJob,
+    Object? activeJob = _unset,
     bool? isLoading,
     String? errorMessage,
     TrainingRecordingStatus? recordingStatus,
@@ -126,12 +128,15 @@ class TrainingState {
     Duration? recordingElapsed,
     bool? microphonePermissionDenied,
     Object? lastWavInfo = _unset,
+    Object? evaluation = _unset,
   }) {
     return TrainingState(
       keywords: keywords ?? this.keywords,
       statistics: statistics ?? this.statistics,
       recordings: recordings ?? this.recordings,
-      activeJob: activeJob ?? this.activeJob,
+      activeJob: activeJob == _unset
+          ? this.activeJob
+          : activeJob as TrainingJob?,
       isLoading: isLoading ?? this.isLoading,
       errorMessage: errorMessage,
       recordingStatus: recordingStatus ?? this.recordingStatus,
@@ -146,6 +151,9 @@ class TrainingState {
       lastWavInfo: lastWavInfo == _unset
           ? this.lastWavInfo
           : lastWavInfo as TrainingWavInfo?,
+      evaluation: evaluation == _unset
+          ? this.evaluation
+          : evaluation as Map<String, dynamic>?,
     );
   }
 }
@@ -161,6 +169,7 @@ class TrainingNotifier extends Notifier<TrainingState> {
   Timer? _recordingTimer;
   final AudioRecorder _recorder = AudioRecorder();
   TrainingRecordingUpload? _pendingUpload;
+  bool _initialized = false;
 
   @override
   TrainingState build() {
@@ -474,26 +483,40 @@ class TrainingNotifier extends Notifier<TrainingState> {
   /// Load keywords and statistics from the Pi.
   Future<void> refresh() async {
     state = state.copyWith(isLoading: true, errorMessage: null);
+    _initialized = true;
+    final api = _api;
+    final errors = <String>[];
     try {
-      final api = _api;
-      final keywords = await _loadKeywords(api);
+      state = state.copyWith(keywords: await _loadKeywords(api));
+    } catch (e) {
+      errors.add('keywords: $e');
+    }
+    try {
       final statsJson = await api.fetchTrainingStatistics();
-      final stats = TrainingStatistics.fromJson(statsJson);
-      final recordings = await api.fetchTrainingRecordings();
       state = state.copyWith(
-        keywords: keywords,
-        statistics: stats,
-        recordings: recordings,
-        isLoading: false,
+        statistics: TrainingStatistics.fromJson(statsJson),
       );
     } catch (e) {
-      state = state.copyWith(
-        keywords: state.keywords.isEmpty ? fallbackTrainingKeywords : null,
-        isLoading: false,
-        errorMessage:
-            'Could not load training data from the Pi. Using local keyword list. $e',
-      );
+      errors.add('statistics: $e');
     }
+    try {
+      state = state.copyWith(recordings: await api.fetchTrainingRecordings());
+    } catch (e) {
+      errors.add('recordings: $e');
+    }
+    state = state.copyWith(
+      isLoading: false,
+      errorMessage: errors.isEmpty
+          ? null
+          : 'Some training data could not be refreshed: ${errors.join('; ')}',
+    );
+  }
+
+  bool get hasActiveJob => state.activeJob?.isRunning ?? false;
+
+  Future<void> initialize() async {
+    if (_initialized) return;
+    await refresh();
   }
 
   Future<List<TrainingKeyword>> _loadKeywords(PiApiService api) async {
@@ -540,6 +563,12 @@ class TrainingNotifier extends Notifier<TrainingState> {
 
   /// Start a pipeline job and begin polling for completion.
   Future<void> startJob(String jobType) async {
+    if (hasActiveJob || state.isLoading) {
+      state = state.copyWith(
+        errorMessage: 'A training job is already running.',
+      );
+      return;
+    }
     state = state.copyWith(isLoading: true, errorMessage: null);
     try {
       final Map<String, dynamic> result;
@@ -560,6 +589,8 @@ class TrainingNotifier extends Notifier<TrainingState> {
         final job = TrainingJob.fromJson(result);
         state = state.copyWith(activeJob: job, isLoading: false);
         _startPolling(jobId);
+      } else {
+        throw StateError('Training backend did not return a job_id.');
       }
     } catch (e) {
       state = state.copyWith(isLoading: false, errorMessage: e.toString());
@@ -580,7 +611,13 @@ class TrainingNotifier extends Notifier<TrainingState> {
         if (!job.isRunning) {
           _pollTimer?.cancel();
           _pollTimer = null;
-          await refresh();
+          state = state.copyWith(activeJob: null, isLoading: false);
+          if (job.isSucceeded) await refresh();
+          if (job.isFailed) {
+            state = state.copyWith(
+              errorMessage: job.error ?? job.message ?? 'Training job failed.',
+            );
+          }
         }
       } catch (e) {
         consecutiveErrors++;
@@ -589,6 +626,8 @@ class TrainingNotifier extends Notifier<TrainingState> {
           _pollTimer?.cancel();
           _pollTimer = null;
           state = state.copyWith(
+            activeJob: null,
+            isLoading: false,
             errorMessage: 'Lost connection while checking job status: $e',
           );
         } else if (state.activeJob != null && state.activeJob!.isRunning) {
@@ -610,11 +649,48 @@ class TrainingNotifier extends Notifier<TrainingState> {
 
   /// Delete a recording by ID.
   Future<void> deleteRecording(String recordingId) async {
+    if (state.isLoading || hasActiveJob) return;
+    state = state.copyWith(isLoading: true, errorMessage: null);
     try {
       await _api.deleteTrainingRecording(recordingId);
       await refresh();
     } catch (e) {
       state = state.copyWith(errorMessage: e.toString());
+    } finally {
+      state = state.copyWith(isLoading: false);
+    }
+  }
+
+  Future<void> evaluate({double threshold = 0.5}) async {
+    if (state.isLoading || hasActiveJob) return;
+    state = state.copyWith(isLoading: true, errorMessage: null);
+    try {
+      final result = await _api.fetchTrainingEvaluation(threshold: threshold);
+      state = state.copyWith(evaluation: result);
+    } catch (e) {
+      state = state.copyWith(errorMessage: e.toString());
+    } finally {
+      state = state.copyWith(isLoading: false);
+    }
+  }
+
+  Future<void> deployModel({
+    required String keyword,
+    required String onnxPath,
+    required String onnxDataPath,
+  }) async {
+    if (state.isLoading || hasActiveJob) return;
+    state = state.copyWith(isLoading: true, errorMessage: null);
+    try {
+      await _api.deployTrainingModel(
+        keyword: keyword,
+        onnxPath: onnxPath,
+        onnxDataPath: onnxDataPath,
+      );
+    } catch (e) {
+      state = state.copyWith(errorMessage: e.toString());
+    } finally {
+      state = state.copyWith(isLoading: false);
     }
   }
 
