@@ -2096,10 +2096,10 @@ def restart_kws_alert_service() -> dict[str, Any]:
 
 @app.post("/api/training/deploy")
 async def training_deploy(
+    request: Request,
     onnx_file: UploadFile = File(...),
     onnx_data_file: UploadFile = File(...),
     keyword: str = Form(...),
-    request: Request | None = None,
 ):
     """Deploy a trained .onnx + .onnx.data model pair to the live models directory."""
     require_api_token(request)
@@ -2177,10 +2177,10 @@ async def training_deploy(
 
 @app.post("/api/training/models/import")
 async def training_model_import(
+    request: Request,
     onnx_file: UploadFile = File(...),
     onnx_data_file: UploadFile = File(...),
     keyword: str = Form(...),
-    request: Request | None = None,
 ):
     require_api_token(request)
     return await training_deploy(
