@@ -4,6 +4,9 @@ uvicorn
 websockets
 psutil
 numpy
+librosa
+soundfile
+coverage>=7.6.1
 pyaudio
 spidev
 gpiozero
