@@ -380,6 +380,20 @@ class AlertDecisionEngine:
             else AlertModality.VOICE_ONLY
         )
 
+        if keyword_event.get("source") == "manual_button_single":
+            return (
+                DecisionState.ADVISORY,
+                AlertModality.VOICE_ONLY,
+                "manual_button_single_advisory",
+            )
+
+        if keyword_event.get("source") == "manual_button":
+            return (
+                DecisionState.CRITICAL,
+                modality,
+                "manual_button_emergency",
+            )
+
         if raw_voice_confidence >= self.policy.critical_threshold:
             return (
                 DecisionState.CRITICAL,

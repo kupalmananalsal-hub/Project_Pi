@@ -40,6 +40,25 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<TrainingState>(trainingProvider, (prev, next) {
+      if (_selectedKeyword == null && next.keywords.isNotEmpty) {
+        final initialKw = next.keywords.first.keyword;
+        setState(() {
+          _selectedKeyword = initialKw;
+          _speakerController.text = ref
+              .read(trainingProvider.notifier)
+              .getNextSpeakerId(initialKw);
+        });
+      } else if (_selectedKeyword != null &&
+          (prev?.recordings.length != next.recordings.length ||
+              (prev?.recordingStatus != TrainingRecordingStatus.success &&
+                  next.recordingStatus == TrainingRecordingStatus.success))) {
+        _speakerController.text = ref
+            .read(trainingProvider.notifier)
+            .getNextSpeakerId(_selectedKeyword!);
+      }
+    });
+
     final training = ref.watch(trainingProvider);
     final isConnected = ref.watch(
       connectionProvider.select((c) => c.isConnected),
@@ -165,7 +184,22 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                         .toList(),
                     onChanged: training.keywords.isEmpty
                         ? null
-                        : (v) => setState(() => _selectedKeyword = v),
+                        : (v) {
+                            if (v == _selectedKeyword) return;
+                            setState(() {
+                              _selectedKeyword = v;
+                              if (v != null) {
+                                if (training.isRecorded) {
+                                  ref
+                                      .read(trainingProvider.notifier)
+                                      .cancelPendingRecording();
+                                }
+                                _speakerController.text = ref
+                                    .read(trainingProvider.notifier)
+                                    .getNextSpeakerId(v);
+                              }
+                            });
+                          },
                   ),
                   if (training.keywords.isEmpty && !training.isLoading) ...[
                     const SizedBox(height: 8),
@@ -304,22 +338,59 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                       ),
                   ],
                   const SizedBox(height: 12),
-                  FilledButton.icon(
-                    onPressed: training.isRecordingBusy || training.isLoading
-                        ? null
-                        : () => _handleRecordButton(training),
-                    icon: Icon(
-                      training.isRecording
-                          ? Icons.stop_circle_rounded
-                          : Icons.mic_rounded,
+                  if (training.isRecorded)
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed:
+                                training.isLoading || training.isRecordingBusy
+                                    ? null
+                                    : () => _handleRecordAgain(training),
+                            icon: const Icon(Icons.refresh_rounded),
+                            label: const Text('Record Again'),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: FilledButton.icon(
+                            onPressed:
+                                training.isLoading || training.isRecordingBusy
+                                    ? null
+                                    : () => _handleVerify(training),
+                            icon: const Icon(Icons.check_circle_rounded),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: Colors.green,
+                              foregroundColor: Colors.white,
+                            ),
+                            label: const Text('Verify'),
+                          ),
+                        ),
+                      ],
+                    )
+                  else
+                    FilledButton.icon(
+                      onPressed: training.isRecordingBusy || training.isLoading
+                          ? null
+                          : () => _handleRecordButton(training),
+                      icon: Icon(
+                        training.isRecording
+                            ? Icons.stop_circle_rounded
+                            : Icons.mic_rounded,
+                      ),
+                      style: training.isRecording
+                          ? FilledButton.styleFrom(
+                              backgroundColor: colorScheme.error,
+                              foregroundColor: colorScheme.onError,
+                            )
+                          : null,
+                      label: Text(switch (training.recordingStatus) {
+                        TrainingRecordingStatus.recording => 'Stop Recording',
+                        TrainingRecordingStatus.stopping => 'Stopping...',
+                        TrainingRecordingStatus.uploading => 'Uploading...',
+                        _ => 'Record Sample',
+                      }),
                     ),
-                    label: Text(switch (training.recordingStatus) {
-                      TrainingRecordingStatus.recording => 'Stop and Upload',
-                      TrainingRecordingStatus.stopping => 'Stopping...',
-                      TrainingRecordingStatus.uploading => 'Uploading...',
-                      _ => 'Record Sample',
-                    }),
-                  ),
                 ],
               ),
             ),
@@ -552,7 +623,7 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
     if (training.isRecording) {
       final upload = _currentUploadRequest();
       if (upload == null) return;
-      final uploaded = await notifier.stopRecordingAndUpload(
+      final stopped = await notifier.stopRecordingForVerification(
         keyword: upload.keyword,
         speakerId: upload.speakerId,
         ageGroup: upload.ageGroup,
@@ -560,16 +631,11 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
         distanceM: upload.distanceM,
         noiseCondition: upload.noiseCondition,
       );
-      if (!mounted) return;
-      final errorMessage = ref.read(trainingProvider).errorMessage;
+      if (!mounted || !stopped) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            uploaded
-                ? 'Recording uploaded.'
-                : errorMessage ??
-                      'Upload failed. Check the Pi backend and try again.',
-          ),
+        const SnackBar(
+          content: Text('Sample recorded. Tap Verify to save or Record Again.'),
+          duration: Duration(seconds: 2),
         ),
       );
       return;
@@ -582,6 +648,46 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Could not start microphone recording.')),
     );
+  }
+
+  Future<void> _handleRecordAgain(TrainingState training) async {
+    final notifier = ref.read(trainingProvider.notifier);
+    notifier.cancelPendingRecording();
+    final upload = _currentUploadRequest();
+    if (upload == null) return;
+    final started = await notifier.startRecording();
+    if (!mounted || started) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Could not restart microphone recording.')),
+    );
+  }
+
+  Future<void> _handleVerify(TrainingState training) async {
+    final notifier = ref.read(trainingProvider.notifier);
+    final uploaded = await notifier.verifyAndUpload();
+    if (!mounted) return;
+    final errorMessage = ref.read(trainingProvider).errorMessage;
+    if (uploaded) {
+      if (_selectedKeyword != null) {
+        _speakerController.text =
+            notifier.getNextSpeakerId(_selectedKeyword!);
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Recording verified and uploaded! Ready for next recording or validation.'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            errorMessage ??
+                'Upload failed. Check the Pi backend and try again.',
+          ),
+        ),
+      );
+    }
   }
 
   TrainingRecordingUpload? _currentUploadRequest() {
@@ -751,6 +857,11 @@ class _RecordingStatusBanner extends StatelessWidget {
         Icons.stop_circle_outlined,
         'Stopping recording...',
         theme.colorScheme.primary,
+      ),
+      TrainingRecordingStatus.recorded => (
+        Icons.check_circle_outline_rounded,
+        'Recorded. Tap "Verify" to confirm or "Record Again".',
+        Colors.teal,
       ),
       TrainingRecordingStatus.uploading => (
         Icons.cloud_upload_outlined,

@@ -269,6 +269,12 @@ class AlertsController extends Notifier<AlertsState> {
   }
 
   void _handleLegacyAlert(AlertEvent event) {
+    if (event.source == 'manual_button_single') {
+      _showKeywordNotice(event);
+      unawaited(ref.read(alertRuntimeServiceProvider).playSoftThermalBeep());
+      return;
+    }
+
     if (!event.shouldShowDirectionGuidance) {
       return;
     }
@@ -373,6 +379,7 @@ class AlertsController extends Notifier<AlertsState> {
     final pending = _pendingVoiceEvent;
     final pendingStartedAt = _pendingVoiceStartedAt;
     if (pending != null &&
+        pending.source != 'manual_button_single' &&
         pendingStartedAt != null &&
         DateTime.now().difference(pendingStartedAt) <=
             _thermalConfirmationWindow) {
@@ -410,6 +417,11 @@ class AlertsController extends Notifier<AlertsState> {
     AlertEvent event,
     ThermalFrame? thermalFrame,
   ) async {
+    if (event.source == 'manual_button_single') {
+      _showKeywordNotice(event);
+      unawaited(ref.read(alertRuntimeServiceProvider).playSoftThermalBeep());
+      return;
+    }
     await _startFullEmergencyAlert(
       event,
       thermalFrame,
@@ -419,9 +431,19 @@ class AlertsController extends Notifier<AlertsState> {
   }
 
   Future<void> _startAuthoritativeEmergencyAlert(AlertEvent event) async {
-    final isManualButton = event.source == 'manual_button';
+    final isDoubleTapManual = event.source == 'manual_button';
+    final isSingleTapManual = event.source == 'manual_button_single';
+
+    if (isSingleTapManual || event.decisionState == AlertDecisionState.advisory) {
+      if (event.isRecognizedConfiguredKeyword) {
+        _showKeywordNotice(event);
+        unawaited(ref.read(alertRuntimeServiceProvider).playSoftThermalBeep());
+      }
+      return;
+    }
+
     final hasHuman =
-        isManualButton || event.humanDetected || _hasThermalPresenceFor(event);
+        isDoubleTapManual || event.humanDetected || _hasThermalPresenceFor(event);
     if (!hasHuman) {
       // Keyword detected but no thermal human — show status badge + soft beep.
       // No full-screen alert, no alarm, no vibration.

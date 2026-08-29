@@ -18,6 +18,7 @@ enum TrainingRecordingStatus {
   idle,
   recording,
   stopping,
+  recorded,
   uploading,
   success,
   error,
@@ -110,6 +111,7 @@ class TrainingState {
   final Map<String, dynamic>? evaluation;
 
   bool get isRecording => recordingStatus == TrainingRecordingStatus.recording;
+  bool get isRecorded => recordingStatus == TrainingRecordingStatus.recorded;
   bool get isRecordingBusy =>
       recordingStatus == TrainingRecordingStatus.stopping ||
       recordingStatus == TrainingRecordingStatus.uploading;
@@ -223,7 +225,7 @@ class TrainingNotifier extends Notifier<TrainingState> {
     }
   }
 
-  Future<bool> stopRecordingAndUpload({
+  Future<bool> stopRecordingForVerification({
     required String keyword,
     required String speakerId,
     required String ageGroup,
@@ -305,7 +307,13 @@ class TrainingNotifier extends Notifier<TrainingState> {
         distanceM: distanceM,
         noiseCondition: noiseCondition,
       );
-      return _uploadPendingRecording();
+      state = state.copyWith(
+        recordingStatus: TrainingRecordingStatus.recorded,
+        recordingPath: uploadPath,
+        lastUploadPath: uploadPath,
+        errorMessage: null,
+      );
+      return true;
     } catch (e) {
       state = state.copyWith(
         recordingStatus: TrainingRecordingStatus.error,
@@ -313,6 +321,91 @@ class TrainingNotifier extends Notifier<TrainingState> {
       );
       return false;
     }
+  }
+
+  Future<bool> verifyAndUpload() async {
+    if (_pendingUpload == null) {
+      state = state.copyWith(
+        recordingStatus: TrainingRecordingStatus.error,
+        errorMessage: 'No recorded sample is available to verify and upload.',
+      );
+      return false;
+    }
+    return _uploadPendingRecording();
+  }
+
+  void cancelPendingRecording() {
+    _pendingUpload = null;
+    state = state.copyWith(
+      recordingStatus: TrainingRecordingStatus.idle,
+      errorMessage: null,
+    );
+  }
+
+  String getNextSpeakerId(String keywordOrSlug) {
+    if (keywordOrSlug.trim().isEmpty) return 'speaker_01';
+
+    String slug = keywordOrSlug.trim().toLowerCase();
+    for (final kw in state.keywords) {
+      if (kw.keyword.toLowerCase() == slug || kw.slug.toLowerCase() == slug) {
+        slug = kw.slug;
+        break;
+      }
+    }
+    slug = slug
+        .replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_')
+        .replaceAll(RegExp(r'_+'), '_');
+    if (slug.endsWith('_')) slug = slug.substring(0, slug.length - 1);
+    if (slug.isEmpty) slug = 'speaker';
+
+    int maxIndex = 0;
+    final prefix = '${slug}_';
+
+    for (final rec in state.recordings) {
+      final speakerId = rec['speaker_id']?.toString() ?? '';
+      if (speakerId.startsWith(prefix)) {
+        final suffix = speakerId.substring(prefix.length);
+        final num = int.tryParse(suffix);
+        if (num != null && num > maxIndex) {
+          maxIndex = num;
+        }
+      }
+    }
+
+    if (state.statistics != null) {
+      for (final speakerId in state.statistics!.bySpeaker.keys) {
+        if (speakerId.startsWith(prefix)) {
+          final suffix = speakerId.substring(prefix.length);
+          final num = int.tryParse(suffix);
+          if (num != null && num > maxIndex) {
+            maxIndex = num;
+          }
+        }
+      }
+    }
+
+    final nextNumber = maxIndex + 1;
+    return '${slug}_${nextNumber.toString().padLeft(2, '0')}';
+  }
+
+  Future<bool> stopRecordingAndUpload({
+    required String keyword,
+    required String speakerId,
+    required String ageGroup,
+    required String gender,
+    required double distanceM,
+    required String noiseCondition,
+  }) async {
+    final stopped = await stopRecordingForVerification(
+      keyword: keyword,
+      speakerId: speakerId,
+      ageGroup: ageGroup,
+      gender: gender,
+      distanceM: distanceM,
+      noiseCondition: noiseCondition,
+    );
+    if (!stopped) return false;
+    return verifyAndUpload();
   }
 
   Future<bool> retryUpload() async {

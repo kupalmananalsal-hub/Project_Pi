@@ -218,6 +218,33 @@ void main() {
   );
 
   test(
+    'single tap manual button produces keyword notice only — no full-screen alert',
+    () async {
+      final runtime = FakeAlertRuntimeService();
+      final container = makeContainer(runtime);
+      final controller = container.read(alertsProvider.notifier);
+      final event = eventFrom(
+        decisionState: 'advisory',
+        alertLevel: 'visual_only',
+        alertModality: 'voice_only',
+        thermalState: 'positive',
+        humanDetected: true,
+        confidence: 0.75,
+        source: 'manual_button_single',
+      );
+
+      controller.handleAlertForTest(event);
+      await drainAsync();
+
+      final state = container.read(alertsProvider);
+      expect(state.keywordNotice, event);
+      expect(state.activeAlert, isNull);
+      expect(runtime.emergencyStarts, 0);
+      expect(runtime.softBeeps, 1);
+    },
+  );
+
+  test(
     'authoritative advisory is not upgraded by later local thermal state',
     () async {
       final runtime = FakeAlertRuntimeService();

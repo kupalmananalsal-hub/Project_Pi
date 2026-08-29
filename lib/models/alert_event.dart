@@ -225,7 +225,8 @@ class AlertEvent {
         source == 'vosk' ||
         source == 'snowboy' ||
         source == 'wav2vec2' ||
-        source == 'manual_button';
+        source == 'manual_button' ||
+        source == 'manual_button_single';
   }
 
   bool get hasAuthoritativeDecision =>

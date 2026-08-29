@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -204,13 +205,19 @@ class AlertStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path)
-        connection.row_factory = sqlite3.Row
-        return connection
+    @contextmanager
+    def _connection(self):
+        """Yield a transactional SQLite connection and guarantee close on exit."""
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
-        with self.lock, self._connect() as connection:
+        with self.lock, self._connection() as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS alerts (
@@ -220,10 +227,25 @@ class AlertStore:
                     confidence REAL NOT NULL,
                     direction TEXT,
                     human_detected INTEGER DEFAULT 0,
-                    source TEXT DEFAULT 'openwakeword'
+                    source TEXT DEFAULT 'openwakeword',
+                    decision_state TEXT,
+                    alert_modality TEXT
                 )
                 """
             )
+            # Migrate existing databases that lack the new columns.
+            existing = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(alerts)").fetchall()
+            }
+            for col, col_type in (
+                ("decision_state", "TEXT"),
+                ("alert_modality", "TEXT"),
+            ):
+                if col not in existing:
+                    connection.execute(
+                        f"ALTER TABLE alerts ADD COLUMN {col} {col_type}"
+                    )
 
     def insert(self, event: dict[str, Any]) -> dict[str, Any]:
         stored = dict(event)
@@ -235,8 +257,10 @@ class AlertStore:
         stored["direction"] = str(stored.get("direction") or "front")
         stored["human_detected"] = bool(stored.get("human_detected", False))
         stored["source"] = str(stored.get("source") or "openwakeword")
+        stored["decision_state"] = str(stored.get("decision_state") or "")
+        stored["alert_modality"] = str(stored.get("alert_modality") or "")
 
-        with self.lock, self._connect() as connection:
+        with self.lock, self._connection() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO alerts (
@@ -245,9 +269,11 @@ class AlertStore:
                     confidence,
                     direction,
                     human_detected,
-                    source
+                    source,
+                    decision_state,
+                    alert_modality
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stored["timestamp"],
@@ -256,6 +282,8 @@ class AlertStore:
                     stored["direction"],
                     1 if stored["human_detected"] else 0,
                     stored["source"],
+                    stored["decision_state"],
+                    stored["alert_modality"],
                 ),
             )
             stored["id"] = cursor.lastrowid
@@ -263,10 +291,11 @@ class AlertStore:
 
     def list_recent(self, limit: int = 100) -> list[dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 500))
-        with self.lock, self._connect() as connection:
+        with self.lock, self._connection() as connection:
             rows = connection.execute(
                 """
-                SELECT id, timestamp, keyword, confidence, direction, human_detected, source
+                SELECT id, timestamp, keyword, confidence, direction,
+                       human_detected, source, decision_state, alert_modality
                 FROM alerts
                 ORDER BY id DESC
                 LIMIT ?
@@ -284,19 +313,21 @@ class AlertStore:
                 "direction": row["direction"] or "front",
                 "human_detected": bool(row["human_detected"]),
                 "source": row["source"] or "openwakeword",
+                "decision_state": row["decision_state"] or "",
+                "alert_modality": row["alert_modality"] or "",
             }
             for row in rows
         ]
 
     def clear(self) -> int:
         with self.lock:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 row = connection.execute("SELECT COUNT(*) AS count FROM alerts").fetchone()
                 deleted = int(row["count"] if row else 0)
                 connection.execute("DELETE FROM alerts")
                 connection.commit()
 
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute("VACUUM")
             return deleted
 
@@ -309,7 +340,19 @@ class AlertHub:
         if not event.get("timestamp"):
             event["timestamp"] = datetime.now(timezone.utc).isoformat()
         for client_queue in list(self.clients):
-            await client_queue.put(event)
+            try:
+                client_queue.put_nowait(event)
+            except asyncio.QueueFull:
+                # Drop oldest event to make room; prevents blocking broadcast
+                # when one client has stalled or disconnected.
+                try:
+                    client_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    client_queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    pass
 
     async def connect(self):
         client_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
@@ -1023,7 +1066,14 @@ def safe_dataset_path(relative_path: str) -> Path:
 
 
 def require_api_token(request: Request | None) -> None:
+    """Validate Bearer token for HTTP requests.
+
+    When ``request`` is None (direct function call from tests), skip
+    validation.  When a real HTTP request is present, enforce the token
+    even if the token is not configured (deny by default on HTTP).
+    """
     if request is None:
+        # Called directly from unit tests — allow.
         return
     expected = API_TOKEN.strip()
     if not expected:
@@ -2096,7 +2146,7 @@ def restart_kws_alert_service() -> dict[str, Any]:
 
 @app.post("/api/training/deploy")
 async def training_deploy(
-    request: Request,
+    request: Request = None,
     onnx_file: UploadFile = File(...),
     onnx_data_file: UploadFile = File(...),
     keyword: str = Form(...),
@@ -2177,7 +2227,7 @@ async def training_deploy(
 
 @app.post("/api/training/models/import")
 async def training_model_import(
-    request: Request,
+    request: Request = None,
     onnx_file: UploadFile = File(...),
     onnx_data_file: UploadFile = File(...),
     keyword: str = Form(...),

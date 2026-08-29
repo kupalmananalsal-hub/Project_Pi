@@ -97,7 +97,7 @@ void main() {
     expect(prefs.getInt('port'), 9000);
   });
 
-  testWidgets('Tapping HELP button triggers alert and shows Alert sent toast', (
+  testWidgets('Tapping HELP button once sends single-tap notice', (
     tester,
   ) async {
     final fakeService = FakeResidentAlertService()..shouldSucceed = true;
@@ -111,7 +111,33 @@ void main() {
 
     await tester.tap(find.text('HELP'));
     await tester.pump(); // Start press animation
-    await tester.pump(const Duration(milliseconds: 300)); // Complete animation & send
+    await tester.pump(const Duration(milliseconds: 700)); // Complete single tap timer & send
+    await tester.pumpAndSettle();
+
+    expect(fakeService.manualAlertCalls, 1);
+    expect(fakeService.lastKeyword, 'manual');
+    expect(fakeService.lastConfidence, 0.75);
+    expect(fakeService.lastSource, 'manual_button_single');
+
+    expect(find.text('Notice sent'), findsOneWidget);
+  });
+
+  testWidgets('Double-tapping HELP button sends full emergency alert', (
+    tester,
+  ) async {
+    final fakeService = FakeResidentAlertService()..shouldSucceed = true;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ResidentModeScreen(alertService: fakeService),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.text('HELP'));
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(find.text('HELP'));
+    await tester.pump();
     await tester.pumpAndSettle();
 
     expect(fakeService.manualAlertCalls, 1);
@@ -119,10 +145,10 @@ void main() {
     expect(fakeService.lastConfidence, 1.0);
     expect(fakeService.lastSource, 'manual_button');
 
-    expect(find.text('Alert sent'), findsOneWidget);
+    expect(find.text('EMERGENCY ALERT SENT'), findsOneWidget);
   });
 
-  testWidgets('Failed alert shows Failed to send toast', (tester) async {
+  testWidgets('Failed alert shows Failed to send alert toast', (tester) async {
     final fakeService = FakeResidentAlertService()..shouldSucceed = false;
 
     await tester.pumpWidget(
@@ -134,11 +160,11 @@ void main() {
 
     await tester.tap(find.text('HELP'));
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump(const Duration(milliseconds: 700));
     await tester.pumpAndSettle();
 
     expect(fakeService.manualAlertCalls, 1);
-    expect(find.text('Failed to send'), findsOneWidget);
+    expect(find.text('Failed to send alert'), findsOneWidget);
   });
 
   testWidgets('ResidentApp builds successfully with black theme and saved host', (
