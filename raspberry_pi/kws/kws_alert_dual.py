@@ -1183,6 +1183,7 @@ def main() -> None:
             adaptive_sensitivity.update_for_snr(float(packet.get("snr_db", 0.0)))
 
             openwakeword_matches: list[dict[str, object]] = []
+            openwakeword_posted = False
             if speech_active:
                 for wake_word in preprocessor_result["wake_words"]:
                     if not isinstance(wake_word, dict):
@@ -1198,7 +1199,6 @@ def main() -> None:
                         continue
                     openwakeword_matches.append(wake_word)
 
-                openwakeword_posted = False
                 openwakeword_matches.sort(
                     key=lambda wake_word: float(wake_word.get("score", 0.0)),
                     reverse=True,
@@ -1252,8 +1252,9 @@ def main() -> None:
                                 flush=True,
                             )
                         next_openwakeword_score_log_at = now + 1.0
-                    put_latest(vosk_queue, packet)
-                    put_latest(snowboy_queue, packet)
+            if not openwakeword_posted:
+                put_latest(vosk_queue, packet)
+                put_latest(snowboy_queue, packet)
 
             if now >= next_noise_log_at:
                 print(
