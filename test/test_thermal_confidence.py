@@ -249,6 +249,19 @@ class ThermalConfidenceTest(unittest.TestCase):
                          "Wide flat blob must not be detected as human")
         self.assertIn("aspect_ratio_rejected", result["details"].get("reason", ""))
 
+    def test_fallen_human_horizontal_aspect_ratio_accepted(self):
+        """A broad horizontal human signature with sufficient coverage is accepted."""
+        frame = np.full((24, 32), 24.0, dtype=np.float32)
+        # 4 rows x 20 cols -> aspect_ratio = 0.20, coverage ~= 10.4%.
+        frame[10:14, 6:26] = 34.2
+        scorer = ThermalConfidenceScorer()
+
+        result = scorer.analyze(frame)
+
+        self.assertTrue(result["human_detected"],
+                        "A sufficiently large prone human signature should be accepted")
+        self.assertGreaterEqual(result["body_coverage"], 0.08)
+
     # ── False-positive: max coverage ─────────────────────────────────────────
 
     def test_oversized_blob_rejected_by_max_coverage(self):

@@ -130,6 +130,8 @@ class ThermalConfidenceScorer:
     # Dominant cluster height/width must lie within this range.
     # Wide, flat objects (laptops, heaters) typically have ratios < 0.3.
     MIN_CLUSTER_ASPECT_RATIO = 0.3
+    PRONE_MIN_CLUSTER_ASPECT_RATIO = 0.20
+    PRONE_MIN_BODY_COVERAGE = 0.08
     MAX_CLUSTER_ASPECT_RATIO = 5.0
     # Reject detections whose warm-pixel coverage exceeds this fraction.
     # A real human body never fills more than ~40 % of the 32×24 field of view.
@@ -470,7 +472,12 @@ class ThermalConfidenceScorer:
         # Flat wide objects (laptops, heaters) produce aspect ratios well below 0.3.
         if dominant.width > 0:
             aspect_ratio = dominant.height / dominant.width
-            if not (self.MIN_CLUSTER_ASPECT_RATIO <= aspect_ratio <= self.MAX_CLUSTER_ASPECT_RATIO):
+            effective_min_aspect_ratio = (
+                self.PRONE_MIN_CLUSTER_ASPECT_RATIO
+                if body_coverage >= self.PRONE_MIN_BODY_COVERAGE
+                else self.MIN_CLUSTER_ASPECT_RATIO
+            )
+            if not (effective_min_aspect_ratio <= aspect_ratio <= self.MAX_CLUSTER_ASPECT_RATIO):
                 return self._no_human(f'aspect_ratio_rejected_{aspect_ratio:.2f}')
         human_temps = temps[human_mask]
         temp_variance = float(np.std(human_temps))
