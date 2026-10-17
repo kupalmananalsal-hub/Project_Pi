@@ -94,6 +94,11 @@ dataset/audio/keyword_dataset/**/*.tflite
 dataset/audio/keyword_dataset/**/*.keras
 !dataset/**/.gitkeep
 !dataset/audio/keyword_dataset/README.md
+!dataset/audio/keyword_dataset/negative/README.md
+
+# Downloaded dataset archives — never commit these (can be several GB)
+*.tar.gz
+*.tgz
 
 # Local editor settings
 .vscode/

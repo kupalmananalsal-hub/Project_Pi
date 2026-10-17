@@ -62,6 +62,7 @@ from thermal_confidence import ThermalConfidenceScorer
 from keyword_dataset_common import (
     KEYWORDS as TRAINING_KEYWORDS,
     METADATA_COLUMNS as TRAINING_METADATA_COLUMNS,
+    METADATA_LOCK,
     append_metadata as append_training_metadata,
     ensure_dataset_layout as ensure_training_dataset_layout,
     slugify_keyword,
@@ -104,7 +105,7 @@ MAX_ONNX_UPLOAD_BYTES = int(os.getenv("TRAINING_ONNX_MAX_BYTES", str(128 * 1024 
 MAX_ONNX_DATA_UPLOAD_BYTES = int(
     os.getenv("TRAINING_ONNX_DATA_MAX_BYTES", str(256 * 1024 * 1024))
 )
-TRAINING_METADATA_LOCK = threading.Lock()
+TRAINING_METADATA_LOCK = METADATA_LOCK  # shared with KWS CLI tools via keyword_dataset_common
 TRAINING_JOBS: dict[str, dict[str, Any]] = {}
 TRAINING_JOB_TASKS: dict[str, asyncio.Task[Any]] = {}
 TRAINING_JOBS_LOCK = asyncio.Lock()

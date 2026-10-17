@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import re
+import threading
 from pathlib import Path
 
 
@@ -49,6 +50,11 @@ DEFAULT_DATASET_DIR = (
     Path(__file__).resolve().parents[2] / "dataset" / "audio" / "keyword_dataset"
 )
 
+# Module-level lock used by all KWS CLI tools.  The backend imports and aliases
+# this as TRAINING_METADATA_LOCK so both code paths share the same mutex.
+# Uses RLock so that callers holding the lock can reentrantly call append_metadata().
+METADATA_LOCK = threading.RLock()
+
 
 def slugify_keyword(keyword: str) -> str:
     """Convert a spoken keyword phrase into a stable folder-safe slug."""
@@ -72,14 +78,19 @@ def ensure_dataset_layout(dataset_dir: Path) -> None:
 
 
 def append_metadata(metadata_path: Path, row: dict[str, object]) -> None:
-    """Append one metadata row, creating the CSV header when needed."""
+    """Append one metadata row, creating the CSV header when needed.
+
+    Thread-safe: acquires METADATA_LOCK before writing so concurrent callers
+    (the download script, the recorder, and the backend) do not interleave rows.
+    """
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    exists = metadata_path.exists()
-    with metadata_path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=METADATA_COLUMNS)
-        if not exists:
-            writer.writeheader()
-        writer.writerow({column: row.get(column, "") for column in METADATA_COLUMNS})
+    with METADATA_LOCK:
+        exists = metadata_path.exists()
+        with metadata_path.open("a", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=METADATA_COLUMNS)
+            if not exists:
+                writer.writeheader()
+            writer.writerow({column: row.get(column, "") for column in METADATA_COLUMNS})
 
 
 def wav_files(root: Path) -> list[Path]:

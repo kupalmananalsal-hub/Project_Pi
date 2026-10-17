@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -127,6 +128,65 @@ def _row_split(
     return "train"
 
 
+
+def _negative_source_group(
+    relative_path: str,
+    metadata_by_path: dict[str, dict[str, str]],
+) -> str:
+    """Return a stable group key for a negative file based on its source stem.
+
+    Chunks originating from the same source recording share a key so they are
+    kept together in a single train / val / test partition (data-leakage prevention).
+
+    Resolution order:
+    1. ``notes`` field in metadata: ``source=<stem>;chunk_index=<n>``
+    2. Filename pattern ``noise_<source_stem>_<index:04d>.wav``
+    3. Full filename as fallback (standalone files stay in their own group)
+    """
+    if relative_path in metadata_by_path:
+        notes = metadata_by_path[relative_path].get("notes", "")
+        for token in notes.split(";"):
+            token = token.strip()
+            if token.startswith("source="):
+                src = token.removeprefix("source=").strip()
+                return Path(src).stem
+    filename = Path(relative_path).name
+    match = re.match(r"^noise_(.+)_\d{4}\.wav$", filename)
+    if match:
+        return match.group(1)
+    return filename
+
+
+def _build_grouped_negative_split(
+    negatives: list[str],
+    metadata_by_path: dict[str, dict[str, str]],
+    rng: random.Random,
+) -> dict[str, list[str]]:
+    """Split negative files by source group to prevent cross-split leakage.
+
+    Files from the same source recording (e.g. all chunks of
+    ``doing_the_dishes.wav``) are always assigned to the *same* split partition
+    so their shared acoustic characteristics cannot leak between train and eval.
+    """
+    # Bucket each file by its source group
+    groups: dict[str, list[str]] = {}
+    for path in negatives:
+        key = _negative_source_group(path, metadata_by_path)
+        groups.setdefault(key, []).append(path)
+
+    # Shuffle group keys deterministically, then split the keys
+    sorted_keys = sorted(groups)
+    rng.shuffle(sorted_keys)
+    key_split = _split(sorted_keys, require_validation=True)
+
+    # Expand each split from group keys back to individual file paths
+    result: dict[str, list[str]] = {"train": [], "val": [], "test": []}
+    for split_name, keys in key_split.items():
+        for key in keys:
+            result[split_name].extend(groups[key])
+    return result
+
+
 def build_split_manifest(dataset_dir: Path, seed: int = 1337) -> dict[str, object]:
     dataset_dir = dataset_dir.resolve()
     rng = random.Random(seed)
@@ -134,10 +194,14 @@ def build_split_manifest(dataset_dir: Path, seed: int = 1337) -> dict[str, objec
         path.relative_to(dataset_dir).as_posix()
         for path in wav_files(dataset_dir / "negative")
     ]
-    rng.shuffle(negatives)
-    negative_split = _split(negatives)
 
     metadata_rows = read_metadata(dataset_dir)
+    metadata_by_path = {row["path"]: row for row in metadata_rows}
+
+    # Group negative files by source stem so all chunks from the same source
+    # recording land in the same split partition (prevents data leakage).
+    negative_split = _build_grouped_negative_split(negatives, metadata_by_path, rng)
+
     positive_rows = (
         _positive_files_from_metadata(metadata_rows)
         if metadata_rows
