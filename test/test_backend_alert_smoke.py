@@ -158,6 +158,31 @@ class FakeAlertHub:
         self.published.append(dict(event))
 
 
+class DisconnectTrackingHub:
+    def __init__(self):
+        self.queue = asyncio.Queue()
+        self.disconnected = []
+
+    async def connect(self):
+        return self.queue
+
+    def disconnect(self, client_queue):
+        self.disconnected.append(client_queue)
+
+
+class DisconnectingWebSocket:
+    def __init__(self, disconnect_type):
+        self.disconnect_type = disconnect_type
+        self.accepted = False
+
+    async def accept(self):
+        self.accepted = True
+
+    async def send_json(self, payload):
+        del payload
+        raise self.disconnect_type()
+
+
 class FakeAlertStore:
     def __init__(self):
         self.inserted = []
@@ -340,6 +365,22 @@ class BackendAlertSmokeTest(unittest.TestCase):
                 self.assertEqual(event["keyword"], "help")
                 self.assertEqual(event["confidence"], 0.95)
                 self.assertEqual(module.alerts.published[-1]["decision_state"], "critical")
+            finally:
+                self.cleanup_backend(module, previous)
+
+    def test_websocket_disconnect_always_unregisters_client(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_backend_module(temp_dir)
+            try:
+                hub = DisconnectTrackingHub()
+                module.alerts = hub
+                module.alert_store = types.SimpleNamespace(list_recent=lambda limit: [])
+                websocket = DisconnectingWebSocket(module.WebSocketDisconnect)
+
+                asyncio.run(module.ws_alerts(websocket))
+
+                self.assertTrue(websocket.accepted)
+                self.assertEqual(hub.disconnected, [hub.queue])
             finally:
                 self.cleanup_backend(module, previous)
 

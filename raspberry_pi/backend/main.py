@@ -1678,6 +1678,8 @@ async def ws_alerts(websocket: WebSocket):
             event = await client_queue.get()
             await websocket.send_json(alert_with_type(event, "live"))
     except WebSocketDisconnect:
+        pass
+    finally:
         alerts.disconnect(client_queue)
 
 
