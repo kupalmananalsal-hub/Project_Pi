@@ -75,6 +75,7 @@ class ThermalCluster:
     avg_temp_c: float
     width: int
     height: int
+    points: tuple[tuple[int, int], ...] = ()
 
     def to_dict(self) -> dict[str, float | int]:
         return {
@@ -796,6 +797,7 @@ class ThermalConfidenceScorer:
                     avg_temp_c=float(np.mean(temps)),
                     width=int(np.max(xs) - np.min(xs) + 1),
                     height=int(np.max(ys) - np.min(ys) + 1),
+                    points=tuple(points),
                 ))
         clusters.sort(key=lambda item: item.pixel_count, reverse=True)
         return clusters
@@ -822,16 +824,8 @@ class ThermalConfidenceScorer:
     def _cluster_temperatures(
         self, cluster: ThermalCluster, mask: np.ndarray, frame: np.ndarray,
     ) -> np.ndarray:
-        values = []
-        for y in range(self.height):
-            for x in range(self.width):
-                if not mask[y, x]:
-                    continue
-                if (
-                    abs(x - cluster.center_x) <= max(cluster.width, 1)
-                    and abs(y - cluster.center_y) <= max(cluster.height, 1)
-                ):
-                    values.append(frame[y, x])
+        del mask
+        values = [frame[y, x] for x, y in cluster.points]
         return np.asarray(values or [cluster.avg_temp_c], dtype=np.float32)
 
     def _classify_body_part(self, coverage: float) -> str:

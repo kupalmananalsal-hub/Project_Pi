@@ -4,10 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/app_settings.dart';
 
 class ResidentSettingsScreen extends StatefulWidget {
-  const ResidentSettingsScreen({
-    super.key,
-    this.isInitialSetup = false,
-  });
+  const ResidentSettingsScreen({super.key, this.isInitialSetup = false});
 
   final bool isInitialSetup;
 
@@ -58,11 +55,12 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
       _isSaving = true;
     });
 
-    final host = _hostController.text.trim();
-    final port = int.tryParse(_portController.text.trim()) ?? AppSettings.defaultPort;
+    final host = AppSettings.normalizeBackendHost(_hostController.text);
+    final port =
+        int.tryParse(_portController.text.trim()) ?? AppSettings.defaultPort;
 
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('host', host);
+    await prefs.setString('host', host!);
     await prefs.setInt('port', port);
 
     if (mounted) {
@@ -120,7 +118,10 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
             )
           : SafeArea(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 28.0, vertical: 20.0),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 28.0,
+                  vertical: 20.0,
+                ),
                 child: Form(
                   key: _formKey,
                   child: Column(
@@ -138,13 +139,19 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
                       TextFormField(
                         controller: _hostController,
                         key: const ValueKey('pi-ip-field'),
-                        style: const TextStyle(color: Colors.white, fontSize: 16),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                        ),
                         decoration: InputDecoration(
                           labelText: 'Raspberry Pi IP Address',
                           labelStyle: const TextStyle(color: Colors.white70),
                           hintText: 'e.g. 10.213.117.220',
                           hintStyle: TextStyle(color: Colors.grey.shade600),
-                          prefixIcon: const Icon(Icons.lan, color: Colors.white70),
+                          prefixIcon: const Icon(
+                            Icons.lan,
+                            color: Colors.white70,
+                          ),
                           filled: true,
                           fillColor: const Color(0xFF1E1E1E),
                           enabledBorder: OutlineInputBorder(
@@ -153,7 +160,10 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
                           ),
                           focusedBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(14),
-                            borderSide: const BorderSide(color: Color(0xFFE53935), width: 2),
+                            borderSide: const BorderSide(
+                              color: Color(0xFFE53935),
+                              width: 2,
+                            ),
                           ),
                           errorBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(14),
@@ -161,7 +171,10 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
                           ),
                           focusedErrorBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(14),
-                            borderSide: BorderSide(color: Colors.red.shade400, width: 2),
+                            borderSide: BorderSide(
+                              color: Colors.red.shade400,
+                              width: 2,
+                            ),
                           ),
                         ),
                         keyboardType: TextInputType.text,
@@ -170,6 +183,9 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
                           if (value == null || value.trim().isEmpty) {
                             return 'Please enter the Pi IP address';
                           }
+                          if (AppSettings.normalizeBackendHost(value) == null) {
+                            return 'Enter a raw IP address or hostname';
+                          }
                           return null;
                         },
                       ),
@@ -177,13 +193,19 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
                       TextFormField(
                         controller: _portController,
                         key: const ValueKey('pi-port-field'),
-                        style: const TextStyle(color: Colors.white, fontSize: 16),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                        ),
                         decoration: InputDecoration(
                           labelText: 'Port',
                           labelStyle: const TextStyle(color: Colors.white70),
                           hintText: '8765',
                           hintStyle: TextStyle(color: Colors.grey.shade600),
-                          prefixIcon: const Icon(Icons.tag, color: Colors.white70),
+                          prefixIcon: const Icon(
+                            Icons.tag,
+                            color: Colors.white70,
+                          ),
                           filled: true,
                           fillColor: const Color(0xFF1E1E1E),
                           enabledBorder: OutlineInputBorder(
@@ -192,7 +214,10 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
                           ),
                           focusedBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(14),
-                            borderSide: const BorderSide(color: Color(0xFFE53935), width: 2),
+                            borderSide: const BorderSide(
+                              color: Color(0xFFE53935),
+                              width: 2,
+                            ),
                           ),
                           errorBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(14),
@@ -200,7 +225,10 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
                           ),
                           focusedErrorBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(14),
-                            borderSide: BorderSide(color: Colors.red.shade400, width: 2),
+                            borderSide: BorderSide(
+                              color: Colors.red.shade400,
+                              width: 2,
+                            ),
                           ),
                         ),
                         keyboardType: TextInputType.number,

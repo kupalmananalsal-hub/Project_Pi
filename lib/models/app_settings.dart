@@ -26,7 +26,7 @@ class AppSettings {
     int? port,
     this.darkMode = true,
     this.alertSound = AlertSound.alarm,
-  }) : host = host.trim().isEmpty ? defaultHost : host.trim(),
+  }) : host = normalizeBackendHost(host) ?? defaultHost,
        port = normalizeBackendPort(port);
 
   static const defaultHost = 'raspberrypi.local';
@@ -34,10 +34,25 @@ class AppSettings {
   static const mdnsFallbackHost = 'raspberrypi.local';
   static const defaultPort = 8765;
 
+  static String? normalizeBackendHost(String? value) {
+    var host = value?.trim() ?? '';
+    host = host.replaceFirst(RegExp(r'^https?://', caseSensitive: false), '');
+    host = host.replaceFirst(RegExp(r'/+$'), '');
+    if (host.isEmpty ||
+        host.contains('/') ||
+        host.contains('\\') ||
+        host.contains(':') ||
+        host.contains('@')) {
+      return null;
+    }
+    if (!RegExp(r'^[A-Za-z0-9.-]+$').hasMatch(host)) {
+      return null;
+    }
+    return host;
+  }
+
   static int normalizeBackendPort(int? port) {
-    // The Pi backend is fixed on 8765. Normalize stale saved ports from older
-    // builds so actions like clear history, reboot, and shutdown cannot drift.
-    return defaultPort;
+    return port != null && port >= 1 && port <= 65535 ? port : defaultPort;
   }
 
   final String host;

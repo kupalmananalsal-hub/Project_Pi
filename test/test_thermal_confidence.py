@@ -262,6 +262,23 @@ class ThermalConfidenceTest(unittest.TestCase):
                         "A sufficiently large prone human signature should be accepted")
         self.assertGreaterEqual(result["body_coverage"], 0.08)
 
+    def test_cluster_temperatures_use_only_flood_filled_points(self):
+        """A separate warm object inside the old expanded box is excluded."""
+        frame = np.full((24, 32), 24.0, dtype=np.float32)
+        mask = np.zeros((24, 32), dtype=bool)
+        frame[8:16, 12:20] = 34.2
+        mask[8:16, 12:20] = True
+        frame[10:12, 8:10] = 37.5
+        mask[10:12, 8:10] = True
+        scorer = ThermalConfidenceScorer()
+
+        clusters = scorer._clusters(mask, frame)
+        dominant = max(clusters, key=lambda item: item.pixel_count)
+        values = scorer._cluster_temperatures(dominant, mask, frame)
+
+        self.assertEqual(values.size, dominant.pixel_count)
+        self.assertAlmostEqual(float(np.max(values)), 34.2, places=5)
+
     # ── False-positive: max coverage ─────────────────────────────────────────
 
     def test_oversized_blob_rejected_by_max_coverage(self):

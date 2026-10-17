@@ -164,10 +164,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Future<void> _connect(BuildContext context) async {
     FocusScope.of(context).unfocus();
-    final host = _hostController.text.trim();
-    if (host.isEmpty) {
+    final host = AppSettings.normalizeBackendHost(_hostController.text);
+    if (host == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Pi IP or hostname is required.')),
+        const SnackBar(
+          content: Text('Enter a valid raw IP address or hostname.'),
+        ),
       );
       return;
     }
@@ -192,7 +194,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   void _disconnect() {
     ref.read(connectionProvider.notifier).disconnect();
   }
-
 }
 
 class _ConnectionStatusRow extends StatelessWidget {

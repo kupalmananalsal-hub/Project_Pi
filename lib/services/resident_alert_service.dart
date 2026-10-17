@@ -32,9 +32,9 @@ class ResidentAlertService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final host =
-          hostOverride ??
-          _host ??
-          prefs.getString('host') ??
+          AppSettings.normalizeBackendHost(
+            hostOverride ?? _host ?? prefs.getString('host'),
+          ) ??
           AppSettings.defaultHost;
       final port =
           portOverride ??
@@ -46,11 +46,7 @@ class ResidentAlertService {
           'http://$host:${AppSettings.normalizeBackendPort(port)}/api/alerts/manual';
       final response = await _dio.post<Map<String, dynamic>>(
         url,
-        data: {
-          'keyword': keyword,
-          'confidence': confidence,
-          'source': source,
-        },
+        data: {'keyword': keyword, 'confidence': confidence, 'source': source},
       );
 
       final statusCode = response.statusCode ?? 0;
