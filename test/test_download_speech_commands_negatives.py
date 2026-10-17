@@ -232,6 +232,39 @@ class DownloadSpeechCommandsNegativesTest(unittest.TestCase):
         # Second run generated nothing new
         self.assertEqual(second["generated"], 0)
 
+    def test_positive_metadata_rows_do_not_satisfy_negative_target(self):
+        """Positive recordings must not prevent generation of negative clips."""
+        from keyword_dataset_common import METADATA_COLUMNS
+
+        with self.metadata_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=METADATA_COLUMNS)
+            writer.writeheader()
+            for index in range(500):
+                writer.writerow({
+                    column: (
+                        f"positive/help/record_{index:04d}.wav"
+                        if column == "path"
+                        else "help"
+                        if column in {"keyword", "label"}
+                        else "real"
+                        if column == "source"
+                        else ""
+                    )
+                    for column in METADATA_COLUMNS
+                })
+
+        extract_dir = self.tmpdir / "extract_positive_only"
+        noise_dir = self.mod._extract_background_noise(self.fixture_archive, extract_dir)
+        summary = self.mod.process_noise_files(
+            noise_dir=noise_dir,
+            output_dir=self.output_dir,
+            metadata_path=self.metadata_path,
+            min_clips=5,
+            seed=42,
+        )
+
+        self.assertEqual(summary["generated"], 5)
+
     # ------------------------------------------------------------------
     # 5. Silent and invalid chunks are rejected and removed
     # ------------------------------------------------------------------

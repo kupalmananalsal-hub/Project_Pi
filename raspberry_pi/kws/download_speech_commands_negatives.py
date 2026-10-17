@@ -353,10 +353,13 @@ def process_noise_files(
 
     # Read existing metadata to avoid duplicating rows
     existing_paths: set[str] = set()
+    existing_negative_count = 0
     if metadata_path.exists():
         with metadata_path.open(newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 existing_paths.add(row.get("path", ""))
+                if row.get("label") == "negative":
+                    existing_negative_count += 1
 
     # Determine per-source chunk target using global counter
     min_samples = int(MIN_CHUNK_SECONDS * TARGET_SAMPLE_RATE)
@@ -366,7 +369,7 @@ def process_noise_files(
     generated = 0
     # Seed skipped_existing from paths already recorded in metadata so the
     # while loop exits immediately when min_clips clips are already present.
-    skipped_existing = len(existing_paths)
+    skipped_existing = existing_negative_count
     rejected_invalid = 0
 
     # Per-source index counters — initialised from files already on disk so
