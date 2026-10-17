@@ -122,6 +122,9 @@ class AlertPoster:
         self.queue_path = queue_path
         self.session = requests.Session()
         self.lock = threading.Lock()
+        self._flush_queue: queue.Queue[object] = queue.Queue(maxsize=1)
+        self._worker_stop = threading.Event()
+        self._worker_thread: threading.Thread | None = None
         self.pending, upgraded_pending = self._load_pending()
         if upgraded_pending:
             with self.lock:
@@ -151,29 +154,68 @@ class AlertPoster:
         with self.lock:
             self.pending.append(event)
             self._persist_pending_locked()
-        self.flush()
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            try:
+                self._flush_queue.put_nowait(object())
+            except queue.Full:
+                pass
+        else:
+            self.flush()
+
+    def start_worker(self) -> None:
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            return
+        self._worker_stop.clear()
+        self._worker_thread = threading.Thread(
+            target=self._worker_loop,
+            name="alert-poster",
+            daemon=True,
+        )
+        self._worker_thread.start()
+
+    def stop_worker(self) -> None:
+        self._worker_stop.set()
+        try:
+            self._flush_queue.put_nowait(object())
+        except queue.Full:
+            pass
+        if self._worker_thread is not None:
+            self._worker_thread.join(timeout=2.0)
+            self._worker_thread = None
+
+    def _worker_loop(self) -> None:
+        while not self._worker_stop.is_set():
+            try:
+                self._flush_queue.get(timeout=ALERT_FLUSH_INTERVAL_SECONDS)
+            except queue.Empty:
+                pass
+            self.flush()
 
     def flush(self) -> None:
-        with self.lock:
-            if not self.pending:
+        while True:
+            with self.lock:
+                if not self.pending:
+                    return
+                event = dict(self.pending[0])
+                pending_count = len(self.pending)
+            try:
+                response = self.session.post(self.backend_url, json=event, timeout=1.0)
+                response.raise_for_status()
+            except Exception as exc:  # pragma: no cover - network side effect
+                print(
+                    f"Backend alert post failed; queued {pending_count} alert(s): {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 return
 
-            while self.pending:
-                event = self.pending[0]
-                try:
-                    response = self.session.post(self.backend_url, json=event, timeout=1.0)
-                    response.raise_for_status()
-                except Exception as exc:  # pragma: no cover - network side effect
-                    print(
-                        f"Backend alert post failed; queued {len(self.pending)} alert(s): {exc}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    return
-
-                sent = self.pending.pop(0)
-                self._persist_pending_locked()
-                print(f"Backend alert posted: {sent['keyword']}", flush=True)
+            with self.lock:
+                if self.pending and self.pending[0].get("event_id") == event.get("event_id"):
+                    sent = self.pending.pop(0)
+                    self._persist_pending_locked()
+                else:
+                    continue
+            print(f"Backend alert posted: {sent['keyword']}", flush=True)
 
     def _load_pending(self) -> tuple[list[dict[str, object]], bool]:
         if not self.queue_path.exists():
@@ -1003,6 +1045,7 @@ def main() -> None:
         raise RuntimeError(f"Missing keyword model path(s): {', '.join(missing)}")
 
     poster = AlertPoster(backend_url, queue_path)
+    poster.start_worker()
     cooldown = CooldownGate(cooldown_seconds)
     dispatcher = DetectionDispatcher(
         poster=poster,
@@ -1229,6 +1272,7 @@ def main() -> None:
                 poster.flush()
                 next_flush_at = now + ALERT_FLUSH_INTERVAL_SECONDS
     finally:
+        poster.stop_worker()
         if stream is not None:
             stream.stop_stream()
             stream.close()

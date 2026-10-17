@@ -2,6 +2,8 @@ import importlib.util
 import json
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -183,6 +185,35 @@ class KwsEventIdTest(unittest.TestCase):
                     {post["event_id"] for post in poster.session.posts},
                     {event_id},
                 )
+            finally:
+                restore_modules(previous)
+
+    def test_worker_publish_does_not_wait_for_slow_network_post(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_kws_module()
+            try:
+                poster = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
+                started = threading.Event()
+                release = threading.Event()
+
+                class SlowSession(FakeSession):
+                    def post(self, url, json, timeout):
+                        started.set()
+                        release.wait(timeout=2.0)
+                        return super().post(url, json, timeout)
+
+                poster.session = SlowSession()
+                poster.start_worker()
+                poster.publish("help", 0.9, "openwakeword")
+                self.assertTrue(started.wait(timeout=1.0))
+
+                start = time.perf_counter()
+                poster.publish("tulong", 0.91, "openwakeword")
+                elapsed = time.perf_counter() - start
+
+                self.assertLess(elapsed, 0.1)
+                release.set()
+                poster.stop_worker()
             finally:
                 restore_modules(previous)
 
