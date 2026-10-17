@@ -97,11 +97,13 @@ class AlertsController extends Notifier<AlertsState> {
 
   @override
   AlertsState build() {
+    final alertRuntimeService = ref.read(alertRuntimeServiceProvider);
     ref.listen<ThermalState>(thermalProvider, _handleThermalStateChanged);
     ref.onDispose(() {
       _keywordNoticeTimer?.cancel();
       _pendingVoiceTimer?.cancel();
       _thermalSoftAlertTimer?.cancel();
+      alertRuntimeService.stopEmergency();
       disconnect();
     });
     return const AlertsState();

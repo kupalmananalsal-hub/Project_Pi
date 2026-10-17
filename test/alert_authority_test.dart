@@ -12,6 +12,7 @@ import 'package:thermal_audio_monitor/utils/human_detector.dart';
 
 class FakeAlertRuntimeService extends AlertRuntimeService {
   int emergencyStarts = 0;
+  int emergencyStops = 0;
   int softBeeps = 0;
   AlertEvent? lastEmergencyEvent;
   bool? lastVibrate;
@@ -28,7 +29,9 @@ class FakeAlertRuntimeService extends AlertRuntimeService {
   }
 
   @override
-  Future<void> stopEmergency() async {}
+  Future<void> stopEmergency() async {
+    emergencyStops++;
+  }
 
   @override
   Future<void> playSoftThermalBeep() async {
@@ -56,6 +59,19 @@ void main() {
   }
 
   Future<void> drainAsync() => Future<void>.delayed(Duration.zero);
+
+  test('disposing the alerts provider stops active emergency output', () async {
+    final runtime = FakeAlertRuntimeService();
+    final container = ProviderContainer(
+      overrides: [alertRuntimeServiceProvider.overrideWithValue(runtime)],
+    );
+    container.read(alertsProvider);
+
+    container.dispose();
+    await drainAsync();
+
+    expect(runtime.emergencyStops, 1);
+  });
 
   AlertEvent eventFrom({
     required String decisionState,
