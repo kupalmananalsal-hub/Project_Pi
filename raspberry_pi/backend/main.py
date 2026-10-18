@@ -65,6 +65,7 @@ from keyword_dataset_common import (
     METADATA_LOCK,
     append_metadata as append_training_metadata,
     ensure_dataset_layout as ensure_training_dataset_layout,
+    metadata_file_lock,
     slugify_keyword,
 )
 
@@ -105,6 +106,14 @@ MAX_ONNX_UPLOAD_BYTES = int(os.getenv("TRAINING_ONNX_MAX_BYTES", str(128 * 1024 
 MAX_ONNX_DATA_UPLOAD_BYTES = int(
     os.getenv("TRAINING_ONNX_DATA_MAX_BYTES", str(256 * 1024 * 1024))
 )
+THERMAL_FRAME_RETRY_COUNT = max(1, int(os.getenv("THERMAL_FRAME_RETRY_COUNT", "5")))
+THERMAL_FRAME_RETRY_DELAY_SECONDS = max(
+    0.0, float(os.getenv("THERMAL_FRAME_RETRY_DELAY_SECONDS", "0.02"))
+)
+TRAINING_AUGMENT_TIMEOUT_SECONDS = max(
+    1.0, float(os.getenv("TRAINING_AUGMENT_TIMEOUT_SECONDS", str(20 * 60)))
+)
+TRAINING_AUGMENT_STDERR_MAX_BYTES = 64 * 1024
 TRAINING_METADATA_LOCK = METADATA_LOCK  # shared with KWS CLI tools via keyword_dataset_common
 TRAINING_JOBS: dict[str, dict[str, Any]] = {}
 TRAINING_JOB_TASKS: dict[str, asyncio.Task[Any]] = {}
@@ -608,12 +617,20 @@ class ThermalCamera:
             raise RuntimeError(self.error or "MLX90640 unavailable")
 
         with self._lock:
-            while True:
+            for attempt in range(THERMAL_FRAME_RETRY_COUNT):
                 try:
                     self.mlx.getFrame(self.frame)
                     break
-                except ValueError:
-                    time.sleep(0.02)
+                except ValueError as exc:
+                    if attempt + 1 >= THERMAL_FRAME_RETRY_COUNT:
+                        self.mlx = None
+                        self.address = None
+                        self.error = (
+                            "MLX90640 frame read failed after "
+                            f"{THERMAL_FRAME_RETRY_COUNT} retries: {exc}"
+                        )
+                        raise RuntimeError(self.error) from exc
+                    time.sleep(THERMAL_FRAME_RETRY_DELAY_SECONDS)
 
             payload: dict[str, Any] = {
                 "width": 32,
@@ -1166,8 +1183,9 @@ def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
 def read_training_metadata_rows() -> list[dict[str, str]]:
     if not KEYWORD_METADATA_PATH.exists():
         return []
-    with KEYWORD_METADATA_PATH.open(newline="", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
+    with metadata_file_lock(KEYWORD_METADATA_PATH):
+        with KEYWORD_METADATA_PATH.open(newline="", encoding="utf-8") as handle:
+            return list(csv.DictReader(handle))
 
 
 def rewrite_training_metadata_rows(rows: list[dict[str, str]]) -> None:
@@ -1176,14 +1194,15 @@ def rewrite_training_metadata_rows(rows: list[dict[str, str]]) -> None:
         f".{KEYWORD_METADATA_PATH.name}.{uuid.uuid4().hex}.tmp"
     )
     try:
-        with temp_path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=TRAINING_METADATA_COLUMNS)
-            writer.writeheader()
-            for row in rows:
-                writer.writerow(
-                    {column: row.get(column, "") for column in TRAINING_METADATA_COLUMNS}
-                )
-        os.replace(temp_path, KEYWORD_METADATA_PATH)
+        with metadata_file_lock(KEYWORD_METADATA_PATH):
+            with temp_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=TRAINING_METADATA_COLUMNS)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow(
+                        {column: row.get(column, "") for column in TRAINING_METADATA_COLUMNS}
+                    )
+            os.replace(temp_path, KEYWORD_METADATA_PATH)
     finally:
         temp_path.unlink(missing_ok=True)
 
@@ -1825,7 +1844,7 @@ async def upload_training_record(
         final_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(temp_path, final_path)
         created_at = datetime.now(timezone.utc).isoformat()
-        with TRAINING_METADATA_LOCK:
+        with metadata_file_lock(KEYWORD_METADATA_PATH):
             append_training_metadata(
                 KEYWORD_METADATA_PATH,
                 {
@@ -1871,13 +1890,13 @@ async def upload_training_record(
 
 @app.get("/api/training/statistics")
 async def training_statistics():
-    with TRAINING_METADATA_LOCK:
+    with metadata_file_lock(KEYWORD_METADATA_PATH):
         return calculate_training_statistics()
 
 
 @app.get("/api/training/recordings")
 async def training_recordings():
-    with TRAINING_METADATA_LOCK:
+    with metadata_file_lock(KEYWORD_METADATA_PATH):
         rows = read_training_metadata_rows()
         recordings = []
         for row in rows:
@@ -1893,7 +1912,7 @@ async def delete_training_recording(recording_id: str):
     if not re.fullmatch(r"[A-Fa-f0-9]{8,32}", recording_id):
         raise HTTPException(status_code=404, detail="Training recording not found")
 
-    with TRAINING_METADATA_LOCK:
+    with metadata_file_lock(KEYWORD_METADATA_PATH):
         rows = read_training_metadata_rows()
         original = next(
             (
@@ -2011,6 +2030,26 @@ async def training_augment(copies_per_file: int = 2, seed: int = 1337):
     except Exception:
         pass
 
+    async def _drain_augmentation_stderr(stream) -> bytes:
+        retained = bytearray()
+        while True:
+            chunk = await stream.read(4096)
+            if not chunk:
+                return bytes(retained)
+            retained.extend(chunk)
+            if len(retained) > TRAINING_AUGMENT_STDERR_MAX_BYTES:
+                del retained[:-TRAINING_AUGMENT_STDERR_MAX_BYTES]
+
+    async def _terminate_augmentation(process) -> None:
+        if process.returncode is not None:
+            return
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+
     async def _run_augment(job_id: str):
         output_dir = KEYWORD_DATASET_DIR / "augmented"
         script_path = CURRENT_DIR.parent / "kws" / "augment_keyword_dataset.py"
@@ -2028,19 +2067,36 @@ async def training_augment(copies_per_file: int = 2, seed: int = 1337):
             str(copies_per_file),
             "--seed",
             str(seed),
-            stdout=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await process.communicate()
+        stderr_task = asyncio.create_task(_drain_augmentation_stderr(process.stderr))
+        try:
+            await asyncio.wait_for(
+                process.wait(), timeout=TRAINING_AUGMENT_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as exc:
+            await _terminate_augmentation(process)
+            stderr = await stderr_task
+            detail = stderr.decode(errors="replace").strip()
+            raise RuntimeError(
+                "Augmentation subprocess timed out after "
+                f"{TRAINING_AUGMENT_TIMEOUT_SECONDS:.0f} seconds"
+                + (f": {detail[-2000:]}" if detail else ".")
+            ) from exc
+        except BaseException:
+            await _terminate_augmentation(process)
+            await stderr_task
+            raise
+        else:
+            stderr = await stderr_task
         if process.returncode != 0:
-            detail = (stderr or stdout).decode(errors="replace").strip()
+            detail = stderr.decode(errors="replace").strip()
             raise RuntimeError(
                 f"Augmentation subprocess failed with exit code {process.returncode}"
                 + (f": {detail[-2000:]}" if detail else ".")
             )
-        return {
-            "output": (stdout or b"").decode(errors="replace").strip(),
-        }
+        return {"message": "Augmentation completed"}
 
     return await queue_training_job("augmentation", _run_augment)
 
@@ -2052,7 +2108,7 @@ async def training_export():
     import zipfile
 
     def _run_export():
-        with TRAINING_METADATA_LOCK:
+        with metadata_file_lock(KEYWORD_METADATA_PATH):
             rows = read_training_metadata_rows()
         real_speakers = {
             row.get("speaker_id", "").strip()

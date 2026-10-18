@@ -14,6 +14,7 @@ class TrainingScreen extends ConsumerStatefulWidget {
 }
 
 class _TrainingScreenState extends ConsumerState<TrainingScreen> {
+  ProviderSubscription<PiConnectionState>? _connectionSubscription;
   String? _selectedKeyword;
   final _speakerController = TextEditingController(text: 'speaker_01');
   final _distanceController = TextEditingController(text: '1.0');
@@ -24,6 +25,14 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
   @override
   void initState() {
     super.initState();
+    _connectionSubscription = ref.listenManual<PiConnectionState>(
+      connectionProvider,
+      (previous, next) {
+        if (previous?.isConnected != true && next.isConnected) {
+          ref.read(trainingProvider.notifier).initialize();
+        }
+      },
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (ref.read(connectionProvider).isConnected) {
         ref.read(trainingProvider.notifier).initialize();
@@ -33,6 +42,7 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
 
   @override
   void dispose() {
+    _connectionSubscription?.close();
     _speakerController.dispose();
     _distanceController.dispose();
     super.dispose();
@@ -345,8 +355,8 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                           child: OutlinedButton.icon(
                             onPressed:
                                 training.isLoading || training.isRecordingBusy
-                                    ? null
-                                    : () => _handleRecordAgain(training),
+                                ? null
+                                : () => _handleRecordAgain(training),
                             icon: const Icon(Icons.refresh_rounded),
                             label: const Text('Record Again'),
                           ),
@@ -356,8 +366,8 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                           child: FilledButton.icon(
                             onPressed:
                                 training.isLoading || training.isRecordingBusy
-                                    ? null
-                                    : () => _handleVerify(training),
+                                ? null
+                                : () => _handleVerify(training),
                             icon: const Icon(Icons.check_circle_rounded),
                             style: FilledButton.styleFrom(
                               backgroundColor: Colors.green,
@@ -669,12 +679,13 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
     final errorMessage = ref.read(trainingProvider).errorMessage;
     if (uploaded) {
       if (_selectedKeyword != null) {
-        _speakerController.text =
-            notifier.getNextSpeakerId(_selectedKeyword!);
+        _speakerController.text = notifier.getNextSpeakerId(_selectedKeyword!);
       }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Recording verified and uploaded! Ready for next recording or validation.'),
+          content: Text(
+            'Recording verified and uploaded! Ready for next recording or validation.',
+          ),
           backgroundColor: Colors.green,
         ),
       );

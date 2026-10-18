@@ -29,6 +29,42 @@ class FakeRequest:
         self.headers = headers or {}
 
 
+class FakeAsyncStream:
+    def __init__(self, payload=b""):
+        self._payload = payload
+
+    async def read(self, _size=-1):
+        payload, self._payload = self._payload, b""
+        return payload
+
+
+class FakeAugmentationProcess:
+    def __init__(self, returncode=0, stderr=b"", hangs=False):
+        self.returncode = None if hangs else returncode
+        self._final_returncode = returncode
+        self._hangs = hangs
+        self.stderr = FakeAsyncStream(stderr)
+        self.terminated = False
+        self.killed = False
+
+    async def wait(self):
+        while self._hangs and self.returncode is None:
+            await asyncio.sleep(0.001)
+        if self.returncode is None:
+            self.returncode = self._final_returncode
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self._hangs = False
+        self.returncode = -15
+
+    def kill(self):
+        self.killed = True
+        self._hangs = False
+        self.returncode = -9
+
+
 def wav_bytes(
     sample_rate=16000,
     channels=1,
@@ -480,17 +516,95 @@ class TrainingApiTest(unittest.TestCase):
             finally:
                 self.cleanup(module, previous)
 
+    def _run_augmentation_process_case(self, process, timeout=1.0):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            original_create = module.asyncio.create_subprocess_exec
+            original_timeout = module.TRAINING_AUGMENT_TIMEOUT_SECONDS
+            original_virtual_memory = module.psutil.virtual_memory
+
+            async def create_process(*_args, **_kwargs):
+                return process
+
+            try:
+                module.asyncio.create_subprocess_exec = create_process
+                module.TRAINING_AUGMENT_TIMEOUT_SECONDS = timeout
+                module.psutil.virtual_memory = lambda: type(
+                    "Memory", (), {"available": 1024 * 1024 * 1024}
+                )()
+
+                async def run():
+                    result = await module.training_augment(copies_per_file=1, seed=7)
+                    await asyncio.gather(*module.TRAINING_JOB_TASKS.values())
+                    return module.TRAINING_JOBS[result["job_id"]]
+
+                return asyncio.run(run())
+            finally:
+                module.asyncio.create_subprocess_exec = original_create
+                module.TRAINING_AUGMENT_TIMEOUT_SECONDS = original_timeout
+                module.psutil.virtual_memory = original_virtual_memory
+                self.cleanup(module, previous)
+
+    def test_augment_subprocess_success_marks_job_succeeded(self):
+        job = self._run_augmentation_process_case(FakeAugmentationProcess())
+
+        self.assertEqual(job["status"], "succeeded")
+        self.assertEqual(job["result"]["message"], "Augmentation completed")
+
+    def test_augment_subprocess_failure_retains_diagnostic_tail(self):
+        process = FakeAugmentationProcess(returncode=3, stderr=b"librosa failed")
+        job = self._run_augmentation_process_case(process)
+
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("exit code 3", job["error"])
+        self.assertIn("librosa failed", job["error"])
+
+    def test_augment_subprocess_timeout_terminates_child(self):
+        process = FakeAugmentationProcess(stderr=b"stalled", hangs=True)
+        job = self._run_augmentation_process_case(process, timeout=0.01)
+
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("timed out", job["error"])
+        self.assertTrue(process.terminated)
+
     def test_train_endpoint_creates_manifest(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             module, previous = self.load_module(temp_dir)
             try:
                 module.ensure_training_dataset_layout(module.KEYWORD_DATASET_DIR)
-                # Need at least one WAV for the manifest
+                rows = []
                 keyword_dir = module.KEYWORD_DATASET_DIR / "positive" / "help"
                 keyword_dir.mkdir(parents=True, exist_ok=True)
                 for i in range(3):
                     wav_path = keyword_dir / f"help_sp{i:02d}_real_001.wav"
                     wav_path.write_bytes(wav_bytes())
+                    relative_path = wav_path.relative_to(
+                        module.KEYWORD_DATASET_DIR
+                    ).as_posix()
+                    rows.append(
+                        {
+                            "path": relative_path,
+                            "keyword": "help",
+                            "label": "help",
+                            "speaker_id": f"sp{i:02d}",
+                            "age_group": "adult",
+                            "gender": "other",
+                            "distance_m": "1.0",
+                            "noise_condition": "quiet",
+                            "source": "real",
+                            "sample_rate": "16000",
+                            "duration_s": "1.20",
+                            "notes": "",
+                        }
+                    )
+                for row in rows:
+                    module.append_training_metadata(module.KEYWORD_METADATA_PATH, row)
+                negative_dir = module.KEYWORD_DATASET_DIR / "negative" / "noise"
+                negative_dir.mkdir(parents=True, exist_ok=True)
+                for i in range(3):
+                    (negative_dir / f"noise_source_{i:02d}.wav").write_bytes(
+                        wav_bytes()
+                    )
 
                 async def _run():
                     result = await module.training_train(seed=42)

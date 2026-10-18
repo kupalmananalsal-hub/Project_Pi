@@ -217,6 +217,18 @@ class FakeClock:
         self.now += seconds
 
 
+class SequencedMlx:
+    def __init__(self, failures):
+        self.failures = failures
+        self.calls = 0
+
+    def getFrame(self, frame):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise ValueError("dropped frame")
+        frame[:] = [34.0] * 768
+
+
 class FakeHTTPException(Exception):
     def __init__(self, status_code=500, detail=None):
         super().__init__(detail)
@@ -325,6 +337,44 @@ class BackendAlertSmokeTest(unittest.TestCase):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", ResourceWarning)
             gc.collect()
+
+    def test_thermal_read_recovers_from_transient_value_errors(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_backend_module(temp_dir)
+            try:
+                camera = module.ThermalCamera()
+                camera.mlx = SequencedMlx(failures=2)
+                camera.address = 0x33
+                module.THERMAL_FRAME_RETRY_COUNT = 3
+                module.THERMAL_FRAME_RETRY_DELAY_SECONDS = 0
+
+                payload = camera.read()
+
+                self.assertEqual(camera.mlx.calls, 3)
+                self.assertEqual(payload["address"], "0x33")
+                self.assertEqual(len(payload["temperatures"]), 768)
+            finally:
+                self.cleanup_backend(module, previous)
+
+    def test_thermal_read_stops_after_retry_limit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_backend_module(temp_dir)
+            try:
+                camera = module.ThermalCamera()
+                mlx = SequencedMlx(failures=10)
+                camera.mlx = mlx
+                camera.address = 0x33
+                module.THERMAL_FRAME_RETRY_COUNT = 3
+                module.THERMAL_FRAME_RETRY_DELAY_SECONDS = 0
+
+                with self.assertRaisesRegex(RuntimeError, "after 3 retries"):
+                    camera.read()
+
+                self.assertEqual(mlx.calls, 3)
+                self.assertIsNone(camera.mlx)
+                self.assertIsNone(camera.address)
+            finally:
+                self.cleanup_backend(module, previous)
 
     def test_post_alert_uses_authoritative_decision_fields(self):
         with tempfile.TemporaryDirectory() as temp_dir:

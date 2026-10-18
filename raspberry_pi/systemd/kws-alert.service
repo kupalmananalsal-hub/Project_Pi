@@ -19,6 +19,7 @@ Environment=PROJECT_PI_AUDIO_STATUS_PATH=/tmp/project_pi_audio_status.json
 Environment=MIC_NAME_HINT=seeed
 Environment=VOSK_KEYWORD_CONFIDENCE=0.75
 Environment=WAV2VEC2_MODEL_PATH=Khalsuu/filipino-wav2vec2-l-xls-r-300m-official
+Environment=WAV2VEC2_VERIFIER_ENABLED=0
 Environment=WAV2VEC2_VERIFY_BELOW_CONFIDENCE=0.70
 Environment=WAV2VEC2_CONTEXT_SECONDS=2.0
 Environment=KWS_CHANNELS=2

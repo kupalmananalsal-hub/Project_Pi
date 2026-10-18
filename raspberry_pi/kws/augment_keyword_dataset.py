@@ -7,6 +7,7 @@ import argparse
 import csv
 import random
 import sys
+import wave
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -15,8 +16,10 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from keyword_dataset_common import (  # noqa: E402
     DEFAULT_DATASET_DIR,
+    advisory_file_lock,
     append_metadata,
     ensure_dataset_layout,
+    metadata_file_lock,
     wav_files,
 )
 
@@ -111,6 +114,19 @@ def augment_file(source_path: Path, output_path: Path, sample_rate: int, rng) ->
     return operation
 
 
+def _is_valid_augmented_wav(path: Path, sample_rate: int = 16000) -> bool:
+    try:
+        with wave.open(str(path), "rb") as handle:
+            return (
+                handle.getframerate() == sample_rate
+                and handle.getnchannels() == 1
+                and handle.getsampwidth() == 2
+                and handle.getnframes() > 0
+            )
+    except (OSError, EOFError, wave.Error):
+        return False
+
+
 def augment_dataset(
     dataset_dir: Path,
     output_dir: Path,
@@ -139,8 +155,19 @@ def augment_dataset(
 
     metadata_path = dataset_dir / "metadata.csv"
     created = 0
+    skipped_existing = 0
+    reconciled_metadata = 0
     operations: dict[str, int] = {}
     total_copies = len(positives) * copies_per_file
+
+    with metadata_file_lock(metadata_path):
+        if metadata_path.exists():
+            with metadata_path.open(newline="", encoding="utf-8") as handle:
+                existing_paths = {
+                    row.get("path", "") for row in csv.DictReader(handle)
+                }
+        else:
+            existing_paths = set()
 
     if total_copies == 0:
         return {"source_files": 0, "created_files": 0}
@@ -159,38 +186,70 @@ def augment_dataset(
                 / keyword_slug
                 / f"{source_path.stem}_aug_{copy_index + 1:02d}.wav"
             )
-            operation = augment_file(source_path, output_path, 16000, rng)
-            operations[operation] = operations.get(operation, 0) + 1
-            append_metadata(
-                metadata_path,
-                {
-                    "path": output_path.relative_to(dataset_dir).as_posix()
-                    if output_path.is_relative_to(dataset_dir)
-                    else output_path.as_posix(),
-                    "keyword": keyword_slug,
-                    "label": keyword_slug,
-                    "speaker_id": "synthetic",
-                    "age_group": "augmented",
-                    "gender": "unknown",
-                    "distance_m": "unknown",
-                    "noise_condition": operation,
-                    "source": "augmentation",
-                    "sample_rate": "16000",
-                    "duration_s": "",
-                    "notes": f"source={source_path.relative_to(dataset_dir)}",
-                },
-            )
-            created += 1
+            relative_output_path = output_path.relative_to(dataset_dir).as_posix()
+            target_lock = output_path.with_name(f".{output_path.name}.lock")
+            with advisory_file_lock(target_lock):
+                with metadata_file_lock(metadata_path):
+                    if metadata_path.exists():
+                        with metadata_path.open(
+                            newline="", encoding="utf-8"
+                        ) as handle:
+                            existing_paths = {
+                                row.get("path", "")
+                                for row in csv.DictReader(handle)
+                            }
+                    metadata_exists = relative_output_path in existing_paths
+                output_exists = output_path.exists()
+                if output_exists and metadata_exists:
+                    skipped_existing += 1
+                    continue
+
+                if output_exists and _is_valid_augmented_wav(output_path):
+                    operation = "existing_augmented"
+                else:
+                    operation = augment_file(source_path, output_path, 16000, rng)
+                    created += 1
+                    operations[operation] = operations.get(operation, 0) + 1
+
+                if not metadata_exists:
+                    append_metadata(
+                        metadata_path,
+                        {
+                            "path": relative_output_path,
+                            "keyword": keyword_slug,
+                            "label": keyword_slug,
+                            "speaker_id": "synthetic",
+                            "age_group": "augmented",
+                            "gender": "unknown",
+                            "distance_m": "unknown",
+                            "noise_condition": operation,
+                            "source": "augmentation",
+                            "sample_rate": "16000",
+                            "duration_s": "",
+                            "notes": f"source={source_path.relative_to(dataset_dir)}",
+                        },
+                    )
+                    existing_paths.add(relative_output_path)
+                    if output_exists:
+                        reconciled_metadata += 1
+                elif not output_exists:
+                    reconciled_metadata += 1
             if progress_callback:
                 progress_callback(
-                    created,
+                    created + skipped_existing,
                     total_copies,
                     f"Augmenting {keyword_slug} ({created}/{total_copies})",
                 )
             # Yield CPU briefly between files to prevent starving the event loop
             time.sleep(0.01)
 
-    return {"source_files": len(positives), "created_files": created, **operations}
+    return {
+        "source_files": len(positives),
+        "created_files": created,
+        "skipped_existing": skipped_existing,
+        "reconciled_metadata": reconciled_metadata,
+        **operations,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:

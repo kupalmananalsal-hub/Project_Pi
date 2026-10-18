@@ -172,6 +172,7 @@ class TrainingNotifier extends Notifier<TrainingState> {
   final AudioRecorder _recorder = AudioRecorder();
   TrainingRecordingUpload? _pendingUpload;
   bool _initialized = false;
+  Future<void>? _initialization;
 
   @override
   TrainingState build() {
@@ -576,12 +577,19 @@ class TrainingNotifier extends Notifier<TrainingState> {
   /// Load keywords and statistics from the Pi.
   Future<void> refresh() async {
     state = state.copyWith(isLoading: true, errorMessage: null);
-    _initialized = true;
     final api = _api;
     final errors = <String>[];
     try {
-      state = state.copyWith(keywords: await _loadKeywords(api));
+      final keywordResponse = await api.fetchTrainingKeywords();
+      final keywords = keywordResponse
+          .map(TrainingKeyword.fromJson)
+          .where((keyword) => keyword.keyword.isNotEmpty)
+          .toList(growable: false);
+      state = state.copyWith(
+        keywords: keywords.isEmpty ? fallbackTrainingKeywords : keywords,
+      );
     } catch (e) {
+      state = state.copyWith(keywords: fallbackTrainingKeywords);
       errors.add('keywords: $e');
     }
     try {
@@ -603,25 +611,27 @@ class TrainingNotifier extends Notifier<TrainingState> {
           ? null
           : 'Some training data could not be refreshed: ${errors.join('; ')}',
     );
+    _initialized = errors.isEmpty;
   }
 
   bool get hasActiveJob => state.activeJob?.isRunning ?? false;
 
   Future<void> initialize() async {
     if (_initialized) return;
-    await refresh();
-  }
+    final activeInitialization = _initialization;
+    if (activeInitialization != null) {
+      await activeInitialization;
+      return;
+    }
 
-  Future<List<TrainingKeyword>> _loadKeywords(PiApiService api) async {
+    final operation = refresh();
+    _initialization = operation;
     try {
-      final kwResponse = await api.fetchTrainingKeywords();
-      final keywords = kwResponse
-          .map((json) => TrainingKeyword.fromJson(json))
-          .where((kw) => kw.keyword.isNotEmpty)
-          .toList(growable: false);
-      return keywords.isEmpty ? fallbackTrainingKeywords : keywords;
-    } catch (_) {
-      return fallbackTrainingKeywords;
+      await operation;
+    } finally {
+      if (identical(_initialization, operation)) {
+        _initialization = null;
+      }
     }
   }
 

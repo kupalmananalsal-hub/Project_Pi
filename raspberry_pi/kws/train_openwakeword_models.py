@@ -208,6 +208,14 @@ def build_split_manifest(dataset_dir: Path, seed: int = 1337) -> dict[str, objec
         else _positive_files_without_metadata(dataset_dir)
     )
     speakers = assign_speakers(metadata_rows or positive_rows, seed)
+    missing_speaker_splits = [
+        split_name for split_name, split_speakers in speakers.items() if not split_speakers
+    ]
+    if missing_speaker_splits:
+        raise ValueError(
+            "Speaker-aware split requires at least 3 real speakers with one in "
+            "each train/val/test split; missing " + ", ".join(missing_speaker_splits)
+        )
     keywords: dict[str, dict[str, dict[str, list[str]]]] = {}
     source_split_by_path: dict[str, str] = {}
 
@@ -250,6 +258,20 @@ def build_split_manifest(dataset_dir: Path, seed: int = 1337) -> dict[str, objec
             },
         )
         keyword_entry[split_name]["positive"].append(relative_path)
+
+    if not keywords:
+        raise ValueError("Training manifest requires at least one positive keyword sample")
+    for keyword, keyword_entry in keywords.items():
+        for split_name in ("train", "val", "test"):
+            split = keyword_entry[split_name]
+            if not split["positive"]:
+                raise ValueError(
+                    f"Keyword '{keyword}' has no positive samples in {split_name} split"
+                )
+            if not split["negative"]:
+                raise ValueError(
+                    f"Keyword '{keyword}' has no negative samples in {split_name} split"
+                )
 
     return {
         "split_seed": seed,

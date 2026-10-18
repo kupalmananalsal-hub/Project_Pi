@@ -83,6 +83,7 @@ dataset/audio/keyword_dataset/**/*.wav
 dataset/audio/keyword_dataset/**/*.flac
 dataset/audio/keyword_dataset/**/*.mp3
 dataset/audio/keyword_dataset/metadata.csv
+dataset/audio/keyword_dataset/.metadata.csv.lock
 dataset/audio/keyword_dataset/augmented/**
 dataset/audio/keyword_dataset/splits/**
 dataset/audio/keyword_dataset/models/**

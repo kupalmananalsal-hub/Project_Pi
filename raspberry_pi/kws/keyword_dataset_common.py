@@ -6,7 +6,13 @@ from __future__ import annotations
 import csv
 import re
 import threading
+from contextlib import contextmanager
 from pathlib import Path
+
+try:  # Pi deployments require coordination with augmentation subprocesses.
+    import fcntl
+except ImportError:  # Windows tests retain thread-only protection.
+    fcntl = None
 
 
 KEYWORDS = [
@@ -54,6 +60,44 @@ DEFAULT_DATASET_DIR = (
 # this as TRAINING_METADATA_LOCK so both code paths share the same mutex.
 # Uses RLock so that callers holding the lock can reentrantly call append_metadata().
 METADATA_LOCK = threading.RLock()
+_METADATA_LOCK_STATE = threading.local()
+
+
+@contextmanager
+def advisory_file_lock(lock_path: Path):
+    """Serialize work across local threads and POSIX processes."""
+    key = str(lock_path.resolve())
+    active = getattr(_METADATA_LOCK_STATE, "active", {})
+    entry = active.get(key)
+    if entry is not None:
+        entry["depth"] += 1
+        try:
+            yield
+        finally:
+            entry["depth"] -= 1
+        return
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with METADATA_LOCK:
+        with lock_path.open("a", encoding="utf-8") as handle:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            active[key] = {"depth": 1}
+            _METADATA_LOCK_STATE.active = active
+            try:
+                yield
+            finally:
+                active.pop(key, None)
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def metadata_file_lock(metadata_path: Path):
+    """Serialize a metadata file across threads and POSIX processes."""
+    lock_path = metadata_path.with_name(f".{metadata_path.name}.lock")
+    with advisory_file_lock(lock_path):
+        yield
 
 
 def slugify_keyword(keyword: str) -> str:
@@ -72,9 +116,10 @@ def ensure_dataset_layout(dataset_dir: Path) -> None:
     for negative_class in NEGATIVE_CLASSES:
         (dataset_dir / "negative" / negative_class).mkdir(parents=True, exist_ok=True)
     metadata_path = dataset_dir / "metadata.csv"
-    if not metadata_path.exists():
-        with metadata_path.open("w", newline="", encoding="utf-8") as handle:
-            csv.DictWriter(handle, fieldnames=METADATA_COLUMNS).writeheader()
+    with metadata_file_lock(metadata_path):
+        if not metadata_path.exists():
+            with metadata_path.open("w", newline="", encoding="utf-8") as handle:
+                csv.DictWriter(handle, fieldnames=METADATA_COLUMNS).writeheader()
 
 
 def append_metadata(metadata_path: Path, row: dict[str, object]) -> None:
@@ -84,7 +129,7 @@ def append_metadata(metadata_path: Path, row: dict[str, object]) -> None:
     (the download script, the recorder, and the backend) do not interleave rows.
     """
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    with METADATA_LOCK:
+    with metadata_file_lock(metadata_path):
         exists = metadata_path.exists()
         with metadata_path.open("a", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=METADATA_COLUMNS)

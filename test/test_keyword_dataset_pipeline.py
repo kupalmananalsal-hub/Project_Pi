@@ -3,6 +3,7 @@ import csv
 import importlib.util
 import json
 import tempfile
+import threading
 import unittest
 import tarfile
 import zipfile
@@ -62,7 +63,55 @@ def write_metadata(dataset, rows):
         writer.writerows(rows)
 
 
+def write_split_negatives(dataset, count=3):
+    negative_dir = dataset / "negative" / "noise"
+    negative_dir.mkdir(parents=True, exist_ok=True)
+    for index in range(count):
+        write_wav(negative_dir / f"noise_source_{index:02d}.wav")
+
+
 class KeywordDatasetPipelineTest(unittest.TestCase):
+    def test_metadata_appends_are_serialized(self):
+        common = load_script("keyword_dataset_common.py")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset = Path(temp_dir) / "keyword_dataset"
+            metadata = dataset / "metadata.csv"
+            common.ensure_dataset_layout(dataset)
+
+            def append(index):
+                common.append_metadata(
+                    metadata,
+                    {
+                        "path": f"positive/help/sample_{index}.wav",
+                        "keyword": "help",
+                        "label": "help",
+                        "speaker_id": f"sp{index:02d}",
+                        "age_group": "adult",
+                        "gender": "unspecified",
+                        "distance_m": "1.0",
+                        "noise_condition": "quiet",
+                        "source": "real",
+                        "sample_rate": "16000",
+                        "duration_s": "1.20",
+                        "notes": "",
+                    },
+                )
+
+            threads = [
+                threading.Thread(target=append, args=(index,))
+                for index in range(8)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            with metadata.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(len(rows), 8)
+        self.assertEqual(len({row["path"] for row in rows}), 8)
+
     def test_keyword_inventory_contains_all_deployed_keywords(self):
         recorder = load_script("record_keyword_dataset.py")
 
@@ -160,6 +209,84 @@ class KeywordDatasetPipelineTest(unittest.TestCase):
         self.assertEqual(report["keyword_counts"]["help"], 1)
         self.assertEqual(report["issues"][0]["issue"], "sample_rate")
 
+    def test_repeated_augmentation_does_not_duplicate_metadata(self):
+        augmenter = load_script("augment_keyword_dataset.py")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset = Path(temp_dir) / "keyword_dataset"
+            source = dataset / "positive" / "help" / "help_sp01.wav"
+            source.parent.mkdir(parents=True)
+            write_wav(source)
+
+            def fake_augment(source_path, output_path, sample_rate, rng):
+                del source_path, sample_rate, rng
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                write_wav(output_path)
+                return "volume"
+
+            augmenter.augment_file = fake_augment
+            first = augmenter.augment_dataset(
+                dataset, dataset / "augmented", copies_per_file=1
+            )
+            second = augmenter.augment_dataset(
+                dataset, dataset / "augmented", copies_per_file=1
+            )
+            with (dataset / "metadata.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(first["created_files"], 1)
+        self.assertEqual(second["created_files"], 0)
+        self.assertEqual(second["skipped_existing"], 1)
+        self.assertEqual(len([row for row in rows if row["source"] == "augmentation"]), 1)
+
+    def test_manifest_rejects_fewer_than_three_real_speakers(self):
+        trainer = load_script("train_openwakeword_models.py")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset = Path(temp_dir) / "keyword_dataset"
+            rows = []
+            for speaker in ("sp01", "sp02"):
+                relative = f"positive/help/help_{speaker}.wav"
+                (dataset / relative).parent.mkdir(parents=True, exist_ok=True)
+                write_wav(dataset / relative)
+                rows.append(
+                    {
+                        "path": relative,
+                        "keyword": "help",
+                        "label": "help",
+                        "speaker_id": speaker,
+                        "source": "real",
+                    }
+                )
+            write_metadata(dataset, rows)
+            write_split_negatives(dataset)
+
+            with self.assertRaisesRegex(ValueError, "at least 3 real speakers"):
+                trainer.build_split_manifest(dataset)
+
+    def test_manifest_rejects_empty_negative_split(self):
+        trainer = load_script("train_openwakeword_models.py")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset = Path(temp_dir) / "keyword_dataset"
+            rows = []
+            for speaker in ("sp01", "sp02", "sp03"):
+                relative = f"positive/help/help_{speaker}.wav"
+                (dataset / relative).parent.mkdir(parents=True, exist_ok=True)
+                write_wav(dataset / relative)
+                rows.append(
+                    {
+                        "path": relative,
+                        "keyword": "help",
+                        "label": "help",
+                        "speaker_id": speaker,
+                        "source": "real",
+                    }
+                )
+            write_metadata(dataset, rows)
+
+            with self.assertRaisesRegex(ValueError, "no negative samples"):
+                trainer.build_split_manifest(dataset)
+
     def test_training_manifest_split_is_deterministic(self):
         trainer = load_script("train_openwakeword_models.py")
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -231,6 +358,7 @@ class KeywordDatasetPipelineTest(unittest.TestCase):
                         }
                     )
             write_metadata(dataset, rows)
+            write_split_negatives(dataset)
 
             manifest = trainer.build_split_manifest(dataset, seed=7)
 
@@ -317,6 +445,7 @@ class KeywordDatasetPipelineTest(unittest.TestCase):
                     }
                 )
             write_metadata(dataset, rows)
+            write_split_negatives(dataset)
 
             manifest = trainer.build_split_manifest(dataset, seed=3)
 
@@ -369,6 +498,7 @@ class KeywordDatasetPipelineTest(unittest.TestCase):
                 }
             )
             write_metadata(dataset, rows)
+            write_split_negatives(dataset)
 
             manifest = trainer.build_split_manifest(dataset, seed=5)
 
