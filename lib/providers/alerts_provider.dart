@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -10,6 +11,7 @@ import '../providers/app_services_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/thermal_provider.dart';
 import '../services/reconnecting_web_socket_service.dart';
+import '../services/alert_trace.dart';
 
 final alertsProvider = NotifierProvider<AlertsController, AlertsState>(
   AlertsController.new,
@@ -118,7 +120,21 @@ class AlertsController extends Notifier<AlertsState> {
         port: AppSettings.normalizeBackendPort(port),
         path: '/ws/alerts',
       ),
-      parser: AlertEvent.fromMessage,
+      parser: (message) {
+        try {
+          return AlertEvent.fromMessage(message);
+        } catch (error) {
+          String? eventId;
+          try {
+            final decoded = message is String ? jsonDecode(message) : message;
+            if (decoded is Map) eventId = decoded['event_id']?.toString();
+          } catch (_) {}
+          traceAlert('flutter_parse', eventId, 'failed', {
+            'error_type': error.runtimeType.toString(),
+          });
+          rethrow;
+        }
+      },
     );
     _alertSubscription = _socket!.messages.listen(
       _handleAlert,
@@ -210,11 +226,16 @@ class AlertsController extends Notifier<AlertsState> {
   }
 
   void _handleAlert(AlertEvent event) {
+    traceAlert('flutter_receive', event.eventId, 'parsed', {
+      'decision_state': event.rawDecisionState,
+      'stream_type': event.streamType,
+    });
     if (event.isConnectionMessage) {
       return;
     }
 
     if (event.isHistorical) {
+      traceAlert('provider_disposition', event.eventId, 'history_only');
       _addAlertToHistorySilently(event);
       return;
     }
@@ -226,6 +247,7 @@ class AlertsController extends Notifier<AlertsState> {
     state = state.copyWith(history: nextHistory, error: null);
 
     if (event.duplicateEvent) {
+      traceAlert('provider_disposition', event.eventId, 'duplicate_ignored');
       return;
     }
 
@@ -240,20 +262,37 @@ class AlertsController extends Notifier<AlertsState> {
   void _handleAuthoritativeAlert(AlertEvent event) {
     switch (event.decisionState) {
       case AlertDecisionState.suppressed:
+        traceAlert('provider_disposition', event.eventId, 'suppressed', {
+          'reason': event.decisionReason,
+        });
         _clearPendingVoiceState(clearKeywordNotice: true);
         return;
       case AlertDecisionState.advisory:
+        traceAlert('provider_disposition', event.eventId, 'notice', {
+          'reason': event.decisionReason,
+        });
         _clearPendingVoiceState();
         if (event.isRecognizedConfiguredKeyword) {
           _showKeywordNotice(event);
-          unawaited(ref.read(alertRuntimeServiceProvider).playSoftThermalBeep());
+          unawaited(
+            ref.read(alertRuntimeServiceProvider).playSoftThermalBeep(),
+          );
         }
         return;
       case AlertDecisionState.confirmed:
       case AlertDecisionState.critical:
+        traceAlert(
+          'provider_disposition',
+          event.eventId,
+          'emergency_candidate',
+          {'decision_state': event.rawDecisionState},
+        );
         unawaited(_startAuthoritativeEmergencyAlert(event));
         return;
       case AlertDecisionState.systemFault:
+        traceAlert('provider_disposition', event.eventId, 'system_fault', {
+          'reason': event.decisionReason,
+        });
         _clearPendingVoiceState(clearKeywordNotice: true);
         state = state.copyWith(
           thermalSoftAlert: false,
@@ -261,6 +300,9 @@ class AlertsController extends Notifier<AlertsState> {
         );
         return;
       case AlertDecisionState.unknown:
+        traceAlert('provider_disposition', event.eventId, 'unknown_decision', {
+          'reason': event.rawDecisionState,
+        });
         _clearPendingVoiceState(clearKeywordNotice: true);
         state = state.copyWith(
           thermalSoftAlert: false,
@@ -436,7 +478,8 @@ class AlertsController extends Notifier<AlertsState> {
     final isDoubleTapManual = event.source == 'manual_button';
     final isSingleTapManual = event.source == 'manual_button_single';
 
-    if (isSingleTapManual || event.decisionState == AlertDecisionState.advisory) {
+    if (isSingleTapManual ||
+        event.decisionState == AlertDecisionState.advisory) {
       if (event.isRecognizedConfiguredKeyword) {
         _showKeywordNotice(event);
         unawaited(ref.read(alertRuntimeServiceProvider).playSoftThermalBeep());
@@ -445,8 +488,13 @@ class AlertsController extends Notifier<AlertsState> {
     }
 
     final hasHuman =
-        isDoubleTapManual || event.humanDetected || _hasThermalPresenceFor(event);
+        isDoubleTapManual ||
+        event.humanDetected ||
+        _hasThermalPresenceFor(event);
     if (!hasHuman) {
+      traceAlert('provider_disposition', event.eventId, 'thermal_gate_notice', {
+        'reason': 'no_recent_thermal_presence',
+      });
       // Keyword detected but no thermal human — show status badge + soft beep.
       // No full-screen alert, no alarm, no vibration.
       if (event.isRecognizedConfiguredKeyword) {
@@ -500,6 +548,9 @@ class AlertsController extends Notifier<AlertsState> {
       activeAlertThermalFrame: thermalFrame,
       error: null,
     );
+    traceAlert('overlay', event.eventId, 'activated', {
+      'human_detected': humanDetected,
+    });
     final sound = ref.read(settingsProvider).alertSound;
     await ref
         .read(alertRuntimeServiceProvider)

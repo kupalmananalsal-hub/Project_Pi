@@ -11,6 +11,7 @@ import 'package:vibration/vibration.dart';
 
 import '../models/alert_event.dart';
 import '../models/app_settings.dart';
+import 'alert_trace.dart';
 
 class AlertRuntimeService {
   final _notifications = FlutterLocalNotificationsPlugin();
@@ -72,13 +73,32 @@ class AlertRuntimeService {
     AlertSound sound, {
     bool vibrate = true,
   }) async {
-    await initialize();
-    await _softPlayer.stop();
-    await _showNotification(event, vibrate: vibrate);
-    await _startAudio(sound);
+    Future<void> stage(String name, Future<void> Function() action) async {
+      traceAlert(name, event.eventId, 'attempted');
+      try {
+        await action();
+        traceAlert(name, event.eventId, 'completed');
+      } catch (error) {
+        traceAlert(name, event.eventId, 'failed', {
+          'error_type': error.runtimeType.toString(),
+        });
+        rethrow;
+      }
+    }
+
+    await stage('runtime_initialize', initialize);
+    await stage('soft_audio_stop', _softPlayer.stop);
+    await stage(
+      'notification',
+      () => _showNotification(event, vibrate: vibrate),
+    );
+    await stage('alarm_audio', () => _startAudio(sound));
     if (vibrate) {
-      await _startVibration();
+      await stage('vibration', _startVibration);
     } else {
+      traceAlert('vibration', event.eventId, 'skipped', {
+        'reason': 'provider_vibrate_false',
+      });
       await Vibration.cancel();
     }
   }

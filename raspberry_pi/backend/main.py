@@ -52,6 +52,7 @@ for extra_path in (
         sys.path.insert(0, extra_as_str)
 
 from alert_decision import AlertDecisionEngine
+from alert_trace import trace_alert
 from noise_suppressor import (
     DEFAULT_CONFIG_PATH,
     NoiseSuppressionConfig,
@@ -349,10 +350,14 @@ class AlertHub:
     async def publish(self, event: dict[str, Any]):
         if not event.get("timestamp"):
             event["timestamp"] = datetime.now(timezone.utc).isoformat()
+        trace_alert("queue_publish", event.get("event_id"), "started",
+                    client_count=len(self.clients))
         for client_queue in list(self.clients):
             try:
                 client_queue.put_nowait(event)
             except asyncio.QueueFull:
+                trace_alert("queue_publish", event.get("event_id"), "overflow",
+                            reason="oldest_event_dropped")
                 # Drop oldest event to make room; prevents blocking broadcast
                 # when one client has stalled or disconnected.
                 try:
@@ -362,7 +367,10 @@ class AlertHub:
                 try:
                     client_queue.put_nowait(event)
                 except asyncio.QueueFull:
-                    pass
+                    trace_alert("queue_publish", event.get("event_id"), "failed",
+                                reason="queue_remained_full")
+        trace_alert("queue_publish", event.get("event_id"), "completed",
+                    client_count=len(self.clients))
 
     async def connect(self):
         client_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
@@ -1695,7 +1703,13 @@ async def ws_alerts(websocket: WebSocket):
         )
         while True:
             event = await client_queue.get()
-            await websocket.send_json(alert_with_type(event, "live"))
+            try:
+                await websocket.send_json(alert_with_type(event, "live"))
+                trace_alert("websocket_send", event.get("event_id"), "succeeded")
+            except Exception as exc:
+                trace_alert("websocket_send", event.get("event_id"), "failed",
+                            error_type=type(exc).__name__)
+                raise
     except WebSocketDisconnect:
         pass
     finally:
@@ -2453,6 +2467,8 @@ async def api_alerts(event: AlertIn):
     event_id, generated_event_id = normalize_event_id(payload.get("event_id"))
     payload["event_id"] = event_id
     payload["server_generated_event_id"] = generated_event_id
+    trace_alert("http_receive", event_id, "accepted",
+                generated_event_id=generated_event_id)
     fingerprint = alert_event_fingerprint(payload)
     claim = await alert_idempotency.claim(event_id, fingerprint)
     if claim["status"] == "conflict":
@@ -2461,6 +2477,7 @@ async def api_alerts(event: AlertIn):
             detail="event_id was reused for a different alert event",
         )
     if claim["status"] == "duplicate":
+        trace_alert("http_receive", event_id, "duplicate")
         return duplicate_response(claim["response"])
     if claim["status"] == "in_flight":
         cached_event = await claim["future"]
@@ -2483,14 +2500,21 @@ async def api_alerts(event: AlertIn):
             read_error=thermal_error,
         )
         payload = enrich_alert_payload(payload, thermal_payload)
+        trace_alert("backend_decision", event_id, "completed",
+                    decision_state=payload.get("decision_state"),
+                    decision_reason=payload.get("decision_reason"),
+                    thermal_state=payload.get("thermal_state"))
         payload["duplicate_event"] = False
         stored_payload = await asyncio.to_thread(alert_store.insert, payload)
+        trace_alert("persistence", event_id, "succeeded")
         stored_payload["duplicate_event"] = False
         broadcast_payload = dict(stored_payload)
         await alerts.publish(broadcast_payload)
         await alert_idempotency.complete(event_id, stored_payload)
         return {"ok": True, "duplicate_event": False, "event": stored_payload}
     except Exception as exc:
+        trace_alert("backend_processing", event_id, "failed",
+                    error_type=type(exc).__name__)
         await alert_idempotency.fail(event_id, exc)
         raise
 

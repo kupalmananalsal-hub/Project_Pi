@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -390,4 +393,58 @@ void main() {
     expect(state.activeAlert, isNull);
     expect(runtime.softBeeps, 1);
   });
+
+  test(
+    'trace identifies the last client stage for four decision classes',
+    () async {
+      final originalDebugPrint = debugPrint;
+      final records = <Map<String, dynamic>>[];
+      debugPrint = (String? message, {int? wrapWidth}) {
+        if (message == null || !message.startsWith('{')) return;
+        final decoded = jsonDecode(message);
+        if (decoded is Map<String, dynamic> &&
+            decoded['kind'] == 'alert_trace') {
+          records.add(decoded);
+        }
+      };
+      try {
+        for (final decision in [
+          'suppressed',
+          'advisory',
+          'confirmed',
+          'critical',
+        ]) {
+          records.clear();
+          final runtime = FakeAlertRuntimeService();
+          final container = makeContainer(runtime);
+          final event = eventFrom(
+            decisionState: decision,
+            alertLevel: decision == 'suppressed' ? 'none' : 'full_alert',
+            humanDetected: decision == 'confirmed',
+            thermalState: decision == 'confirmed' ? 'positive' : 'unavailable',
+            confidence: decision == 'critical' ? 0.95 : 0.75,
+          );
+          container.read(alertsProvider.notifier).handleAlertForTest(event);
+          await drainAsync();
+          final eventRecords = records
+              .where((r) => r['event_id'] == event.eventId)
+              .toList();
+          expect(eventRecords, isNotEmpty, reason: decision);
+          final lastStage = eventRecords.last['stage'];
+          expect(
+            lastStage,
+            decision == 'confirmed' ? 'overlay' : 'provider_disposition',
+            reason: decision,
+          );
+          if (decision == 'critical') {
+            // Phase 2 target: this should reach overlay and emergency output.
+            expect(eventRecords.last['outcome'], 'thermal_gate_notice');
+            expect(runtime.emergencyStarts, 0);
+          }
+        }
+      } finally {
+        debugPrint = originalDebugPrint;
+      }
+    },
+  );
 }

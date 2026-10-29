@@ -15,6 +15,12 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 
+RASPBERRY_PI_ROOT = Path(__file__).resolve().parents[1]
+if str(RASPBERRY_PI_ROOT) not in sys.path:
+    sys.path.insert(0, str(RASPBERRY_PI_ROOT))
+
+from alert_trace import trace_alert
+
 import numpy as np
 import pyaudio
 import requests
@@ -150,7 +156,8 @@ class AlertPoster:
         }
         if extra:
             event.update(extra)
-        print(f"Alert: {keyword} detected by {source}! {json.dumps(event)}", flush=True)
+        trace_alert("detection", event["event_id"], "accepted", keyword=keyword,
+                    source=source, confidence=confidence)
         with self.lock:
             self.pending.append(event)
             self._persist_pending_locked()
@@ -202,6 +209,8 @@ class AlertPoster:
                 response = self.session.post(self.backend_url, json=event, timeout=1.0)
                 response.raise_for_status()
             except Exception as exc:  # pragma: no cover - network side effect
+                trace_alert("http_post", event.get("event_id"), "failed",
+                            error_type=type(exc).__name__, pending_count=pending_count)
                 print(
                     f"Backend alert post failed; queued {pending_count} alert(s): {exc}",
                     file=sys.stderr,
@@ -215,7 +224,8 @@ class AlertPoster:
                     self._persist_pending_locked()
                 else:
                     continue
-            print(f"Backend alert posted: {sent['keyword']}", flush=True)
+            trace_alert("http_post", sent.get("event_id"), "succeeded",
+                        keyword=sent["keyword"], status_code=getattr(response, "status_code", None))
 
     def _load_pending(self) -> tuple[list[dict[str, object]], bool]:
         if not self.queue_path.exists():
