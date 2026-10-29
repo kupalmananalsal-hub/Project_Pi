@@ -20,6 +20,13 @@ class AlertRuntimeService {
 
   Timer? _vibrationFallbackTimer;
   bool _initialized = false;
+  Future<void> _transition = Future<void>.value();
+
+  Future<void> _serialize(Future<void> Function() action) {
+    final next = _transition.then((_) => action());
+    _transition = next.catchError((Object _) {});
+    return next;
+  }
 
   Future<void> initialize() async {
     if (_initialized) {
@@ -82,33 +89,43 @@ class AlertRuntimeService {
         traceAlert(name, event.eventId, 'failed', {
           'error_type': error.runtimeType.toString(),
         });
-        rethrow;
       }
     }
 
-    await stage('runtime_initialize', initialize);
-    await stage('soft_audio_stop', _softPlayer.stop);
-    await stage(
-      'notification',
-      () => _showNotification(event, vibrate: vibrate),
-    );
-    await stage('alarm_audio', () => _startAudio(sound));
-    if (vibrate) {
-      await stage('vibration', _startVibration);
-    } else {
-      traceAlert('vibration', event.eventId, 'skipped', {
-        'reason': 'provider_vibrate_false',
-      });
-      await Vibration.cancel();
-    }
+    await _serialize(() async {
+      await Future.wait([
+        stage('notification', () async {
+          await showEmergencyNotification(event, vibrate: vibrate);
+        }),
+        stage('alarm_audio', () async {
+          await stopSoftAudio();
+          await _startAudio(sound, event.eventId);
+        }),
+        stage('vibration', vibrate ? startVibration : Vibration.cancel),
+      ]);
+    });
   }
 
   Future<void> stopEmergency() async {
-    _vibrationFallbackTimer?.cancel();
-    _vibrationFallbackTimer = null;
-    await Vibration.cancel();
-    await _player.stop();
-    await _notifications.cancel(id: 1001);
+    await _serialize(() async {
+      _vibrationFallbackTimer?.cancel();
+      _vibrationFallbackTimer = null;
+      await Future.wait([
+        _cleanup('vibration_stop', Vibration.cancel),
+        _cleanup('audio_stop', _player.stop),
+        _cleanup('notification_cancel', () => _notifications.cancel(id: 1001)),
+      ]);
+    });
+  }
+
+  Future<void> _cleanup(String stage, Future<void> Function() action) async {
+    try {
+      await action();
+    } catch (error) {
+      traceAlert(stage, null, 'failed', {
+        'error_type': error.runtimeType.toString(),
+      });
+    }
   }
 
   Future<void> playSoftThermalBeep() async {
@@ -125,15 +142,18 @@ class AlertRuntimeService {
 
   Future<void> dispose() async {
     await stopEmergency();
-    await _softPlayer.stop();
-    await _player.dispose();
-    await _softPlayer.dispose();
+    await _cleanup('soft_audio_stop', _softPlayer.stop);
+    await _cleanup('audio_dispose', _player.dispose);
+    await _cleanup('soft_audio_dispose', _softPlayer.dispose);
   }
 
-  Future<void> _showNotification(
+  Future<void> stopSoftAudio() => _softPlayer.stop();
+
+  Future<void> showEmergencyNotification(
     AlertEvent event, {
     required bool vibrate,
   }) async {
+    await initialize();
     const android = AndroidNotificationDetails(
       'keyword_alerts',
       'Keyword Alerts',
@@ -163,7 +183,7 @@ class AlertRuntimeService {
       title: event.emergencyTitle,
       body:
           'Voice from ${event.directionLabel}. '
-          '${vibrate ? 'Thermal human detected.' : 'No thermal human; vibration skipped.'} '
+          'Thermal status: ${event.backendThermalState.name}. '
           '${_formatTime(event.timestamp)}',
       notificationDetails: const NotificationDetails(
         android: android,
@@ -172,17 +192,35 @@ class AlertRuntimeService {
     );
   }
 
-  Future<void> _startAudio(AlertSound sound) async {
+  Future<void> _startAudio(AlertSound sound, String? eventId) async {
+    await prepareAudio(sound);
+    traceAlert('audio_preparation', eventId, 'completed');
+    unawaited(
+      playAudio()
+          .then((_) {
+            traceAlert('audio_playback', eventId, 'completed');
+          })
+          .catchError((Object error) {
+            traceAlert('audio_playback', eventId, 'failed', {
+              'error_type': error.runtimeType.toString(),
+            });
+          }),
+    );
+    traceAlert('audio_playback', eventId, 'initiated');
+  }
+
+  Future<void> playAudio() => _player.play();
+
+  Future<void> prepareAudio(AlertSound sound) async {
     final session = await AudioSession.instance;
     await session.setActive(true);
     final file = await _alarmFile(sound);
     await _player.setFilePath(file.path);
     await _player.setLoopMode(LoopMode.one);
     await _player.setVolume(1);
-    await _player.play();
   }
 
-  Future<void> _startVibration() async {
+  Future<void> startVibration() async {
     final hasVibrator = await Vibration.hasVibrator();
     if (!hasVibrator) {
       return;
@@ -194,10 +232,15 @@ class AlertRuntimeService {
     );
     _vibrationFallbackTimer?.cancel();
     _vibrationFallbackTimer = Timer.periodic(const Duration(seconds: 4), (_) {
-      Vibration.vibrate(
-        pattern: const [0, 700, 150, 700],
-        intensities: const [255, 0, 255, 0],
-        repeat: 0,
+      unawaited(
+        _cleanup(
+          'vibration_repeat',
+          () => Vibration.vibrate(
+            pattern: const [0, 700, 150, 700],
+            intensities: const [255, 0, 255, 0],
+            repeat: 0,
+          ),
+        ),
       );
     });
   }

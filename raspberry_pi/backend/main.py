@@ -352,25 +352,34 @@ class AlertHub:
             event["timestamp"] = datetime.now(timezone.utc).isoformat()
         trace_alert("queue_publish", event.get("event_id"), "started",
                     client_count=len(self.clients))
+        enqueued = failed = dropped = 0
         for client_queue in list(self.clients):
             try:
                 client_queue.put_nowait(event)
+                enqueued += 1
             except asyncio.QueueFull:
                 trace_alert("queue_publish", event.get("event_id"), "overflow",
                             reason="oldest_event_dropped")
                 # Drop oldest event to make room; prevents blocking broadcast
                 # when one client has stalled or disconnected.
                 try:
-                    client_queue.get_nowait()
+                    old_event = client_queue.get_nowait()
+                    dropped += 1
+                    trace_alert("queue_drop", old_event.get("event_id"), "dropped",
+                                reason="queue_overflow")
                 except asyncio.QueueEmpty:
                     pass
                 try:
                     client_queue.put_nowait(event)
+                    enqueued += 1
                 except asyncio.QueueFull:
+                    failed += 1
                     trace_alert("queue_publish", event.get("event_id"), "failed",
                                 reason="queue_remained_full")
-        trace_alert("queue_publish", event.get("event_id"), "completed",
-                    client_count=len(self.clients))
+        trace_alert("queue_publish", event.get("event_id"),
+                    "no_subscribers" if not self.clients else "enqueue_summary",
+                    client_count=len(self.clients), enqueued=enqueued,
+                    failed_enqueues=failed, overflow_drops=dropped)
 
     async def connect(self):
         client_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
@@ -2467,10 +2476,12 @@ async def api_alerts(event: AlertIn):
     event_id, generated_event_id = normalize_event_id(payload.get("event_id"))
     payload["event_id"] = event_id
     payload["server_generated_event_id"] = generated_event_id
-    trace_alert("http_receive", event_id, "accepted",
+    trace_alert("http_receive", event_id, "received",
                 generated_event_id=generated_event_id)
     fingerprint = alert_event_fingerprint(payload)
     claim = await alert_idempotency.claim(event_id, fingerprint)
+    trace_alert("http_claim", event_id,
+                claim["status"] if claim["status"] in ("conflict", "duplicate", "in_flight") else "accepted")
     if claim["status"] == "conflict":
         raise HTTPException(
             status_code=409,

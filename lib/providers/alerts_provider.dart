@@ -149,7 +149,9 @@ class AlertsController extends Notifier<AlertsState> {
   }
 
   Future<void> dismissActiveAlert() async {
+    final dismissed = state.activeAlert;
     await ref.read(alertRuntimeServiceProvider).stopEmergency();
+    if (!ref.mounted || !identical(state.activeAlert, dismissed)) return;
     state = state.copyWith(
       activeAlert: null,
       activeAlertHumanDetected: false,
@@ -487,11 +489,10 @@ class AlertsController extends Notifier<AlertsState> {
       return;
     }
 
-    final hasHuman =
-        isDoubleTapManual ||
-        event.humanDetected ||
-        _hasThermalPresenceFor(event);
-    if (!hasHuman) {
+    final hasHuman = event.humanDetected || _hasThermalPresenceFor(event);
+    if (!hasHuman &&
+        !isDoubleTapManual &&
+        event.decisionState != AlertDecisionState.critical) {
       traceAlert('provider_disposition', event.eventId, 'thermal_gate_notice', {
         'reason': 'no_recent_thermal_presence',
       });
@@ -509,8 +510,8 @@ class AlertsController extends Notifier<AlertsState> {
     await _startFullEmergencyAlert(
       event,
       thermalFrame,
-      humanDetected: true,
-      vibrate: event.shouldVibrate,
+      humanDetected: hasHuman,
+      vibrate: true,
     );
   }
 

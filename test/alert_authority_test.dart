@@ -183,7 +183,7 @@ void main() {
   );
 
   test(
-    'critical voice-only (no human) shows keyword notice only — no full-screen',
+    'critical voice-only starts emergency without claiming thermal detection',
     () async {
       final runtime = FakeAlertRuntimeService();
       final container = makeContainer(runtime);
@@ -200,13 +200,13 @@ void main() {
       controller.handleAlertForTest(event);
       await drainAsync();
 
-      // Per alert table Option B: Keyword Only (no human) → status badge +
-      // soft notification beep. NO full-screen, no alarm, no vibration.
       final state = container.read(alertsProvider);
       expect(state.keywordNotice, event);
-      expect(state.activeAlert, isNull);
-      expect(runtime.emergencyStarts, 0);
-      expect(runtime.softBeeps, 1);
+      expect(state.activeAlert, event);
+      expect(state.activeAlertHumanDetected, isFalse);
+      expect(runtime.emergencyStarts, 1);
+      expect(runtime.lastVibrate, isTrue);
+      expect(runtime.softBeeps, 0);
     },
   );
 
@@ -230,11 +230,52 @@ void main() {
 
       final state = container.read(alertsProvider);
       expect(state.activeAlert, event);
-      expect(state.activeAlertHumanDetected, isTrue);
+      expect(state.activeAlertHumanDetected, isFalse);
       expect(runtime.emergencyStarts, 1);
       expect(runtime.softBeeps, 0);
     },
   );
+
+  for (final thermalState in ['negative', 'stale', 'unavailable']) {
+    test(
+      'critical with $thermalState thermal evidence still vibrates',
+      () async {
+        final runtime = FakeAlertRuntimeService();
+        final container = makeContainer(runtime);
+        container
+            .read(alertsProvider.notifier)
+            .handleAlertForTest(
+              eventFrom(
+                decisionState: 'critical',
+                thermalState: thermalState,
+                confidence: 0.95,
+              ),
+            );
+        await drainAsync();
+        expect(runtime.lastVibrate, isTrue);
+        expect(
+          container.read(alertsProvider).activeAlertHumanDetected,
+          isFalse,
+        );
+      },
+    );
+  }
+
+  test('historical critical is recorded without emergency output', () async {
+    final runtime = FakeAlertRuntimeService();
+    final container = makeContainer(runtime);
+    final event = AlertEvent.fromMessage({
+      'type': 'historical',
+      'event_id': 'historical-critical',
+      'keyword': 'help',
+      'confidence': 0.95,
+      'decision_state': 'critical',
+    });
+    container.read(alertsProvider.notifier).handleAlertForTest(event);
+    await drainAsync();
+    expect(container.read(alertsProvider).history, contains(event));
+    expect(runtime.emergencyStarts, 0);
+  });
 
   test(
     'single tap manual button produces keyword notice only — no full-screen alert',
@@ -433,13 +474,14 @@ void main() {
           final lastStage = eventRecords.last['stage'];
           expect(
             lastStage,
-            decision == 'confirmed' ? 'overlay' : 'provider_disposition',
+            ['confirmed', 'critical'].contains(decision)
+                ? 'overlay'
+                : 'provider_disposition',
             reason: decision,
           );
           if (decision == 'critical') {
-            // Phase 2 target: this should reach overlay and emergency output.
-            expect(eventRecords.last['outcome'], 'thermal_gate_notice');
-            expect(runtime.emergencyStarts, 0);
+            expect(eventRecords.last['outcome'], 'activated');
+            expect(runtime.emergencyStarts, 1);
           }
         }
       } finally {

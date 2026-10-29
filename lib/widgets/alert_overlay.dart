@@ -93,7 +93,7 @@ class _AlertOverlayState extends State<AlertOverlay>
                       Text(
                         widget.humanDetected
                             ? 'Thermal human detected - alarm active'
-                            : 'No thermal human detected',
+                            : 'Thermal status: ${widget.event.backendThermalState.name}',
                         textAlign: TextAlign.center,
                         style: Theme.of(
                           context,
