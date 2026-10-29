@@ -5,6 +5,7 @@ import '../models/app_settings.dart';
 import '../providers/connection_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/pi_api_service.dart';
+import '../services/alert_delivery_service.dart';
 import '../widgets/connection_indicator.dart';
 import '../widgets/status_card.dart';
 
@@ -70,6 +71,11 @@ class _ConnectionStatusScreenState
           ],
         ),
         const SizedBox(height: 16),
+        OutlinedButton.icon(
+          icon: const Icon(Icons.key),
+          label: const Text('Pair reliable alert delivery'),
+          onPressed: _pairDelivery,
+        ),
         TextField(
           controller: _hostController,
           keyboardType: TextInputType.url,
@@ -240,6 +246,63 @@ class _ConnectionStatusScreenState
         ),
       ],
     );
+  }
+
+  Future<void> _pairDelivery() async {
+    final id = await CaregiverCredentials.installationId();
+    if (!mounted) return;
+    final controller = TextEditingController();
+    final token = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Pair this Caregiver'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Give this installation ID to the Pi administrator, then enter its pairing secret.',
+            ),
+            SelectableText(id),
+            TextField(
+              controller: controller,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: 'Pairing secret'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    // The dialog route can still render during its closing animation.
+    if (token != null && token.length >= 32) {
+      await CaregiverCredentials.saveToken(_hostController.text.trim(), token);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Pairing saved. Reconnect to activate reliable delivery.',
+            ),
+          ),
+        );
+      }
+    } else if (token != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Use the full pairing secret (at least 32 characters).',
+          ),
+        ),
+      );
+    }
   }
 
   Future<void> _confirmPowerAction(

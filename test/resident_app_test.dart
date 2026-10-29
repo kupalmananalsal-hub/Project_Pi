@@ -20,6 +20,7 @@ class FakeResidentAlertService extends ResidentAlertService {
     String source = 'manual_button',
     String? hostOverride,
     int? portOverride,
+    String? eventId,
   }) async {
     manualAlertCalls++;
     lastKeyword = keyword;
@@ -39,35 +40,33 @@ void main() {
     });
   });
 
-  testWidgets('ResidentModeScreen renders pure black screen with large HELP button and gear icon', (
-    tester,
-  ) async {
-    final fakeService = FakeResidentAlertService();
+  testWidgets(
+    'ResidentModeScreen renders pure black screen with large HELP button and gear icon',
+    (tester) async {
+      final fakeService = FakeResidentAlertService();
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: ResidentModeScreen(alertService: fakeService),
-      ),
-    );
-    await tester.pump();
+      await tester.pumpWidget(
+        MaterialApp(home: ResidentModeScreen(alertService: fakeService)),
+      );
+      await tester.pump();
 
-    // Verify pure black background
-    final scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
-    expect(scaffold.backgroundColor, Colors.black);
+      // Verify pure black background
+      final scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
+      expect(scaffold.backgroundColor, Colors.black);
 
-    // Verify HELP button text
-    expect(find.text('HELP'), findsOneWidget);
+      // Verify HELP button text
+      expect(find.text('HELP'), findsOneWidget);
 
-    // Verify gear settings icon in top-right
-    expect(find.byKey(const ValueKey('resident-settings-button')), findsOneWidget);
-  });
+      // Verify gear settings icon in top-right
+      expect(
+        find.byKey(const ValueKey('resident-settings-button')),
+        findsOneWidget,
+      );
+    },
+  );
 
   testWidgets('Tapping gear icon opens ResidentSettingsScreen', (tester) async {
-    await tester.pumpWidget(
-      const MaterialApp(
-        home: ResidentModeScreen(),
-      ),
-    );
+    await tester.pumpWidget(const MaterialApp(home: ResidentModeScreen()));
     await tester.pump();
 
     await tester.tap(find.byKey(const ValueKey('resident-settings-button')));
@@ -79,15 +78,16 @@ void main() {
     expect(find.byKey(const ValueKey('pi-port-field')), findsOneWidget);
   });
 
-  testWidgets('Saving new IP and port updates SharedPreferences', (tester) async {
-    await tester.pumpWidget(
-      const MaterialApp(
-        home: ResidentSettingsScreen(),
-      ),
-    );
+  testWidgets('Saving new IP and port updates SharedPreferences', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: ResidentSettingsScreen()));
     await tester.pumpAndSettle();
 
-    await tester.enterText(find.byKey(const ValueKey('pi-ip-field')), '192.168.1.50');
+    await tester.enterText(
+      find.byKey(const ValueKey('pi-ip-field')),
+      '192.168.1.50',
+    );
     await tester.enterText(find.byKey(const ValueKey('pi-port-field')), '9000');
     await tester.tap(find.byKey(const ValueKey('save-settings-button')));
     await tester.pumpAndSettle();
@@ -103,15 +103,15 @@ void main() {
     final fakeService = FakeResidentAlertService()..shouldSucceed = true;
 
     await tester.pumpWidget(
-      MaterialApp(
-        home: ResidentModeScreen(alertService: fakeService),
-      ),
+      MaterialApp(home: ResidentModeScreen(alertService: fakeService)),
     );
     await tester.pump();
 
     await tester.tap(find.text('HELP'));
     await tester.pump(); // Start press animation
-    await tester.pump(const Duration(milliseconds: 700)); // Complete single tap timer & send
+    await tester.pump(
+      const Duration(milliseconds: 700),
+    ); // Complete single tap timer & send
     await tester.pumpAndSettle();
 
     expect(fakeService.manualAlertCalls, 1);
@@ -128,9 +128,7 @@ void main() {
     final fakeService = FakeResidentAlertService()..shouldSucceed = true;
 
     await tester.pumpWidget(
-      MaterialApp(
-        home: ResidentModeScreen(alertService: fakeService),
-      ),
+      MaterialApp(home: ResidentModeScreen(alertService: fakeService)),
     );
     await tester.pump();
 
@@ -152,9 +150,7 @@ void main() {
     final fakeService = FakeResidentAlertService()..shouldSucceed = false;
 
     await tester.pumpWidget(
-      MaterialApp(
-        home: ResidentModeScreen(alertService: fakeService),
-      ),
+      MaterialApp(home: ResidentModeScreen(alertService: fakeService)),
     );
     await tester.pump();
 
@@ -167,16 +163,17 @@ void main() {
     expect(find.text('Failed to send alert'), findsOneWidget);
   });
 
-  testWidgets('ResidentApp builds successfully with black theme and saved host', (
-    tester,
-  ) async {
-    await tester.pumpWidget(const ResidentApp());
-    await tester.pump();
-    await tester.pumpAndSettle();
+  testWidgets(
+    'ResidentApp builds successfully with black theme and saved host',
+    (tester) async {
+      await tester.pumpWidget(const ResidentApp());
+      await tester.pump();
+      await tester.pumpAndSettle();
 
-    expect(find.byType(ResidentModeScreen), findsOneWidget);
-    expect(find.text('HELP'), findsOneWidget);
-  });
+      expect(find.byType(ResidentModeScreen), findsOneWidget);
+      expect(find.text('HELP'), findsOneWidget);
+    },
+  );
 
   testWidgets('ResidentApp shows settings screen first if no host is saved', (
     tester,

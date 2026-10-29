@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/app_settings.dart';
+import 'alert_delivery_service.dart';
 
 class ResidentAlertService {
   ResidentAlertService({Dio? dio, String? host, int? port})
@@ -28,6 +29,7 @@ class ResidentAlertService {
     String source = 'manual_button',
     String? hostOverride,
     int? portOverride,
+    String? eventId,
   }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -46,7 +48,12 @@ class ResidentAlertService {
           'http://$host:${AppSettings.normalizeBackendPort(port)}/api/alerts/manual';
       final response = await _dio.post<Map<String, dynamic>>(
         url,
-        data: {'keyword': keyword, 'confidence': confidence, 'source': source},
+        data: {
+          'event_id': eventId ?? CaregiverCredentials.randomId(),
+          'keyword': keyword,
+          'confidence': confidence,
+          'source': source,
+        },
       );
 
       final statusCode = response.statusCode ?? 0;

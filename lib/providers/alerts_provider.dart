@@ -12,6 +12,7 @@ import '../providers/settings_provider.dart';
 import '../providers/thermal_provider.dart';
 import '../services/reconnecting_web_socket_service.dart';
 import '../services/alert_trace.dart';
+import '../services/alert_delivery_service.dart';
 
 final alertsProvider = NotifierProvider<AlertsController, AlertsState>(
   AlertsController.new,
@@ -86,6 +87,10 @@ class AlertsController extends Notifier<AlertsState> {
   static const _thermalSoftBeepCooldown = Duration(seconds: 7);
 
   ReconnectingWebSocketService<AlertEvent>? _socket;
+  AlertDeliveryService? _delivery;
+  int _connectionGeneration = 0;
+  Future<void> _deliveryClose = Future.value();
+  final Set<String> _handledIds = {};
   StreamSubscription<AlertEvent>? _alertSubscription;
   StreamSubscription<SocketConnectionStatus>? _statusSubscription;
   Timer? _keywordNoticeTimer;
@@ -111,8 +116,53 @@ class AlertsController extends Notifier<AlertsState> {
     return const AlertsState();
   }
 
-  void connect(String host, int port) {
+  Future<void> connect(String host, int port) async {
     disconnect();
+    final generation = _connectionGeneration;
+    try {
+      await _deliveryClose;
+      final token = await CaregiverCredentials.token(host);
+      if (generation != _connectionGeneration || !ref.mounted) return;
+      if (token != null && token.isNotEmpty) {
+        final installation = await CaregiverCredentials.installationId();
+        final inbox = await AlertDeliveryService.openInbox(host, installation);
+        if (generation != _connectionGeneration || !ref.mounted) return;
+        _delivery = AlertDeliveryService(
+          uri: Uri(
+            scheme: 'ws',
+            host: host,
+            port: AppSettings.normalizeBackendPort(port),
+            path: '/ws/alerts',
+          ),
+          installation: installation,
+          token: token,
+          inbox: inbox,
+          onEvent: (event) {
+            if (!ref.mounted || generation != _connectionGeneration) {
+              return false;
+            }
+            _handleAlert(event);
+            return identical(state.activeAlert, event);
+          },
+          onError: (error) {
+            if (ref.mounted && generation == _connectionGeneration) {
+              state = state.copyWith(error: error.toString());
+            }
+          },
+          onStatus: (status) {
+            if (ref.mounted && generation == _connectionGeneration) {
+              state = state.copyWith(socketStatus: status);
+            }
+          },
+        )..connect();
+        return;
+      }
+    } catch (error) {
+      if (ref.mounted && generation == _connectionGeneration) {
+        state = state.copyWith(error: 'Alert delivery setup failed: $error');
+      }
+      return;
+    }
     _socket = ReconnectingWebSocketService<AlertEvent>(
       uri: Uri(
         scheme: 'ws',
@@ -150,6 +200,16 @@ class AlertsController extends Notifier<AlertsState> {
 
   Future<void> dismissActiveAlert() async {
     final dismissed = state.activeAlert;
+    if (dismissed?.eventId != null) {
+      unawaited(
+        _delivery?.confirm(dismissed!.eventId!).catchError((Object error) {
+              traceAlert('ack_user_confirmed', dismissed.eventId, 'failed', {
+                'reason': error.runtimeType.toString(),
+              });
+            }) ??
+            Future.value(),
+      );
+    }
     await ref.read(alertRuntimeServiceProvider).stopEmergency();
     if (!ref.mounted || !identical(state.activeAlert, dismissed)) return;
     state = state.copyWith(
@@ -204,6 +264,10 @@ class AlertsController extends Notifier<AlertsState> {
   }
 
   void disconnect() {
+    _connectionGeneration++;
+    final delivery = _delivery;
+    _delivery = null;
+    if (delivery != null) _deliveryClose = delivery.dispose();
     _alertSubscription?.cancel();
     _alertSubscription = null;
     _statusSubscription?.cancel();
@@ -239,6 +303,11 @@ class AlertsController extends Notifier<AlertsState> {
     if (event.isHistorical) {
       traceAlert('provider_disposition', event.eventId, 'history_only');
       _addAlertToHistorySilently(event);
+      return;
+    }
+
+    if (event.eventId != null && !_handledIds.add(event.eventId!)) {
+      traceAlert('provider_disposition', event.eventId, 'duplicate_ignored');
       return;
     }
 
@@ -489,7 +558,10 @@ class AlertsController extends Notifier<AlertsState> {
       return;
     }
 
-    final hasHuman = event.humanDetected || _hasThermalPresenceFor(event);
+    final hasHuman =
+        event.backendThermalState == BackendThermalState.positive ||
+        (event.backendThermalState == BackendThermalState.unknown &&
+            event.humanDetected);
     if (!hasHuman &&
         !isDoubleTapManual &&
         event.decisionState != AlertDecisionState.critical) {
@@ -505,11 +577,9 @@ class AlertsController extends Notifier<AlertsState> {
       return;
     }
     // Keyword + Human confirmed — trigger full-screen alarm.
-    final thermalFrame =
-        ref.read(thermalProvider).frame ?? _lastThermalHumanFrame;
     await _startFullEmergencyAlert(
       event,
-      thermalFrame,
+      null,
       humanDetected: hasHuman,
       vibrate: true,
     );
