@@ -34,8 +34,10 @@ class CaregiverCredentials {
 /// Alternating flushed snapshots keep the preceding valid snapshot on interrupted writes.
 /// All callers serialize mutations through the delivery service.
 class AlertInbox {
-  AlertInbox(this.directory);
+  AlertInbox(this.directory, {this.writeSnapshot});
   final Directory directory;
+  final Future<void> Function(File file, String contents)? writeSnapshot;
+  String? _committed;
   int revision = 0;
   Map<String, dynamic> data = {
     'instance': '',
@@ -73,14 +75,27 @@ class AlertInbox {
       }
     }
     if (exists && !valid) throw StateError('alert_inbox_corrupt');
+    _committed = jsonEncode(data);
   }
 
   Future<void> save() async {
     final next = revision + 1;
-    await File(
-      '${directory.path}/inbox.${next % 2}.json',
-    ).writeAsString(jsonEncode({'revision': next, 'data': data}), flush: true);
+    final file = File('${directory.path}/inbox.${next % 2}.json');
+    final contents = jsonEncode({'revision': next, 'data': data});
+    try {
+      if (writeSnapshot != null) {
+        await writeSnapshot!(file, contents);
+      } else {
+        await file.writeAsString(contents, flush: true);
+      }
+    } catch (_) {
+      if (_committed != null) {
+        data = jsonDecode(_committed!) as Map<String, dynamic>;
+      }
+      rethrow;
+    }
     revision = next;
+    _committed = jsonEncode(data);
   }
 
   void ack(String kind, String id, int sequence) {
@@ -102,6 +117,9 @@ class AlertDeliveryService {
     required this.onEvent,
     required this.onError,
     required this.onStatus,
+    this.isActive,
+    this.afterIntent,
+    this.onSendForTest,
   });
   final Uri uri;
   final String installation;
@@ -110,6 +128,12 @@ class AlertDeliveryService {
   final bool Function(AlertEvent) onEvent;
   final void Function(Object) onError;
   final void Function(SocketConnectionStatus) onStatus;
+  final bool Function(String eventId)? isActive;
+  final Future<void> Function()? afterIntent;
+  @visibleForTesting
+  final void Function(Map<String, dynamic>)? onSendForTest;
+  final Set<String> _handledThisRun = {};
+  int _sessionGeneration = 0;
   ReconnectingWebSocketService<Map<String, dynamic>>? _socket;
   StreamSubscription<Map<String, dynamic>>? _messages;
   StreamSubscription<SocketConnectionStatus>? _status;
@@ -119,8 +143,15 @@ class AlertDeliveryService {
   bool _authenticated = false;
 
   @visibleForTesting
-  Future<void> handleMessageForTest(Map<String, dynamic> message) =>
-      _handle(message);
+  Future<void> handleMessageForTest(Map<String, dynamic> message) => runZoned(
+    () => _handle(message),
+    zoneValues: {#deliverySession: _sessionGeneration},
+  );
+
+  @visibleForTesting
+  void invalidateSessionForTest() {
+    _sessionGeneration++;
+  }
 
   static Future<AlertInbox> openInbox(String host, String installation) async {
     final root = await getApplicationSupportDirectory();
@@ -138,6 +169,7 @@ class AlertDeliveryService {
       parser: (message) =>
           jsonDecode(message as String) as Map<String, dynamic>,
       onReady: () {
+        _sessionGeneration++;
         _authenticated = false;
         _send({
           'type': 'authenticate',
@@ -148,9 +180,15 @@ class AlertDeliveryService {
       },
     );
     _messages = _socket!.messages.listen((message) {
+      final generation = _sessionGeneration;
       _work = _work
           .then((_) async {
-            if (!_closed) await _handle(message);
+            if (!_closed && generation == _sessionGeneration) {
+              await runZoned(
+                () => _handle(message),
+                zoneValues: {#deliverySession: generation},
+              );
+            }
           })
           .catchError((Object error) {
             traceAlert(
@@ -159,18 +197,27 @@ class AlertDeliveryService {
               'failed',
               {'reason': error.runtimeType.toString()},
             );
-            if (!_closed) {
+            if (!_closed && generation == _sessionGeneration) {
               onError(error);
               _socket?.reconnect();
             }
           });
     }, onError: onError);
-    _status = _socket!.status.listen(onStatus);
+    _status = _socket!.status.listen((status) {
+      if (status == SocketConnectionStatus.reconnecting ||
+          status == SocketConnectionStatus.disconnected) {
+        _sessionGeneration++;
+        _authenticated = false;
+      }
+      onStatus(status);
+    });
     _socket!.connect();
   }
 
   void _send(Map<String, dynamic> message) {
-    if (!_closed) {
+    final session = Zone.current[#deliverySession];
+    if (!_closed && (session == null || session == _sessionGeneration)) {
+      onSendForTest?.call(message);
       _socket?.send(jsonEncode({'protocol_version': 2, ...message}));
     }
   }
@@ -208,7 +255,10 @@ class AlertDeliveryService {
         // page is replayed and durable UUIDs suppress its completed entries.
         _send({
           'type': 'replay_request',
-          'cursor': inbox.data['cursor'],
+          'cursor': min(
+            inbox.data['cursor'] as int,
+            message['recovery_cursor'] as int? ?? inbox.data['cursor'] as int,
+          ),
           'instance': instance,
         });
         _flush();
@@ -231,13 +281,28 @@ class AlertDeliveryService {
         _send(
           Map<String, dynamic>.from(inbox.outbox['ack_received:$id'] as Map),
         );
-        final shouldHandle = row['processed'] != true;
+        final confirmed =
+            row['user_confirmed'] == true ||
+            inbox.outbox.containsKey('ack_user_confirmed:$id');
+        final recovery =
+            message['delivery_mode'] == 'replay' &&
+            event['decision_state'] == 'critical' &&
+            message['present'] == true;
+        final active = isActive?.call(id) ?? false;
+        final shouldHandle =
+            !confirmed &&
+            !active &&
+            !_handledThisRun.contains(id) &&
+            (row['processed'] != true || recovery);
         if (shouldHandle) {
-          // Commit intent before native side effects; a crash here is an uncertain presentation.
-          row['processed'] = true;
+          // Intent is evidence of an attempt, never confirmation or a replay veto.
           row['disposition'] = 'intent_committed';
           await inbox.save();
-          if (_closed) return;
+          await afterIntent?.call();
+          final session = Zone.current[#deliverySession];
+          if (_closed || (session != null && session != _sessionGeneration)) {
+            return;
+          }
           final present = message['present'] == true;
           final presented = onEvent(
             AlertEvent.fromMessage({
@@ -246,6 +311,8 @@ class AlertDeliveryService {
             }),
           );
           row['disposition'] = presented ? 'presented' : 'history_or_notice';
+          row['processed'] = true;
+          _handledThisRun.add(id);
           if (presented) inbox.ack('ack_presented', id, sequence);
           await inbox.save();
           if (presented) {
@@ -285,6 +352,7 @@ class AlertDeliveryService {
       final row = inbox.events[id] as Map<String, dynamic>?;
       if (row == null) return;
       final event = row['event'] as Map;
+      row['user_confirmed'] = true;
       inbox.ack('ack_user_confirmed', id, event['sequence'] as int);
       await inbox.save();
       if (_authenticated) {

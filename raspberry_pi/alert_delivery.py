@@ -35,14 +35,15 @@ def replay_eligible(event, delivery, now=None):
     now = now or datetime.now(timezone.utc)
     age = (now - datetime.fromisoformat(event["persisted_at"])).total_seconds()
     return (event.get("decision_state") == "critical" and 0 <= age <= 300
-            and not delivery.get("presented_at") and not delivery.get("user_confirmed_at"))
+            and not delivery.get("user_confirmed_at"))
 
 
 class DeliverySessions:
-    def __init__(self, heartbeat_interval=15, heartbeat_timeout=10):
+    def __init__(self, heartbeat_interval=15, heartbeat_timeout=10, clock=None):
         self.active = {}
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     async def serve(self, ws, store):
         await ws.accept()
@@ -66,7 +67,8 @@ class DeliverySessions:
                 return
             self.active[installation] = ws
             instance, high = await asyncio.to_thread(store.delivery_boundary)
-            await send("connected", instance=instance, high_water=high)
+            recovery_cursor = await asyncio.to_thread(store.recovery_cursor, installation, high, self.clock())
+            await send("connected", instance=instance, high_water=high, recovery_cursor=recovery_cursor)
             heartbeat = {"nonce": None, "event": asyncio.Event()}
             replay_lock = asyncio.Lock()
             state = {"cursor": None, "ready": False}
@@ -87,7 +89,7 @@ class DeliverySessions:
                         delivery = await asyncio.to_thread(store.offer, installation, identity)
                         present = (not delivery.get("presented_at") and not delivery.get("user_confirmed_at"))
                         if mode == "replay":
-                            present = replay_eligible(event, delivery)
+                            present = replay_eligible(event, delivery, self.clock())
                         await send("alert", event_id=identity, sequence=event["sequence"],
                                    persisted_at=event["persisted_at"], delivery_mode=mode,
                                    present=present, event=event)

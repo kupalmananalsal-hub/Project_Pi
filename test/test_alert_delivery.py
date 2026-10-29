@@ -111,7 +111,7 @@ class DeliveryStorageTest(unittest.TestCase):
         for age, eligible in [(0, True), (300, True), (301, False), (-1, False)]:
             event = dict(self.event(), persisted_at=(now - timedelta(seconds=age)).isoformat())
             self.assertEqual(replay_eligible(event, {}, now), eligible)
-            self.assertFalse(replay_eligible(event, {"presented_at": "yes"}, now))
+            self.assertEqual(replay_eligible(event, {"presented_at": "yes"}, now), eligible)
             self.assertFalse(replay_eligible(event, {"user_confirmed_at": "yes"}, now))
             self.assertFalse(replay_eligible(dict(event, decision_state="advisory"), {}, now))
 
@@ -119,6 +119,17 @@ class DeliveryStorageTest(unittest.TestCase):
         for raw in ['[]', '{}', 'invalid', 'x' * 16385, '{"protocol_version":1}']:
             with self.assertRaises((ValueError, TypeError)):
                 decode_control(raw)
+
+    def test_recovery_cursor_ignores_presentation_but_respects_confirmation_and_age(self):
+        event = self.store.insert(self.event())
+        now = datetime.fromisoformat(event['persisted_at']) + timedelta(seconds=120)
+        self.store.offer('a', event['event_id'])
+        self.store.acknowledge('a', event['event_id'], event['sequence'], 'ack_presented')
+        self.assertEqual(self.store.recovery_cursor('a', 1, now), 0)
+        self.store.acknowledge('a', event['event_id'], event['sequence'], 'ack_user_confirmed')
+        self.assertEqual(self.store.recovery_cursor('a', 1, now), 1)
+        self.assertEqual(self.store.recovery_cursor('b', 1, now), 0)
+        self.assertEqual(self.store.recovery_cursor('b', 1, now + timedelta(seconds=181)), 1)
 
     def test_backup_includes_wal_and_refuses_overwrite(self):
         original = self.store.insert(self.event())

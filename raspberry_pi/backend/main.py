@@ -17,7 +17,7 @@ import time
 import uuid
 from collections import OrderedDict
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 import wave
@@ -295,6 +295,16 @@ class AlertStore:
         with self.lock, self._connection() as connection:
             rows = connection.execute("SELECT envelope_json FROM alerts WHERE id>? AND id<=? AND envelope_json IS NOT NULL ORDER BY id LIMIT ?", (after, high, min(100, max(1, limit)))).fetchall()
             return [json.loads(row[0]) for row in rows]
+
+    def recovery_cursor(self, caregiver: str, high: int, now: datetime) -> int:
+        """Revisit recent unresolved critical events even behind the receipt cursor."""
+        with self.lock, self._connection() as connection:
+            row = connection.execute("""SELECT MIN(a.id) FROM alerts a
+                LEFT JOIN alert_delivery d ON d.event_id=a.event_id AND d.caregiver_id=?
+                WHERE a.id<=? AND a.event_id IS NOT NULL AND a.decision_state='critical'
+                AND a.persisted_at>=? AND a.persisted_at<=? AND d.user_confirmed_at IS NULL""",
+                (caregiver, high, (now - timedelta(seconds=300)).isoformat(), now.isoformat())).fetchone()
+            return high if row[0] is None else row[0] - 1
 
     def offer(self, caregiver: str, event_id: str) -> dict[str, Any]:
         with self.lock, self._connection() as connection:

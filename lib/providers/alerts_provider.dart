@@ -141,9 +141,12 @@ class AlertsController extends Notifier<AlertsState> {
             if (!ref.mounted || generation != _connectionGeneration) {
               return false;
             }
+            // Durable delivery has already checked active state and confirmation.
+            _handledIds.remove(event.eventId);
             _handleAlert(event);
             return identical(state.activeAlert, event);
           },
+          isActive: (id) => ref.mounted && state.activeAlert?.eventId == id,
           onError: (error) {
             if (ref.mounted && generation == _connectionGeneration) {
               state = state.copyWith(error: error.toString());

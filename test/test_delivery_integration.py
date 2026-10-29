@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 
 from test_backend_alert_smoke import load_backend_module, restore_modules
 
@@ -62,7 +63,7 @@ class DeliveryIntegrationTest(unittest.TestCase):
         self.module.alert_idempotency = self.module.AlertIdempotencyRegistry(ttl_seconds=60, max_entries=100)
         self.assertTrue(self.post("integration-critical")["duplicate_event"])
         self.assertEqual(len(self.module.alert_store.list_recent()), 1)
-        for phone, present in [("phone-a", False), ("phone-b", True)]:
+        for phone, present in [("phone-a", True), ("phone-b", True)]:
             with self.client.websocket_connect("/ws/alerts?protocol=2") as ws:
                 self.hello(ws, phone)
                 self.assertEqual(ws.receive_json()["present"], present)
@@ -141,3 +142,50 @@ class DeliveryIntegrationTest(unittest.TestCase):
             last = [ws.receive_json() for _ in range(5)]
             self.assertFalse(ws.receive_json()["more"])
             self.assertEqual([e["event_id"] for e in first + last], [f"overflow-{i}" for i in range(105)])
+
+    def test_controlled_restart_window_and_independent_confirmation(self):
+        event = self.post('restart-window')['event']
+        instant = datetime.fromisoformat(event['persisted_at'])
+        self.module.delivery_sessions.clock = lambda: instant + timedelta(seconds=120)
+        for phone in ('phone-a', 'phone-b'):
+            self.module.alert_store.offer(phone, event['event_id'])
+            self.module.alert_store.acknowledge(phone, event['event_id'], event['sequence'], 'ack_presented')
+        self.module.alert_store.acknowledge('phone-a', event['event_id'], event['sequence'], 'ack_user_confirmed')
+        for phone, expected in [('phone-a', False), ('phone-b', True)]:
+            with self.client.websocket_connect('/ws/alerts?protocol=2') as ws:
+                self.hello(ws, phone)
+                self.assertEqual(ws.receive_json()['present'], expected)
+                ws.receive_json()
+        self.module.delivery_sessions.clock = lambda: instant + timedelta(seconds=301)
+        with self.client.websocket_connect('/ws/alerts?protocol=2') as ws:
+            self.hello(ws, 'phone-b')
+            self.assertFalse(ws.receive_json()['present'])
+            ws.receive_json()
+
+    def test_malformed_ack_and_duplicate_session_do_not_mutate_delivery(self):
+        event = self.post('bad-ack')['event']
+        with self.client.websocket_connect('/ws/alerts?protocol=2') as active:
+            self.hello(active, 'phone-a'); active.receive_json(); active.receive_json()
+            with self.client.websocket_connect('/ws/alerts?protocol=2') as duplicate:
+                duplicate.send_json(dict(protocol_version=2, type='authenticate', installation_id='phone-a', token=self.secret))
+                with self.assertRaises(WebSocketDisconnect): duplicate.receive_json()
+            active.send_json(dict(protocol_version=2, type='ack_received', event_id=event['event_id'], sequence=True))
+            with self.assertRaises(WebSocketDisconnect): active.receive_json()
+        self.assertIsNone(self.module.alert_store.offer('phone-a', event['event_id'])['received_at'])
+
+    def test_interrupted_server_ack_commit_recovers_on_retry(self):
+        event = self.post('ack-interrupted')['event']
+        original = self.module.alert_store.acknowledge
+        def fail(*args):
+            raise OSError('injected_storage_failure')
+        self.module.alert_store.acknowledge = fail
+        with self.client.websocket_connect('/ws/alerts?protocol=2') as ws:
+            self.hello(ws, 'phone-a'); ws.receive_json(); ws.receive_json()
+            ws.send_json(dict(protocol_version=2, type='ack_received', event_id=event['event_id'], sequence=event['sequence']))
+            with self.assertRaises(WebSocketDisconnect): ws.receive_json()
+        self.assertIsNone(self.module.alert_store.offer('phone-a', event['event_id'])['received_at'])
+        self.module.alert_store.acknowledge = original
+        with self.client.websocket_connect('/ws/alerts?protocol=2') as ws:
+            self.hello(ws, 'phone-a'); ws.receive_json(); ws.receive_json()
+            ws.send_json(dict(protocol_version=2, type='ack_received', event_id=event['event_id'], sequence=event['sequence']))
+            self.assertEqual(ws.receive_json()['type'], 'ack_committed')

@@ -13,7 +13,7 @@ void main() {
   });
 
   test(
-    'durable replay does not repeat outputs after restart; old history stays silent',
+    'unconfirmed replay reactivates after restart; active duplicates and old history stay silent',
     () async {
       var outputs = 0;
       var history = 0;
@@ -39,6 +39,7 @@ void main() {
         'event_id': id,
         'sequence': seq,
         'present': present,
+        'delivery_mode': 'replay',
         'event': {
           'event_id': id,
           'sequence': seq,
@@ -70,7 +71,7 @@ void main() {
       });
       await client.handleMessageForTest(event('recent', 1, true));
       await client.handleMessageForTest(event('old', 2, false));
-      expect(outputs, 1);
+      expect(outputs, 2);
       expect(history, 1);
       await client.confirm('recent');
       expect(restarted.outbox.containsKey('ack_user_confirmed:recent'), isTrue);
