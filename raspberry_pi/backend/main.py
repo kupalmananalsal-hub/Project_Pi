@@ -53,6 +53,9 @@ for extra_path in (
 
 from alert_decision import AlertDecisionEngine
 from alert_trace import trace_alert
+from alert_delivery import DeliverySessions
+
+delivery_sessions = DeliverySessions()
 from noise_suppressor import (
     DEFAULT_CONFIG_PATH,
     NoiseSuppressionConfig,
@@ -180,6 +183,7 @@ class AlertIn(BaseModel):
 
 
 class ManualAlertIn(BaseModel):
+    event_id: str | None = None
     keyword: str = "manual"
     confidence: float = 1.0
     source: str = "manual_button"
@@ -229,6 +233,8 @@ class AlertStore:
 
     def _init_db(self) -> None:
         with self.lock, self._connection() as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS alerts (
@@ -252,11 +258,61 @@ class AlertStore:
             for col, col_type in (
                 ("decision_state", "TEXT"),
                 ("alert_modality", "TEXT"),
+                ("event_id", "TEXT"),
+                ("envelope_json", "TEXT"),
+                ("envelope_version", "INTEGER"),
+                ("persisted_at", "TEXT"),
+                ("request_fingerprint", "TEXT"),
             ):
                 if col not in existing:
                     connection.execute(
                         f"ALTER TABLE alerts ADD COLUMN {col} {col_type}"
                     )
+            connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS alert_uuid ON alerts(event_id) WHERE event_id IS NOT NULL")
+            connection.execute("CREATE TABLE IF NOT EXISTS delivery_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            connection.execute("INSERT OR IGNORE INTO delivery_meta VALUES ('instance', ?)", (str(uuid.uuid4()),))
+            connection.execute("""CREATE TABLE IF NOT EXISTS alert_delivery (
+                caregiver_id TEXT NOT NULL, event_id TEXT NOT NULL,
+                offered_at TEXT NOT NULL, received_at TEXT, presented_at TEXT,
+                user_confirmed_at TEXT, PRIMARY KEY(caregiver_id, event_id))""")
+
+    def lookup(self, event_id: str, fingerprint: str) -> dict[str, Any] | None:
+        with self.lock, self._connection() as connection:
+            row = connection.execute("SELECT * FROM alerts WHERE event_id=?", (event_id,)).fetchone()
+            if row is None:
+                return None
+            if row["request_fingerprint"] != fingerprint:
+                raise HTTPException(status_code=409, detail="event_id was reused for a different alert event")
+            return json.loads(row["envelope_json"])
+
+    def delivery_boundary(self) -> tuple[str, int]:
+        with self.lock, self._connection() as connection:
+            instance = connection.execute("SELECT value FROM delivery_meta WHERE key='instance'").fetchone()[0]
+            high = connection.execute("SELECT COALESCE(MAX(id),0) FROM alerts").fetchone()[0]
+            return instance, high
+
+    def replay(self, after: int, high: int, limit: int = 100) -> list[dict[str, Any]]:
+        with self.lock, self._connection() as connection:
+            rows = connection.execute("SELECT envelope_json FROM alerts WHERE id>? AND id<=? AND envelope_json IS NOT NULL ORDER BY id LIMIT ?", (after, high, min(100, max(1, limit)))).fetchall()
+            return [json.loads(row[0]) for row in rows]
+
+    def offer(self, caregiver: str, event_id: str) -> dict[str, Any]:
+        with self.lock, self._connection() as connection:
+            connection.execute("INSERT OR IGNORE INTO alert_delivery(caregiver_id,event_id,offered_at) VALUES(?,?,?)", (caregiver, event_id, datetime.now(timezone.utc).isoformat()))
+            return dict(connection.execute("SELECT * FROM alert_delivery WHERE caregiver_id=? AND event_id=?", (caregiver, event_id)).fetchone())
+
+    def acknowledge(self, caregiver: str, event_id: str, sequence: int, kind: str) -> None:
+        columns = {"ack_received": "received_at", "ack_presented": "presented_at", "ack_user_confirmed": "user_confirmed_at"}
+        column = columns.get(kind)
+        if column is None:
+            raise ValueError("invalid_ack_type")
+        with self.lock, self._connection() as connection:
+            row = connection.execute("SELECT id FROM alerts WHERE event_id=?", (event_id,)).fetchone()
+            if row is None or row[0] != sequence:
+                raise ValueError("event_sequence_mismatch")
+            cursor = connection.execute(f"UPDATE alert_delivery SET {column}=COALESCE({column},?) WHERE caregiver_id=? AND event_id=?", (datetime.now(timezone.utc).isoformat(), caregiver, event_id))
+            if cursor.rowcount != 1:
+                raise ValueError("event_not_offered")
 
     def insert(self, event: dict[str, Any]) -> dict[str, Any]:
         stored = dict(event)
@@ -272,6 +328,17 @@ class AlertStore:
         stored["alert_modality"] = str(stored.get("alert_modality") or "")
 
         with self.lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            event_id = stored.get("event_id")
+            fingerprint = stored.pop("_request_fingerprint", None)
+            if event_id:
+                previous = connection.execute("SELECT request_fingerprint,envelope_json FROM alerts WHERE event_id=?", (event_id,)).fetchone()
+                if previous:
+                    if previous[0] != fingerprint:
+                        raise HTTPException(status_code=409, detail="event_id conflict")
+                    duplicate = json.loads(previous[1])
+                    duplicate["duplicate_event"] = True
+                    return duplicate
             cursor = connection.execute(
                 """
                 INSERT INTO alerts (
@@ -298,6 +365,10 @@ class AlertStore:
                 ),
             )
             stored["id"] = cursor.lastrowid
+            stored["sequence"] = cursor.lastrowid
+            stored["persisted_at"] = datetime.now(timezone.utc).isoformat()
+            stored["envelope_version"] = 2
+            connection.execute("UPDATE alerts SET event_id=?, envelope_json=?, envelope_version=2, persisted_at=?, request_fingerprint=? WHERE id=?", (event_id, json.dumps(stored, allow_nan=False), stored["persisted_at"], fingerprint, cursor.lastrowid))
         return stored
 
     def list_recent(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -305,7 +376,7 @@ class AlertStore:
         with self.lock, self._connection() as connection:
             rows = connection.execute(
                 """
-                SELECT id, timestamp, keyword, confidence, direction,
+                SELECT envelope_json, id, timestamp, keyword, confidence, direction,
                        human_detected, source, decision_state, alert_modality
                 FROM alerts
                 ORDER BY id DESC
@@ -315,7 +386,7 @@ class AlertStore:
             ).fetchall()
 
         return [
-            {
+            json.loads(row["envelope_json"]) if row["envelope_json"] else {
                 "id": row["id"],
                 "event": "keyword_detected",
                 "timestamp": row["timestamp"],
@@ -336,6 +407,8 @@ class AlertStore:
                 row = connection.execute("SELECT COUNT(*) AS count FROM alerts").fetchone()
                 deleted = int(row["count"] if row else 0)
                 connection.execute("DELETE FROM alerts")
+                connection.execute("DELETE FROM alert_delivery")
+                connection.execute("UPDATE delivery_meta SET value=? WHERE key='instance'", (str(uuid.uuid4()),))
                 connection.commit()
 
             with self._connection() as connection:
@@ -1470,13 +1543,9 @@ def normalize_event_id(value: object) -> tuple[str, bool]:
 
 
 def alert_event_fingerprint(payload: dict[str, Any]) -> str:
-    stable = {
-        "keyword": str(payload.get("keyword") or "").strip().lower(),
-        "source": str(payload.get("source") or "").strip().lower(),
-        "timestamp": str(payload.get("timestamp") or "").strip(),
-        "confidence": round(_as_float(payload.get("confidence"), 0.0), 6),
-    }
-    return json.dumps(stable, sort_keys=True, separators=(",", ":"))
+    stable = {key: value for key, value in payload.items()
+              if key not in {"event_id", "type", "server_generated_event_id"}}
+    return json.dumps(stable, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def duplicate_response(event: dict[str, Any]) -> dict[str, Any]:
@@ -1698,6 +1767,9 @@ async def ws_audio(websocket: WebSocket):
 
 @app.websocket("/ws/alerts")
 async def ws_alerts(websocket: WebSocket):
+    if getattr(websocket, "query_params", {}).get("protocol") == "2":
+        await delivery_sessions.serve(websocket, alert_store)
+        return
     await websocket.accept()
     client_queue = await alerts.connect()
     try:
@@ -2479,6 +2551,10 @@ async def api_alerts(event: AlertIn):
     trace_alert("http_receive", event_id, "received",
                 generated_event_id=generated_event_id)
     fingerprint = alert_event_fingerprint(payload)
+    persisted = await asyncio.to_thread(alert_store.lookup, event_id, fingerprint)
+    if persisted is not None:
+        trace_alert("http_claim", event_id, "duplicate", reason="durable_lookup")
+        return duplicate_response(persisted)
     claim = await alert_idempotency.claim(event_id, fingerprint)
     trace_alert("http_claim", event_id,
                 claim["status"] if claim["status"] in ("conflict", "duplicate", "in_flight") else "accepted")
@@ -2516,9 +2592,12 @@ async def api_alerts(event: AlertIn):
                     decision_reason=payload.get("decision_reason"),
                     thermal_state=payload.get("thermal_state"))
         payload["duplicate_event"] = False
+        payload["_request_fingerprint"] = fingerprint
         stored_payload = await asyncio.to_thread(alert_store.insert, payload)
         trace_alert("persistence", event_id, "succeeded")
-        stored_payload["duplicate_event"] = False
+        if stored_payload.get("duplicate_event"):
+            await alert_idempotency.complete(event_id, stored_payload)
+            return duplicate_response(stored_payload)
         broadcast_payload = dict(stored_payload)
         await alerts.publish(broadcast_payload)
         await alert_idempotency.complete(event_id, stored_payload)
@@ -2534,6 +2613,7 @@ async def api_alerts(event: AlertIn):
 async def api_alerts_manual(manual: ManualAlertIn | None = None):
     req = manual or ManualAlertIn()
     event = AlertIn(
+        event_id=req.event_id,
         keyword=req.keyword or "manual",
         confidence=req.confidence if req.confidence is not None else 1.0,
         source=req.source or "manual_button",

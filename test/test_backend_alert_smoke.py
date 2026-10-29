@@ -184,6 +184,9 @@ class DisconnectingWebSocket:
 
 
 class FakeAlertStore:
+    def lookup(self, event_id, fingerprint):
+        return None
+
     def __init__(self):
         self.inserted = []
 
@@ -298,16 +301,25 @@ def restore_modules(previous):
             sys.modules[name] = module
 
 
-def load_backend_module(temp_dir):
+def load_backend_module(temp_dir, real_http=False):
     os.environ["ALERT_DB_PATH"] = str(Path(temp_dir) / "alerts.db")
     os.environ["NOISE_SUPPRESSION_CONFIG_PATH"] = str(Path(temp_dir) / "noise.json")
+    framework = {}
+    if real_http:
+        import fastapi
+        import fastapi.middleware.cors
+        import pydantic
+        framework = {name: sys.modules[name] for name in ("fastapi", "fastapi.middleware", "fastapi.middleware.cors", "pydantic")}
     previous = install_backend_stubs()
+    sys.modules.update(framework)
     try:
         spec = importlib.util.spec_from_file_location(
             "project_pi_backend_smoke",
             BACKEND_MAIN,
         )
         module = importlib.util.module_from_spec(spec)
+        previous[spec.name] = sys.modules.get(spec.name)
+        sys.modules[spec.name] = module
         assert spec.loader is not None
         spec.loader.exec_module(module)
         return module, previous
