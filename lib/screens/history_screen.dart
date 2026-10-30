@@ -70,7 +70,9 @@ class HistoryScreen extends ConsumerWidget {
                         ),
                       ),
                       title: Text(
-                        event.isKeywordDetection ? 'Keyword Spotted!' : 'Alert recorded',
+                        event.isKeywordDetection
+                            ? 'Keyword Spotted!'
+                            : 'Alert recorded',
                       ),
                       subtitle: Text(
                         '${_formatTimestamp(event.timestamp)} - '
