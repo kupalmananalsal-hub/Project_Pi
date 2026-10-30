@@ -28,12 +28,13 @@ Emergency stop invalidates startup immediately and runs independently of pending
 
 ## Verification
 
-Tests ran on the Windows development host. Python integration uses real FastAPI HTTP/WebSocket routing and temporary SQLite databases; sensor and ML imports are stubbed. Flutter tests use fake native outputs. These are software results, not hardware or acoustic-accuracy measurements.
+The full suites ran on the Windows development host; Linux backup permission tests also ran on GitHub Actions Ubuntu 24.04. Python integration uses real FastAPI HTTP/WebSocket routing and temporary SQLite databases; sensor and ML imports are stubbed. Flutter tests use fake native outputs. These are software results, not hardware or acoustic-accuracy measurements.
 
 | Check | Result |
 | --- | --- |
 | Complete Python suite on Windows, including ASGI integration | 203 discovered: 200 passed, 3 Linux-only permission tests skipped; 11.330 seconds |
 | Complete Flutter suite | 69 passed, 17 seconds in the recorded run |
+| Linux backup permission tests (Ubuntu 24.04 CI) | 3 passed; no skips |
 | Dart analysis | No issues found |
 | Review recovery/storage regression | Intent crash, confirmation, expiry, failed writes, stale sessions and acknowledgement retry covered |
 | Dart formatting, review correction sources/tests | Checked; 0 pending format changes |
@@ -54,7 +55,7 @@ The base Python environment lacks FastAPI/HTTPX; integration tests explicitly sk
 
 ### Reproduced event traces
 
-The ASGI tests assert IDs, decisions and acknowledgement state rather than treating trace counts as delivery proof. The local execution log is `build/review-python-full.log` (ignored generated output).
+The ASGI tests assert IDs, decisions and acknowledgement state rather than treating trace counts as delivery proof. The latest local execution logs are `build/pr4-followup-python.log` and `build/pr4-followup-flutter-full.log` (ignored generated output).
 
 | Event ID | Verified sequence and last successful stage |
 | --- | --- |
@@ -169,7 +170,7 @@ Reviewed head: `03f5793da484869dfe163b6c2c7023cf47f13209`. The follow-up preserv
 
 Local regression results: full Python suite discovered 203 tests (200 passed, three Linux-only permission skips); full Flutter suite passed 69 tests. Additional tests cover the pre-marker paired-host migration, explicit re-pair/unpair, wrong administrator secret, interrupted pairing marker, audio failure then recovery, concurrent audio callers, 20 reconnects without repeating an active alarm, a 10,000-row inbox reload plus injected disk exhaustion, and storage/registry recreation during six live ASGI deliveries. The latter is an in-process backend restart simulation, not an OS process kill or physical-device trial. `ack_presented` remains app overlay-state acceptance, not physical output success, and the intent-before-callback regression remains included.
 
-Linux permission execution is delegated to `.github/workflows/backup-permissions.yml` on Ubuntu because this Windows host has no installed WSL distribution. CI results must be reported separately from Windows skips. Physical Raspberry Pi/Android results remain **NOT RUN**. Large-inbox coverage is a correctness stress test, not a mobile performance or storage-retention certification.
+Linux permission execution completed through `.github/workflows/backup-permissions.yml` because this Windows host has no installed WSL distribution. All three tests passed on Ubuntu 24.04 in [PR workflow run 40980616360](https://github.com/kupalmananalsal-hub/Project_Pi/actions/runs/40980616360/job/123819453836), testing the PR merge ref for source head `8d48d947b5a32e1f72e0620121fb44f1ced67fe5`. The push workflow also succeeded. These are actual Linux CI results, reported separately from the Windows skips. Physical Raspberry Pi/Android results remain **NOT RUN**. Large-inbox coverage is a correctness stress test, not a mobile performance or storage-retention certification.
 
 Exact follow-up file set:
 
