@@ -1,0 +1,10 @@
+[
+  "project-pi-architecture",
+  "pi-safe-diagnostics",
+  "respeaker-audio-diagnostics",
+  "kws-vad-regression",
+  "multilingual-dataset-qa",
+  "mlx90640-thermal-diagnostics",
+  "alert-pipeline-verification",
+  "pi-deployment-review"
+]

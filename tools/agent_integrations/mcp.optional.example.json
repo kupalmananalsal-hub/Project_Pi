@@ -1,0 +1,13 @@
+{
+  "enabled": false,
+  "notice": "This is documentation only. Do not rename to .mcp.json or activate it without explicit review and user approval.",
+  "optional_servers": {
+    "omniroute": {
+      "command": "[REVIEWED_LOCAL_COMMAND]",
+      "args": [],
+      "environment": {
+        "OMNIROUTE_URL": "[APPROVED_LOCAL_OR_REVIEWED_ENDPOINT]"
+      }
+    }
+  }
+}

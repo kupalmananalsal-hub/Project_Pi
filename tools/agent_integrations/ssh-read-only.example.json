@@ -1,0 +1,12 @@
+{
+  "enabled": false,
+  "hosts": {
+    "approved-pi": {
+      "host": "[PI_SSH_HOST]",
+      "user": "[NON_ROOT_PI_USER]",
+      "port": 22,
+      "identity_file": "/absolute/path/to/private/key-not-in-repository",
+      "known_hosts_file": "/absolute/path/to/independently-verified-known_hosts"
+    }
+  }
+}
