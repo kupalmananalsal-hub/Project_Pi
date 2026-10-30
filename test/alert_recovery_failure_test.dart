@@ -141,6 +141,48 @@ void main() {
   );
 
   test(
+    'twenty reconnects preserve active overlay without duplicate output',
+    () async {
+      await client.handleMessageForTest(alert());
+      for (var i = 0; i < 20; i++) {
+        await client.handleMessageForTest(hello);
+        await client.handleMessageForTest(alert());
+      }
+      expect(outputs, 1);
+    },
+  );
+
+  test(
+    'large inbox survives reload and storage exhaustion without losing prior rows',
+    () async {
+      for (var i = 0; i < 10000; i++) {
+        inbox.events['history-$i'] = {
+          'processed': true,
+          'event': {
+            'event_id': 'history-$i',
+            'sequence': i + 2,
+            'keyword': 'help',
+          },
+        };
+      }
+      await inbox.save();
+      final restored = AlertInbox(directory);
+      await restored.load();
+      expect(restored.events.length, 10000);
+      failWrite = true;
+      await expectLater(
+        client.handleMessageForTest(alert()),
+        throwsA(isA<FileSystemException>()),
+      );
+      expect(inbox.events.length, 10000);
+      expect(outputs, 0);
+      failWrite = false;
+      await client.handleMessageForTest(alert());
+      expect(outputs, 1);
+    },
+  );
+
+  test(
     'explicit confirmation survives restart even before server commits it',
     () async {
       await client.handleMessageForTest(alert());

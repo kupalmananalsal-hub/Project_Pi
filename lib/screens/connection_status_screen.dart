@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/app_settings.dart';
 import '../providers/connection_provider.dart';
+import '../providers/alerts_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/pi_api_service.dart';
 import '../services/alert_delivery_service.dart';
@@ -52,6 +53,7 @@ class _ConnectionStatusScreenState
 
     final connection = ref.watch(connectionProvider);
     final status = connection.status;
+    final alertState = ref.watch(alertsProvider);
 
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -75,6 +77,16 @@ class _ConnectionStatusScreenState
           icon: const Icon(Icons.key),
           label: const Text('Pair reliable alert delivery'),
           onPressed: _pairDelivery,
+        ),
+        if (alertState.pairingState ==
+            AlertPairingState.reconfigurationRequired)
+          Text(
+            alertState.error ??
+                'Re-pair this endpoint to restore reliable alerts.',
+          ),
+        TextButton(
+          onPressed: _unpairDelivery,
+          child: const Text('Administrator: unpair reliable delivery'),
         ),
         TextField(
           controller: _hostController,
@@ -302,6 +314,64 @@ class _ConnectionStatusScreenState
           ),
         ),
       );
+    }
+  }
+
+  Future<void> _unpairDelivery() async {
+    String secret = '';
+    final approved = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Unpair reliable alert delivery?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'This removes saved endpoint credentials and enables best-effort legacy delivery after reconnecting. The Pi administrator must enter an existing pairing secret. Revoke this installation on the Pi separately.',
+            ),
+            TextField(
+              obscureText: true,
+              onChanged: (value) => secret = value.trim(),
+              decoration: const InputDecoration(
+                labelText: 'Existing pairing secret',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Unpair'),
+          ),
+        ],
+      ),
+    );
+    if (approved != true || !mounted) return;
+    try {
+      await CaregiverCredentials.unpair(secret);
+      if (!mounted) return;
+      ref.read(alertsProvider.notifier).disconnect();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Unpaired. Reconnect to use legacy delivery, or pair again.',
+          ),
+        ),
+      );
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Unpair failed. Verify the administrator pairing secret and retry.',
+            ),
+          ),
+        );
+      }
     }
   }
 

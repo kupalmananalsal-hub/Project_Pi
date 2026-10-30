@@ -30,6 +30,7 @@ class AlertsState {
     this.activeAlertThermalFrame,
     this.socketStatus = SocketConnectionStatus.disconnected,
     this.error,
+    this.pairingState = AlertPairingState.legacy,
   });
 
   final List<AlertEvent> history;
@@ -42,6 +43,7 @@ class AlertsState {
   final ThermalFrame? activeAlertThermalFrame;
   final SocketConnectionStatus socketStatus;
   final String? error;
+  final AlertPairingState pairingState;
 
   AlertsState copyWith({
     List<AlertEvent>? history,
@@ -54,6 +56,7 @@ class AlertsState {
     Object? activeAlertThermalFrame = _unset,
     SocketConnectionStatus? socketStatus,
     Object? error = _unset,
+    AlertPairingState? pairingState,
   }) {
     return AlertsState(
       history: history ?? this.history,
@@ -76,6 +79,7 @@ class AlertsState {
           : activeAlertThermalFrame as ThermalFrame?,
       socketStatus: socketStatus ?? this.socketStatus,
       error: error == _unset ? this.error : error as String?,
+      pairingState: pairingState ?? this.pairingState,
     );
   }
 }
@@ -121,6 +125,16 @@ class AlertsController extends Notifier<AlertsState> {
     final generation = _connectionGeneration;
     try {
       await _deliveryClose;
+      final pairing = await CaregiverCredentials.endpointState(host);
+      if (generation != _connectionGeneration || !ref.mounted) return;
+      state = state.copyWith(pairingState: pairing, error: null);
+      if (pairing == AlertPairingState.reconfigurationRequired) {
+        state = state.copyWith(
+          error:
+              'Reliable alert delivery requires pairing for this endpoint. Re-pair with the Pi administrator or explicitly unpair.',
+        );
+        return;
+      }
       final token = await CaregiverCredentials.token(host);
       if (generation != _connectionGeneration || !ref.mounted) return;
       if (token != null && token.isNotEmpty) {
@@ -158,6 +172,13 @@ class AlertsController extends Notifier<AlertsState> {
             }
           },
         )..connect();
+        return;
+      }
+      if (pairing == AlertPairingState.reliable) {
+        state = state.copyWith(
+          pairingState: AlertPairingState.reconfigurationRequired,
+          error: 'Pairing credential unavailable. Re-pair before connecting.',
+        );
         return;
       }
     } catch (error) {

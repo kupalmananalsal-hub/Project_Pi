@@ -68,9 +68,32 @@ class AlertRuntimeService {
     _initialized = true;
   }
 
-  Future<void> configureAudio() => _audioConfiguration ??= _configureAudio();
+  Future<void> configureAudio() {
+    final current = _audioConfiguration;
+    if (current != null) return current;
+    final eventId = _eventId;
+    final completion = Completer<void>();
+    _audioConfiguration = completion.future;
+    // Install the single-flight Future before invoking the plugin (including
+    // synchronous failures), and clear it before notifying failed callers.
+    Future<void>.sync(configureAudioSession).then(
+      (_) {
+        completion.complete();
+      },
+      onError: (Object error, StackTrace stack) {
+        if (identical(_audioConfiguration, completion.future)) {
+          _audioConfiguration = null;
+        }
+        traceAlert('audio_configuration', eventId, 'failed', {
+          'reason': error.runtimeType.toString(),
+        });
+        completion.completeError(error, stack);
+      },
+    );
+    return completion.future;
+  }
 
-  Future<void> _configureAudio() async {
+  Future<void> configureAudioSession() async {
     final session = await AudioSession.instance;
     await session.configure(
       const AudioSessionConfiguration(

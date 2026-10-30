@@ -11,6 +11,8 @@ import '../models/alert_event.dart';
 import 'alert_trace.dart';
 import 'reconnecting_web_socket_service.dart';
 
+enum AlertPairingState { legacy, reliable, reconfigurationRequired }
+
 class CaregiverCredentials {
   static const storage = FlutterSecureStorage();
   static String randomId() => List.generate(
@@ -27,8 +29,45 @@ class CaregiverCredentials {
 
   static Future<String?> token(String host) =>
       storage.read(key: 'caregiver_token_$host');
-  static Future<void> saveToken(String host, String value) =>
-      storage.write(key: 'caregiver_token_$host', value: value);
+  static Future<AlertPairingState> endpointState(String host) async {
+    final values = await storage.readAll();
+    // Migrate pre-marker installations by inspecting all saved endpoint keys.
+    final hasPairing =
+        values['caregiver_pairing_required'] == 'true' ||
+        values.entries.any(
+          (e) => e.key.startsWith('caregiver_token_') && e.value.isNotEmpty,
+        );
+    if (hasPairing) {
+      await storage.write(key: 'caregiver_pairing_required', value: 'true');
+      return (values['caregiver_token_$host']?.isNotEmpty ?? false)
+          ? AlertPairingState.reliable
+          : AlertPairingState.reconfigurationRequired;
+    }
+    return AlertPairingState.legacy;
+  }
+
+  static Future<void> saveToken(String host, String value) async {
+    // Persist the downgrade guard first; interrupted pairing must fail closed.
+    await storage.write(key: 'caregiver_pairing_required', value: 'true');
+    await storage.write(key: 'caregiver_token_$host', value: value);
+  }
+
+  static Future<void> unpair(String administratorSecret) async {
+    final values = await storage.readAll();
+    final keys = values.keys
+        .where((key) => key.startsWith('caregiver_token_'))
+        .toList();
+    if (administratorSecret.isEmpty ||
+        !keys.any((key) => values[key] == administratorSecret)) {
+      throw StateError('An existing pairing secret is required to unpair.');
+    }
+    await storage.write(key: 'caregiver_pairing_required', value: 'true');
+    for (final key in keys) {
+      await storage.delete(key: key);
+    }
+    // Only an explicit completed administrator action enables legacy mode.
+    await storage.write(key: 'caregiver_pairing_required', value: 'false');
+  }
 }
 
 /// Alternating flushed snapshots keep the preceding valid snapshot on interrupted writes.
