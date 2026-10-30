@@ -169,6 +169,8 @@ class PiApiService {
     required String gender,
     required double distanceM,
     required String noiseCondition,
+    String exampleKind = 'positive',
+    String language = 'und',
   }) async {
     try {
       final formData = FormData.fromMap({
@@ -177,6 +179,8 @@ class PiApiService {
           filename: 'recording.wav',
         ),
         'keyword': keyword,
+        'example_kind': exampleKind,
+        'language': language,
         'speaker_id': speakerId,
         'age_group': ageGroup,
         'gender': gender,

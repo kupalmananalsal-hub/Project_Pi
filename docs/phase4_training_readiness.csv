@@ -1,0 +1,19 @@
+Language,Keyword,Verified Positive Samples,Verified Hard Negatives,Distinct Positive Speakers,Independent Source Groups,Validation Coverage,Test Coverage,Training Readiness,Blocking Issues
+en,help,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+en,help me,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+en,save me,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+en,please help,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+en,emergency,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+en,rescue,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+en,over here,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+en,ouch,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+fil,tulong,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+fil,saklolo,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+fil,tulungan niyo ako,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+fil,tulungan mo ako,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+fil,kailangan ko ng tulong,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+fil,ang sakit,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+fil,aray,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+fil,sunog,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+fil,agai,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review
+ceb,NO_APPROVED_POSITIVE_INVENTORY,0,0,0,0,0,0,INSUFFICIENT_POSITIVES,No verified positives; public transcript matches require review

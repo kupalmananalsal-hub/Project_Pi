@@ -46,10 +46,13 @@ def inspect_wav(path: Path) -> dict[str, object]:
         "sample_rate": sample_rate,
         "duration_s": duration,
         "clipped": clipped,
+        "truncated": len(frames) != frame_count * channels * sample_width,
     }
 
 
 def issue_for(info: dict[str, object]) -> str | None:
+    if info.get("truncated"):
+        return "truncated_audio"
     if info["sample_rate"] != EXPECTED_SAMPLE_RATE:
         return "sample_rate"
     if info["channels"] != 1:
@@ -113,6 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dataset-dir", type=Path, default=DEFAULT_DATASET_DIR)
     parser.add_argument("--json-out", type=Path)
+    parser.add_argument("--strict", action="store_true", help="require provenance, valid labels, checksums and unique audio")
     parser.add_argument(
         "--init-layout",
         action="store_true",
@@ -126,6 +130,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.init_layout:
         ensure_dataset_layout(args.dataset_dir)
     report = validate_dataset(args.dataset_dir)
+    if args.strict:
+        from dataset_readiness import audit_records
+        records, issues, near = audit_records(args.dataset_dir)
+        report["provenance_records"] = len(records)
+        report["strict_issues"] = issues
+        report["near_duplicate_pairs"] = near
+        report["invalid_files"] = max(report["invalid_files"], len(issues))
     text = json.dumps(report, indent=2, sort_keys=True)
     print(text)
     if args.json_out:

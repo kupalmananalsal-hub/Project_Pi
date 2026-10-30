@@ -65,12 +65,14 @@ from noise_suppressor import (
 from thermal_confidence import ThermalConfidenceScorer
 from keyword_dataset_common import (
     KEYWORDS as TRAINING_KEYWORDS,
+    NEGATIVE_CLASSES,
     METADATA_COLUMNS as TRAINING_METADATA_COLUMNS,
     METADATA_LOCK,
     append_metadata as append_training_metadata,
     ensure_dataset_layout as ensure_training_dataset_layout,
     metadata_file_lock,
     slugify_keyword,
+    sample_subdirectory,
 )
 
 try:
@@ -1113,14 +1115,23 @@ def validate_training_metadata(
     gender: str,
     distance_m: float,
     noise_condition: str,
+    example_kind: str = "positive",
+    language: str = "und",
 ) -> dict[str, Any]:
     keyword = keyword.strip().lower()
     speaker_id = speaker_id.strip()
     age_group = age_group.strip().lower()
     gender = gender.strip().lower()
     noise_condition = noise_condition.strip().lower()
-    if keyword not in TRAINING_KEYWORDS:
-        raise HTTPException(status_code=400, detail="Invalid training keyword")
+    if example_kind not in ("positive", "negative"):
+        raise HTTPException(status_code=400, detail="Invalid example_kind")
+    if language not in ("en", "fil", "ceb", "und"):
+        raise HTTPException(status_code=400, detail="Invalid language")
+    allowed = TRAINING_KEYWORDS if example_kind == "positive" else NEGATIVE_CLASSES
+    if keyword not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid training keyword/category")
+    if example_kind == "positive" and language == "ceb":
+        raise HTTPException(status_code=400, detail="Cebuano positive inventory requires competent-speaker review; collect unapproved phrases through the candidate recorder")
     if not SPEAKER_ID_PATTERN.fullmatch(speaker_id):
         raise HTTPException(status_code=400, detail="Invalid speaker_id")
     if age_group not in TRAINING_AGE_GROUPS:
@@ -1134,6 +1145,8 @@ def validate_training_metadata(
         raise HTTPException(status_code=400, detail="distance_m must be between 0.5 and 5.0")
     return {
         "keyword": keyword,
+        "example_kind": example_kind,
+        "language": language,
         "speaker_id": speaker_id,
         "age_group": age_group,
         "gender": gender,
@@ -1913,7 +1926,12 @@ async def upload_training_record(
     gender: str = Form(...),
     distance_m: float = Form(...),
     noise_condition: str = Form(...),
+    example_kind: str = Form("positive"),
+    language: str = Form("und"),
 ):
+    # Direct unit-test callers omit FastAPI Form defaults.
+    example_kind = example_kind if isinstance(example_kind, str) else "positive"
+    language = language if isinstance(language, str) else "und"
     metadata = validate_training_metadata(
         keyword=keyword,
         speaker_id=speaker_id,
@@ -1921,6 +1939,8 @@ async def upload_training_record(
         gender=gender,
         distance_m=distance_m,
         noise_condition=noise_condition,
+        example_kind=example_kind,
+        language=language,
     )
 
     ensure_training_dataset_layout(KEYWORD_DATASET_DIR)
@@ -1944,11 +1964,22 @@ async def upload_training_record(
             f"{metadata['gender']}_{distance_text}m_"
             f"{metadata['noise_condition']}_{recording_id}.wav"
         )
-        relative_path = f"positive/{keyword_slug}/{filename}"
+        relative_path = f"{sample_subdirectory(example_kind, keyword_slug)}/{filename}"
         final_path = safe_dataset_path(relative_path)
         final_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(temp_path, final_path)
         created_at = datetime.now(timezone.utc).isoformat()
+        from import_keyword_datasets import write_provenance, file_digest, digest
+        with wave.open(str(final_path), "rb") as recorded:
+            pcm = recorded.readframes(recorded.getnframes())
+        write_provenance(KEYWORD_DATASET_DIR, relative_path, {
+            "path": relative_path, "kind": example_kind, "label": keyword_slug,
+            "language": language, "speaker_id": metadata["speaker_id"],
+            "source_group": "recording-" + recording_id,
+            "source": "real", "license": "local-consented-research-no-redistribution",
+            "verification": "operator_verified_recording",
+            "sha256": file_digest(final_path), "pcm_sha256": digest(pcm),
+        })
         with metadata_file_lock(KEYWORD_METADATA_PATH):
             append_training_metadata(
                 KEYWORD_METADATA_PATH,
@@ -2103,7 +2134,14 @@ async def training_validate():
     """Launch an async dataset validation job."""
     def _run_validation():
         from validate_keyword_dataset import validate_dataset
-        return validate_dataset(KEYWORD_DATASET_DIR)
+        from dataset_readiness import audit_records
+        report = validate_dataset(KEYWORD_DATASET_DIR)
+        records, issues, near = audit_records(KEYWORD_DATASET_DIR)
+        report["provenance_records"] = len(records)
+        report["strict_issues"] = issues
+        report["near_duplicate_pairs"] = near
+        report["invalid_files"] = max(report["invalid_files"], len(issues))
+        return report
 
     return await queue_training_job("validation", _run_validation)
 
@@ -2227,22 +2265,41 @@ async def training_export():
                 + ", ".join(sorted(real_speakers))
             )
 
-        from train_openwakeword_models import build_split_manifest, write_manifest
-        manifest = build_split_manifest(KEYWORD_DATASET_DIR)
+        from train_openwakeword_models import write_manifest
+        from dataset_integrity import build_strict_manifest
+        manifest = build_strict_manifest(KEYWORD_DATASET_DIR)
         manifest_path = KEYWORD_DATASET_DIR / "splits" / "openwakeword_split.json"
         write_manifest(manifest, manifest_path)
 
+        from dataset_integrity import validate_export
+        validate_export(manifest["records"], DATASET_DIR, DATASET_ARCHIVES_DIR)
         DATASET_ARCHIVES_DIR.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         archive_path = DATASET_ARCHIVES_DIR / f"keyword_dataset_{timestamp}.zip"
 
         with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            if KEYWORD_METADATA_PATH.exists():
-                zf.write(KEYWORD_METADATA_PATH, "metadata.csv")
+            import io
+            export_metadata = io.StringIO(newline="")
+            writer = csv.DictWriter(export_metadata, fieldnames=TRAINING_METADATA_COLUMNS, extrasaction="ignore")
+            writer.writeheader()
+            included = set(manifest["path_splits"])
+            writer.writerows(row for row in rows if row.get("path") in included)
+            zf.writestr("metadata.csv", export_metadata.getvalue())
             zf.write(manifest_path, "splits/openwakeword_split.json")
-            for wav in KEYWORD_DATASET_DIR.rglob("*.wav"):
+            for record in manifest["records"]:
+                wav = KEYWORD_DATASET_DIR / record["path"]
                 rel = wav.relative_to(KEYWORD_DATASET_DIR)
+                safe_dataset_path(rel.as_posix())
+                if not wav.resolve().is_relative_to(KEYWORD_DATASET_DIR.resolve()):
+                    raise ValueError("Unsafe export audio path")
                 zf.write(wav, str(rel))
+            from import_keyword_datasets import provenance_path
+            for row in manifest["records"]:
+                evidence = provenance_path(KEYWORD_DATASET_DIR, row["path"])
+                zf.write(evidence, evidence.relative_to(KEYWORD_DATASET_DIR).as_posix())
+            for notice in (KEYWORD_DATASET_DIR / "provenance" / "licenses").glob("*.json"):
+                zf.write(notice, notice.relative_to(KEYWORD_DATASET_DIR).as_posix())
+            zf.writestr("EXPORT_NOTICE.txt", "Private research export. Retain source licenses and recording consent; this archive does not grant redistribution permission.")
 
         return {
             "archive": str(archive_path.relative_to(PROJECT_ROOT)),
@@ -2256,11 +2313,12 @@ async def training_export():
 
 @app.post("/api/training/train", status_code=status.HTTP_202_ACCEPTED)
 async def training_train(seed: int = 1337):
-    """Generate a training manifest and launch the training pipeline."""
+    """Prepare a validated manifest only; no neural training occurs here."""
     def _run_train():
-        from train_openwakeword_models import build_split_manifest, write_manifest
+        from train_openwakeword_models import write_manifest
+        from dataset_integrity import build_strict_manifest
 
-        manifest = build_split_manifest(KEYWORD_DATASET_DIR, seed=seed)
+        manifest = build_strict_manifest(KEYWORD_DATASET_DIR, seed=seed)
         manifest_path = KEYWORD_DATASET_DIR / "splits" / "openwakeword_split.json"
         write_manifest(manifest, manifest_path)
 
@@ -2272,7 +2330,9 @@ async def training_train(seed: int = 1337):
             "speakers": {
                 split: len(ids) for split, ids in speaker_info.items()
             },
-            "note": "Manifest created. Run openWakeWord training in Colab with this manifest.",
+            "operation": "manifest_preparation",
+            "model_trained": False,
+            "note": "Manifest prepared for a future controlled experiment; no model was trained here.",
         }
 
     return await queue_training_job("training", _run_train)

@@ -1,0 +1,4 @@
+Source Dataset,Archive Accessible,Archive SHA256,Files Inspected,Audio Files Imported,Audio Files Rejected,Transcript Matches,Verified Samples,Review-Required Samples,License Restrictions,Import Status
+pld,YES,e8332eda8918fc5fed2b99dfa2e61c3a780263b08a78f2fd199df9b96ccd4181,335265,278,22,441,278,476,CC-BY-NC-4.0; research only; no third-party sharing/redistribution without written consent; no speaker identification,IMPORTED_WITH_REJECTIONS
+mswc,YES,4b091336f1a22147653c43259ce534ab53c2a21f57a83c9f7a02866e16b40f2e,124148,97,3,0,97,0,CC-BY-4.0; attribution required; no speaker identification; no public data in this change,IMPORTED_WITH_REJECTIONS
+speech_commands,YES,af14739ee7dc311471de98f5f9d2c9191b18aedfe957f4a6ff791c709868ff58,105841,188,9,0,188,0,CC-BY-4.0; attribution required; no speaker identification; no public data in this change,IMPORTED_WITH_REJECTIONS

@@ -6,6 +6,8 @@ import threading
 import time
 import unittest
 import wave
+import sys
+import numpy as np
 from pathlib import Path
 
 from test.test_backend_alert_smoke import load_backend_module, restore_modules
@@ -90,6 +92,7 @@ def wav_bytes(
 class TrainingApiTest(unittest.TestCase):
     def load_module(self, temp_dir):
         module, previous = load_backend_module(temp_dir)
+        sys.modules["numpy"] = np
         module.PROJECT_ROOT = Path(temp_dir)
         module.DATASET_DIR = Path(temp_dir) / "dataset"
         module.KEYWORD_DATASET_DIR = (
@@ -151,6 +154,30 @@ class TrainingApiTest(unittest.TestCase):
                 self.assertEqual(rows[0]["noise_condition"], "quiet")
                 self.assertEqual(rows[0]["sample_rate"], "16000")
                 self.assertEqual(rows[0]["duration_s"], "1.20")
+            finally:
+                self.cleanup(module, previous)
+
+    def test_explicit_negative_upload_is_not_positive_and_retains_language(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                result = asyncio.run(module.upload_training_record(
+                    file=FakeUploadFile("hello.wav", wav_bytes()), keyword="hello",
+                    speaker_id="anonymous_01", age_group="adult", gender="other",
+                    distance_m=1.0, noise_condition="quiet", example_kind="negative",
+                    language="ceb",
+                ))
+                self.assertTrue(result["path"].startswith("negative/hard_negative/hello/"))
+                from import_keyword_datasets import load_provenance
+                evidence = load_provenance(module.KEYWORD_DATASET_DIR, result["path"])
+                self.assertEqual(evidence["language"], "ceb")
+                self.assertEqual(evidence["kind"], "negative")
+                with self.assertRaises(module.HTTPException):
+                    asyncio.run(module.upload_training_record(
+                        file=FakeUploadFile("bad.wav", wav_bytes()), keyword="help",
+                        speaker_id="anonymous_01", age_group="adult", gender="other",
+                        distance_m=1.0, noise_condition="quiet", example_kind="negative",
+                    ))
             finally:
                 self.cleanup(module, previous)
 
@@ -499,7 +526,7 @@ class TrainingApiTest(unittest.TestCase):
                     self.assertEqual(result["status"], "queued")
                     await asyncio.gather(*module.TRAINING_JOB_TASKS.values())
                     job = module.TRAINING_JOBS[result["job_id"]]
-                    self.assertEqual(job["status"], "succeeded")
+                    self.assertEqual(job["status"], "succeeded", job.get("error"))
                     self.assertIn("total_files", job["result"])
 
                 asyncio.run(_run())
@@ -548,7 +575,7 @@ class TrainingApiTest(unittest.TestCase):
     def test_augment_subprocess_success_marks_job_succeeded(self):
         job = self._run_augmentation_process_case(FakeAugmentationProcess())
 
-        self.assertEqual(job["status"], "succeeded")
+        self.assertEqual(job["status"], "succeeded", job.get("error"))
         self.assertEqual(job["result"]["message"], "Augmentation completed")
 
     def test_augment_subprocess_failure_retains_diagnostic_tail(self):
@@ -577,7 +604,7 @@ class TrainingApiTest(unittest.TestCase):
                 keyword_dir.mkdir(parents=True, exist_ok=True)
                 for i in range(3):
                     wav_path = keyword_dir / f"help_sp{i:02d}_real_001.wav"
-                    wav_path.write_bytes(wav_bytes())
+                    wav_path.write_bytes(wav_bytes(duration_seconds=1.1+i*.01))
                     relative_path = wav_path.relative_to(
                         module.KEYWORD_DATASET_DIR
                     ).as_posix()
@@ -602,17 +629,34 @@ class TrainingApiTest(unittest.TestCase):
                 negative_dir = module.KEYWORD_DATASET_DIR / "negative" / "noise"
                 negative_dir.mkdir(parents=True, exist_ok=True)
                 for i in range(3):
-                    (negative_dir / f"noise_source_{i:02d}.wav").write_bytes(
-                        wav_bytes()
-                    )
+                    path = negative_dir / f"noise_source_{i:02d}.wav"
+                    path.write_bytes(wav_bytes(duration_seconds=1.3+i*.01))
+                    relative = path.relative_to(module.KEYWORD_DATASET_DIR).as_posix()
+                    row = {"path": relative, "keyword": "noise", "label": "noise",
+                           "speaker_id": f"sp{i:02d}", "source": "real"}
+                    rows.append(row)
+                    module.append_training_metadata(module.KEYWORD_METADATA_PATH, row)
+                from import_keyword_datasets import write_provenance, file_digest, digest
+                for row in rows:
+                    relative = row["path"]
+                    path = module.KEYWORD_DATASET_DIR / relative
+                    with wave.open(str(path), "rb") as handle:
+                        pcm = handle.readframes(handle.getnframes())
+                    write_provenance(module.KEYWORD_DATASET_DIR, relative, {
+                        **row, "kind": relative.split("/")[0], "language": "en",
+                        "source_group": relative, "license": "test-only",
+                        "verification": "operator_verified_recording", "sha256": file_digest(path),
+                        "pcm_sha256": digest(pcm),
+                    })
 
                 async def _run():
                     result = await module.training_train(seed=42)
                     self.assertIn("job_id", result)
                     await asyncio.gather(*module.TRAINING_JOB_TASKS.values())
                     job = module.TRAINING_JOBS[result["job_id"]]
-                    self.assertEqual(job["status"], "succeeded")
+                    self.assertEqual(job["status"], "succeeded", job.get("error"))
                     self.assertIn("manifest_path", job["result"])
+                    self.assertFalse(job["result"]["model_trained"])
 
                 asyncio.run(_run())
             finally:

@@ -301,11 +301,11 @@ def train_with_openwakeword(
 ) -> int:
     if not openwakeword_command:
         print(
-            "No openWakeWord training command supplied. Manifest was created; "
+            "No model was trained. Manifest was created; "
             "run this script in Colab with --openwakeword-command when the "
             "training environment is ready."
         )
-        return 0
+        return 2
     if shutil.which(openwakeword_command.split()[0]) is None:
         raise SystemExit(f"Training command not found: {openwakeword_command}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -350,7 +350,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    manifest = build_split_manifest(args.dataset_dir, seed=args.seed)
+    from dataset_integrity import build_strict_manifest
+    manifest = build_strict_manifest(args.dataset_dir, seed=args.seed)
     write_manifest(manifest, args.manifest_out)
     print(f"Wrote split manifest: {args.manifest_out}")
     print(f"Keywords with samples: {len(manifest['keywords'])}")

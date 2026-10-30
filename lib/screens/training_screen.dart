@@ -16,6 +16,20 @@ class TrainingScreen extends ConsumerStatefulWidget {
 class _TrainingScreenState extends ConsumerState<TrainingScreen> {
   ProviderSubscription<PiConnectionState>? _connectionSubscription;
   String? _selectedKeyword;
+  String _exampleKind = 'positive';
+  String _language = 'en';
+  static const _negativeLabels = [
+    'hi',
+    'hello',
+    'kamusta',
+    'helpful',
+    'healthy',
+    'helmet',
+    'random_speech',
+    'noise',
+    'silence',
+    'music',
+  ];
   final _speakerController = TextEditingController(text: 'speaker_01');
   final _distanceController = TextEditingController(text: '1.0');
   String _ageGroup = 'adult';
@@ -51,21 +65,10 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
   @override
   Widget build(BuildContext context) {
     ref.listen<TrainingState>(trainingProvider, (prev, next) {
-      if (_selectedKeyword == null && next.keywords.isNotEmpty) {
-        final initialKw = next.keywords.first.keyword;
-        setState(() {
-          _selectedKeyword = initialKw;
-          _speakerController.text = ref
-              .read(trainingProvider.notifier)
-              .getNextSpeakerId(initialKw);
-        });
-      } else if (_selectedKeyword != null &&
-          (prev?.recordings.length != next.recordings.length ||
-              (prev?.recordingStatus != TrainingRecordingStatus.success &&
-                  next.recordingStatus == TrainingRecordingStatus.success))) {
-        _speakerController.text = ref
-            .read(trainingProvider.notifier)
-            .getNextSpeakerId(_selectedKeyword!);
+      if (_selectedKeyword == null &&
+          next.keywords.isNotEmpty &&
+          _exampleKind == 'positive') {
+        setState(() => _selectedKeyword = next.keywords.first.keyword);
       }
     });
 
@@ -173,10 +176,82 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   DropdownButtonFormField<String>(
+                    initialValue: _exampleKind,
+                    decoration: const InputDecoration(
+                      labelText: 'Example type',
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'positive',
+                        child: Text('Positive distress keyword'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'negative',
+                        child: Text('Negative — must not trigger'),
+                      ),
+                    ],
+                    onChanged: training.isRecording || training.isRecordingBusy
+                        ? null
+                        : (value) {
+                            if (value == null) return;
+                            ref
+                                .read(trainingProvider.notifier)
+                                .cancelPendingRecording();
+                            setState(() {
+                              _exampleKind = value;
+                              _selectedKeyword = value == 'negative'
+                                  ? 'hello'
+                                  : training.keywords.firstOrNull?.keyword;
+                            });
+                          },
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: _language,
+                    decoration: const InputDecoration(
+                      labelText: 'Spoken language',
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 'en', child: Text('English')),
+                      DropdownMenuItem(
+                        value: 'fil',
+                        child: Text('Filipino / Tagalog'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'ceb',
+                        child: Text('Cebuano / Bisaya'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'und',
+                        child: Text('No speech / unknown'),
+                      ),
+                    ],
+                    onChanged:
+                        training.isRecording ||
+                            training.isRecordingBusy ||
+                            training.isRecorded
+                        ? null
+                        : (value) {
+                            if (value != null) {
+                              setState(() => _language = value);
+                            }
+                          },
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Use a stable anonymous speaker ID for the same person across all phrases and sessions. Record only with consent; no names.',
+                  ),
+                  if (_exampleKind == 'negative')
+                    const Text(
+                      'Record the selected non-keyword or background sound. Do not say a distress keyword in a negative example.',
+                    ),
+                  DropdownButtonFormField<String>(
+                    key: ValueKey(_exampleKind),
                     initialValue: _selectedKeyword,
                     decoration: const InputDecoration(
-                      labelText: 'Keyword',
-                      helperText: 'Choose one of the 17 deployed keywords.',
+                      labelText: 'Keyword / negative category',
+                      helperText:
+                          'Verify the actual spoken content before saving.',
                       border: OutlineInputBorder(),
                     ),
                     hint: Text(
@@ -184,15 +259,29 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                           ? 'Loading keywords...'
                           : 'Select keyword',
                     ),
-                    items: training.keywords
-                        .map(
-                          (kw) => DropdownMenuItem(
-                            value: kw.keyword,
-                            child: Text('${kw.keyword} (${kw.language})'),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: training.keywords.isEmpty
+                    items:
+                        (_exampleKind == 'negative'
+                                ? _negativeLabels
+                                      .map(
+                                        (label) => TrainingKeyword(
+                                          keyword: label,
+                                          slug: label,
+                                          language: _language,
+                                        ),
+                                      )
+                                      .toList()
+                                : training.keywords)
+                            .map(
+                              (kw) => DropdownMenuItem(
+                                value: kw.keyword,
+                                child: Text('${kw.keyword} (${kw.language})'),
+                              ),
+                            )
+                            .toList(),
+                    onChanged:
+                        training.isRecording ||
+                            training.isRecordingBusy ||
+                            training.keywords.isEmpty
                         ? null
                         : (v) {
                             if (v == _selectedKeyword) return;
@@ -204,9 +293,6 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                                       .read(trainingProvider.notifier)
                                       .cancelPendingRecording();
                                 }
-                                _speakerController.text = ref
-                                    .read(trainingProvider.notifier)
-                                    .getNextSpeakerId(v);
                               }
                             });
                           },
@@ -448,7 +534,7 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                           .startJob('export'),
               ),
               _PipelineButton(
-                label: 'Train',
+                label: 'Prepare training split',
                 icon: Icons.model_training,
                 color: Colors.orange,
                 onPressed: training.isLoading
@@ -640,6 +726,8 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
         gender: upload.gender,
         distanceM: upload.distanceM,
         noiseCondition: upload.noiseCondition,
+        exampleKind: upload.exampleKind,
+        language: upload.language,
       );
       if (!mounted || !stopped) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -678,9 +766,6 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
     if (!mounted) return;
     final errorMessage = ref.read(trainingProvider).errorMessage;
     if (uploaded) {
-      if (_selectedKeyword != null) {
-        _speakerController.text = notifier.getNextSpeakerId(_selectedKeyword!);
-      }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
@@ -725,6 +810,8 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
       gender: _gender,
       distanceM: distance,
       noiseCondition: _noiseCondition,
+      exampleKind: _exampleKind,
+      language: _language,
     );
   }
 
