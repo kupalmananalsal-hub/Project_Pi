@@ -173,12 +173,16 @@ void main() {
     container.dispose();
   });
 
-  testWidgets('notice hides raw keyword names from the active screen', (tester) async {
+  testWidgets('notice hides raw keyword names from the active screen', (
+    tester,
+  ) async {
     final container = await pumpApp(tester);
     for (final keyword in ['help', 'tulong', 'saklolo', 'sunog', 'agai']) {
-      container.read(alertsProvider.notifier).handleAlertForTest(
-        keywordEvent(id: 'hidden-$keyword', keyword: keyword),
-      );
+      container
+          .read(alertsProvider.notifier)
+          .handleAlertForTest(
+            keywordEvent(id: 'hidden-$keyword', keyword: keyword),
+          );
       await tester.pump();
       expect(find.text('Keyword Spotted!'), findsOneWidget);
       expect(find.text(keyword.toUpperCase()), findsNothing);
@@ -193,9 +197,15 @@ void main() {
   ) async {
     final container = await pumpApp(tester);
 
-    container.read(alertsProvider.notifier).handleAlertForTest(
-      keywordEvent(id: 'thermal-1', keyword: 'thermal', modality: 'thermal_only'),
-    );
+    container
+        .read(alertsProvider.notifier)
+        .handleAlertForTest(
+          keywordEvent(
+            id: 'thermal-1',
+            keyword: 'thermal',
+            modality: 'thermal_only',
+          ),
+        );
     await tester.pump();
 
     expect(find.text('LISTENING'), findsOneWidget);
@@ -262,9 +272,12 @@ void main() {
     expect(find.byKey(const ValueKey('pi-host-field')), findsOneWidget);
     expect(find.byKey(const ValueKey('pi-connect-button')), findsOneWidget);
 
-    final hostY = tester.getCenter(find.byKey(const ValueKey('pi-host-field'))).dy;
-    final connectY =
-        tester.getCenter(find.byKey(const ValueKey('pi-connect-button'))).dy;
+    final hostY = tester
+        .getCenter(find.byKey(const ValueKey('pi-host-field')))
+        .dy;
+    final connectY = tester
+        .getCenter(find.byKey(const ValueKey('pi-connect-button')))
+        .dy;
     expect(connectY, greaterThan(hostY));
 
     await tester.enterText(
