@@ -569,6 +569,18 @@ def import_snowboydetect(swig_path: str, examples_path: str):
     return snowboydetect
 
 
+def fallback_speech_active(result: dict[str, object], raw_samples) -> bool:
+    """Use VAD when available, otherwise reject quiet int16 PCM frames."""
+    if result.get("available") and result.get("is_speech") is not None:
+        return bool(result["is_speech"])
+    # Unavailable VAD returns a permissive True; do not mistake it for speech.
+    # -40 dBFS RMS (1% full scale) is an energy floor, not speech recognition.
+    if len(raw_samples) == 0:
+        return False
+    mean_square = sum(float(sample) ** 2 for sample in raw_samples) / len(raw_samples)
+    return mean_square >= (32768.0 * 0.01) ** 2
+
+
 def put_latest(target_queue: queue.Queue, data: dict[str, object]) -> None:
     try:
         target_queue.put_nowait(data)
@@ -1177,7 +1189,7 @@ def main() -> None:
             packet = split_audio_chunk(data, channels)
             raw_samples = packet["raw_mono_samples"]
             preprocessor_result = audio_preprocessor.process(raw_samples)
-            speech_active = bool(preprocessor_result["is_speech"])
+            speech_active = fallback_speech_active(preprocessor_result, raw_samples)
             cleaned_samples, metrics = noise_suppressor.process(raw_samples)
             preprocessed_samples = np.asarray(
                 cleaned_samples,
@@ -1262,7 +1274,8 @@ def main() -> None:
                                 flush=True,
                             )
                         next_openwakeword_score_log_at = now + 1.0
-            if not openwakeword_posted:
+            # A primary match must not starve fallback engines of speech audio.
+            if speech_active:
                 put_latest(vosk_queue, packet)
                 put_latest(snowboy_queue, packet)
 

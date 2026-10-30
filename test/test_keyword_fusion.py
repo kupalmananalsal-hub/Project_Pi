@@ -1,5 +1,5 @@
 """test_keyword_fusion.py -- Unit tests for the KWS keyword fusion logic."""
-import importlib.util, sys, time, types, unittest
+import ast, importlib.util, queue, sys, time, types, unittest
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -119,6 +119,45 @@ class TestKeywordFusion(unittest.TestCase):
         self.assertEqual(kc.keyword, "tulong")
         self.assertIsNone(kc.original_confidence)
         self.assertFalse(kc.verifier_used)
+
+    def test_fallback_vad_and_energy_gate(self):
+        gate = self.m.fallback_speech_active
+        self.assertTrue(gate({"available": True, "is_speech": True}, [0, 0]))
+        self.assertFalse(gate({"available": True, "is_speech": False}, [32767, -32768]))
+        for result in ({}, {"available": False, "is_speech": True},
+                       {"available": True, "is_speech": None}):
+            with self.subTest(result=result):
+                self.assertFalse(gate(result, []))
+                self.assertFalse(gate(result, [0, 0]))
+                self.assertFalse(gate(result, [100, -100]))
+                self.assertTrue(gate(result, [1000, -1000]))
+                self.assertTrue(gate(result, [32767, -32768]))
+
+    def test_capture_loop_feeds_both_fallbacks_only_for_speech(self):
+        # Execute the actual queue-dispatch block without importing Pi hardware.
+        tree = ast.parse(KWS_MODULE.read_text(encoding="utf-8"))
+        blocks = [node for node in ast.walk(tree) if isinstance(node, ast.If)
+                  and any(isinstance(stmt, ast.Expr)
+                          and isinstance(stmt.value, ast.Call)
+                          and isinstance(stmt.value.func, ast.Name)
+                          and stmt.value.func.id == "put_latest"
+                          and isinstance(stmt.value.args[0], ast.Name)
+                          and stmt.value.args[0].id == "vosk_queue"
+                          for stmt in node.body)]
+        self.assertEqual(len(blocks), 1)
+        code = compile(ast.Module(body=blocks, type_ignores=[]), str(KWS_MODULE), "exec")
+        for speech in (False, True):
+            for posted in (False, True):
+                with self.subTest(speech=speech, openwakeword_posted=posted):
+                    vosk, snowboy = queue.Queue(), queue.Queue()
+                    packet = {"mono_bytes": b"test"}
+                    exec(code, {"speech_active": speech, "openwakeword_posted": posted,
+                                "put_latest": self.m.put_latest, "packet": packet,
+                                "vosk_queue": vosk, "snowboy_queue": snowboy})
+                    for target in (vosk, snowboy):
+                        self.assertEqual(target.qsize(), int(speech))
+                        if speech:
+                            self.assertIs(target.get_nowait(), packet)
 
     def test_02_strong_openwakeword_accepted_directly(self):
         m = self.m
