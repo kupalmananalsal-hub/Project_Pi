@@ -63,6 +63,33 @@ void main() {
 
   Future<void> drainAsync() => Future<void>.delayed(Duration.zero);
 
+  test(
+    'authoritative negative thermal cannot inherit an earlier local positive',
+    () async {
+      final runtime = FakeAlertRuntimeService();
+      final container = makeContainer(runtime);
+      final controller = container.read(alertsProvider.notifier);
+      controller.handleThermalStateForTest(
+        null,
+        const thermal.ThermalState(
+          humanDetection: HumanDetectionResult(detected: true),
+        ),
+      );
+      controller.handleAlertForTest(
+        AlertEvent.fromMessage({
+          'event_id': 'stale-local',
+          'keyword': 'help',
+          'decision_state': 'critical',
+          'thermal_state': 'negative',
+        }),
+      );
+      await drainAsync();
+      expect(container.read(alertsProvider).activeAlertHumanDetected, isFalse);
+      expect(container.read(alertsProvider).activeAlertThermalFrame, isNull);
+      expect(runtime.emergencyStarts, 1);
+    },
+  );
+
   test('disposing the alerts provider stops active emergency output', () async {
     final runtime = FakeAlertRuntimeService();
     final container = ProviderContainer(

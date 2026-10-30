@@ -17,6 +17,9 @@ class ReconnectingWebSocketService<T> {
     this.connector,
     this.reconnectDelay = const Duration(seconds: 2),
     this.maxReconnectDelay = const Duration(seconds: 30),
+    this.readyTimeout = const Duration(seconds: 10),
+    this.teardownTimeout = const Duration(seconds: 2),
+    this.onReady,
   });
 
   final Uri uri;
@@ -24,6 +27,12 @@ class ReconnectingWebSocketService<T> {
   final T Function(dynamic message) parser;
   final Duration reconnectDelay;
   final Duration maxReconnectDelay;
+  final Duration readyTimeout;
+  final Duration teardownTimeout;
+  final void Function()? onReady;
+
+  void send(Object message) => _channel?.sink.add(message);
+  void reconnect() => _scheduleReconnect();
 
   final _messages = StreamController<T>.broadcast();
   final _status = StreamController<SocketConnectionStatus>.broadcast();
@@ -63,12 +72,14 @@ class ReconnectingWebSocketService<T> {
     _trace('socket_status', 'disconnected', 'manual_close');
     _manualClose = true;
     _started = false;
+    _generation++;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
-    await _subscription?.cancel();
+    final subscription = _subscription;
+    final channel = _channel;
     _subscription = null;
-    await _channel?.sink.close();
     _channel = null;
+    await _teardown(subscription, channel);
     if (!_status.isClosed) {
       _status.add(SocketConnectionStatus.disconnected);
     }
@@ -94,9 +105,12 @@ class ReconnectingWebSocketService<T> {
           : WebSocketChannel.connect(uri);
       unawaited(
         _channel!.ready
+            .timeout(readyTimeout)
             .then((_) {
               if (generation == _generation && !_manualClose) {
                 _trace('socket_attempt', 'ready');
+                _status.add(SocketConnectionStatus.connected);
+                onReady?.call();
               }
             })
             .catchError((Object error) {
@@ -106,6 +120,7 @@ class ReconnectingWebSocketService<T> {
                   'failed',
                   error.runtimeType.toString(),
                 );
+                _scheduleReconnect();
               }
             }),
       );
@@ -125,13 +140,16 @@ class ReconnectingWebSocketService<T> {
           }
         },
         onError: (Object error, StackTrace stackTrace) {
+          if (generation != _generation || _manualClose) return;
           _trace('socket_error', 'failed', error.runtimeType.toString());
           if (!_messages.isClosed) {
             _messages.addError(error, stackTrace);
           }
           _scheduleReconnect();
         },
-        onDone: _scheduleReconnect,
+        onDone: () {
+          if (generation == _generation) _scheduleReconnect();
+        },
         cancelOnError: false,
       );
     } catch (error, stackTrace) {
@@ -147,9 +165,12 @@ class ReconnectingWebSocketService<T> {
     }
     _status.add(SocketConnectionStatus.reconnecting);
     _trace('socket_status', 'reconnecting', 'stream_closed_or_failed');
-    _subscription?.cancel();
+    _generation++;
+    final subscription = _subscription;
+    final channel = _channel;
     _subscription = null;
     _channel = null;
+    unawaited(_teardown(subscription, channel));
     final delay = _nextDelay();
     _reconnectTimer = Timer(delay, () {
       _reconnectTimer = null;
@@ -167,5 +188,26 @@ class ReconnectingWebSocketService<T> {
         maxReconnectDelay.inMilliseconds,
       ),
     );
+  }
+
+  Future<void> _teardown(
+    StreamSubscription<dynamic>? subscription,
+    WebSocketChannel? channel,
+  ) async {
+    Future<void> bounded(Future<void> Function() action) async {
+      try {
+        await action().timeout(teardownTimeout);
+      } catch (error) {
+        _trace('socket_teardown', 'failed', error.runtimeType.toString());
+      }
+    }
+
+    await Future.wait([
+      if (subscription != null) bounded(subscription.cancel),
+      if (channel != null)
+        bounded(() async {
+          await channel.sink.close();
+        }),
+    ]);
   }
 }

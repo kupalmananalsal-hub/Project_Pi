@@ -1,0 +1,19 @@
+name: Linux SQLite backup permissions
+on:
+  push:
+    branches: [phase3/durable-alert-delivery]
+  pull_request:
+    paths:
+      - raspberry_pi/scripts/backup_alerts.py
+      - test/test_backup_permissions.py
+      - .github/workflows/backup-permissions.yml
+permissions:
+  contents: read
+jobs:
+  linux-backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Linux permissions, consistency and no overwrite
+        run: python3 -m unittest discover -s test -p 'test_backup_permissions.py' -v

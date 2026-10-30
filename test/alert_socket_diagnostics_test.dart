@@ -17,7 +17,7 @@ void main() {
         final record = jsonDecode(message) as Map<String, dynamic>;
         records.add(record);
         if (record['stage'] == 'socket_attempt' &&
-            record['generation'] == 2 &&
+            (record['generation'] as int) >= 2 &&
             !reconnected.isCompleted) {
           reconnected.complete();
         }

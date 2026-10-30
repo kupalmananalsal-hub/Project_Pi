@@ -13,21 +13,33 @@ import '../models/alert_event.dart';
 import '../models/app_settings.dart';
 import 'alert_trace.dart';
 
+class _OutputAttempt {
+  bool active = true;
+}
+
 class AlertRuntimeService {
+  AlertRuntimeService({this.operationTimeout = const Duration(seconds: 5)});
+  final Duration operationTimeout;
+  int _generation = 0;
+  bool _emergencyActive = false;
+  final Set<int> _notificationIds = {};
+  String? _eventId;
+  Future<void>? _audioConfiguration;
+  void _checkGeneration() {
+    final generation = Zone.current[#alertGeneration];
+    final attempt = Zone.current[#outputAttempt] as _OutputAttempt?;
+    if ((generation != null && generation != _generation) ||
+        attempt?.active == false) {
+      throw StateError('superseded_emergency');
+    }
+  }
+
   final _notifications = FlutterLocalNotificationsPlugin();
   final _player = AudioPlayer();
   final _softPlayer = AudioPlayer();
 
   Timer? _vibrationFallbackTimer;
   bool _initialized = false;
-  Future<void> _transition = Future<void>.value();
-
-  Future<void> _serialize(Future<void> Function() action) {
-    final next = _transition.then((_) => action());
-    _transition = next.catchError((Object _) {});
-    return next;
-  }
-
   Future<void> initialize() async {
     if (_initialized) {
       return;
@@ -46,6 +58,42 @@ class AlertRuntimeService {
       settings: const InitializationSettings(android: android, iOS: darwin),
     );
 
+    final androidPlugin = _notifications
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >();
+    await androidPlugin?.requestNotificationsPermission();
+    await androidPlugin?.requestFullScreenIntentPermission();
+
+    _initialized = true;
+  }
+
+  Future<void> configureAudio() {
+    final current = _audioConfiguration;
+    if (current != null) return current;
+    final eventId = _eventId;
+    final completion = Completer<void>();
+    _audioConfiguration = completion.future;
+    // Install the single-flight Future before invoking the plugin (including
+    // synchronous failures), and clear it before notifying failed callers.
+    Future<void>.sync(configureAudioSession).then(
+      (_) {
+        completion.complete();
+      },
+      onError: (Object error, StackTrace stack) {
+        if (identical(_audioConfiguration, completion.future)) {
+          _audioConfiguration = null;
+        }
+        traceAlert('audio_configuration', eventId, 'failed', {
+          'reason': error.runtimeType.toString(),
+        });
+        completion.completeError(error, stack);
+      },
+    );
+    return completion.future;
+  }
+
+  Future<void> configureAudioSession() async {
     final session = await AudioSession.instance;
     await session.configure(
       const AudioSessionConfiguration(
@@ -64,15 +112,6 @@ class AlertRuntimeService {
         androidWillPauseWhenDucked: false,
       ),
     );
-
-    final androidPlugin = _notifications
-        .resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin
-        >();
-    await androidPlugin?.requestNotificationsPermission();
-    await androidPlugin?.requestFullScreenIntentPermission();
-
-    _initialized = true;
   }
 
   Future<void> startEmergency(
@@ -80,58 +119,84 @@ class AlertRuntimeService {
     AlertSound sound, {
     bool vibrate = true,
   }) async {
+    final generation = ++_generation;
+    _emergencyActive = true;
+    _eventId = event.eventId;
     Future<void> stage(String name, Future<void> Function() action) async {
+      final attempt = _OutputAttempt();
       traceAlert(name, event.eventId, 'attempted');
       try {
-        await action();
+        await runZoned(
+          action,
+          zoneValues: {#outputAttempt: attempt},
+        ).timeout(operationTimeout);
+        _checkGeneration();
         traceAlert(name, event.eventId, 'completed');
       } catch (error) {
+        attempt.active = false;
         traceAlert(name, event.eventId, 'failed', {
           'error_type': error.runtimeType.toString(),
+          'reason': error is TimeoutException
+              ? 'operation_timeout'
+              : 'operation_failed_or_superseded',
         });
       }
     }
 
-    await _serialize(() async {
+    await runZoned(() async {
       await Future.wait([
         stage('notification', () async {
+          await cancelNotification().timeout(operationTimeout);
+          _checkGeneration();
           await showEmergencyNotification(event, vibrate: vibrate);
         }),
         stage('alarm_audio', () async {
           await stopSoftAudio();
+          _checkGeneration();
           await _startAudio(sound, event.eventId);
         }),
         stage('vibration', vibrate ? startVibration : Vibration.cancel),
       ]);
-    });
+    }, zoneValues: {#alertGeneration: generation});
   }
 
   Future<void> stopEmergency() async {
-    await _serialize(() async {
-      _vibrationFallbackTimer?.cancel();
-      _vibrationFallbackTimer = null;
-      await Future.wait([
-        _cleanup('vibration_stop', Vibration.cancel),
-        _cleanup('audio_stop', _player.stop),
-        _cleanup('notification_cancel', () => _notifications.cancel(id: 1001)),
-      ]);
-    });
+    ++_generation;
+    _emergencyActive = false;
+    _vibrationFallbackTimer?.cancel();
+    _vibrationFallbackTimer = null;
+    await Future.wait([
+      _cleanup('vibration_stop', stopVibration),
+      _cleanup('audio_stop', stopAudio),
+      _cleanup('notification_cancel', cancelNotification),
+    ]);
+  }
+
+  Future<void> stopVibration() => Vibration.cancel();
+  Future<void> stopAudio() => _player.stop();
+  Future<void> cancelNotification() async {
+    final ids = _notificationIds.toList();
+    _notificationIds.clear();
+    await Future.wait(ids.map((id) => _notifications.cancel(id: id)));
   }
 
   Future<void> _cleanup(String stage, Future<void> Function() action) async {
+    final eventId = _eventId;
     try {
-      await action();
+      await action().timeout(operationTimeout);
     } catch (error) {
-      traceAlert(stage, null, 'failed', {
+      traceAlert(stage, eventId, 'failed', {
         'error_type': error.runtimeType.toString(),
       });
     }
   }
 
   Future<void> playSoftThermalBeep() async {
-    await initialize();
+    await configureAudio().timeout(operationTimeout);
     final session = await AudioSession.instance;
+    _checkGeneration();
     await session.setActive(true);
+    _checkGeneration();
     final file = await _softBeepFile();
     await _softPlayer.stop();
     await _softPlayer.setFilePath(file.path);
@@ -154,6 +219,7 @@ class AlertRuntimeService {
     required bool vibrate,
   }) async {
     await initialize();
+    _checkGeneration();
     const android = AndroidNotificationDetails(
       'keyword_alerts',
       'Keyword Alerts',
@@ -178,8 +244,11 @@ class AlertRuntimeService {
       interruptionLevel: InterruptionLevel.timeSensitive,
     );
 
+    final notificationId =
+        1001 + (Zone.current[#alertGeneration] as int? ?? _generation);
+    _notificationIds.add(notificationId);
     await _notifications.show(
-      id: 1001,
+      id: notificationId,
       title: event.emergencyTitle,
       body:
           'Voice from ${event.directionLabel}. '
@@ -190,10 +259,21 @@ class AlertRuntimeService {
         iOS: darwin,
       ),
     );
+    try {
+      _checkGeneration();
+    } catch (_) {
+      await _cleanup(
+        'late_notification_cancel',
+        () => _notifications.cancel(id: notificationId),
+      );
+      _notificationIds.remove(notificationId);
+      rethrow;
+    }
   }
 
   Future<void> _startAudio(AlertSound sound, String? eventId) async {
     await prepareAudio(sound);
+    _checkGeneration();
     traceAlert('audio_preparation', eventId, 'completed');
     unawaited(
       playAudio()
@@ -212,16 +292,24 @@ class AlertRuntimeService {
   Future<void> playAudio() => _player.play();
 
   Future<void> prepareAudio(AlertSound sound) async {
+    await configureAudio().timeout(operationTimeout);
+    _checkGeneration();
     final session = await AudioSession.instance;
+    _checkGeneration();
     await session.setActive(true);
+    _checkGeneration();
     final file = await _alarmFile(sound);
+    _checkGeneration();
     await _player.setFilePath(file.path);
+    _checkGeneration();
     await _player.setLoopMode(LoopMode.one);
+    _checkGeneration();
     await _player.setVolume(1);
   }
 
   Future<void> startVibration() async {
     final hasVibrator = await Vibration.hasVibrator();
+    _checkGeneration();
     if (!hasVibrator) {
       return;
     }
@@ -230,6 +318,14 @@ class AlertRuntimeService {
       intensities: const [255, 0, 255, 0],
       repeat: 0,
     );
+    try {
+      _checkGeneration();
+    } catch (_) {
+      if (!_emergencyActive) {
+        await _cleanup('late_vibration_cancel', stopVibration);
+      }
+      rethrow;
+    }
     _vibrationFallbackTimer?.cancel();
     _vibrationFallbackTimer = Timer.periodic(const Duration(seconds: 4), (_) {
       unawaited(
