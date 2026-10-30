@@ -612,9 +612,28 @@ class AlertDecisionEngineTest(unittest.TestCase):
         self.assertEqual(policy.repeat_escalation_floor, 0.70)
         self.assertEqual(policy.repeat_window_seconds, 10.0)
         self.assertEqual(policy.repeat_required_count, 2)
-        self.assertTrue(policy.repeat_escalates_to_critical)
+        self.assertFalse(policy.repeat_escalates_to_critical)
         self.assertEqual(policy.idempotency_ttl_seconds, 60.0)
         self.assertEqual(policy.idempotency_max_entries, 512)
+
+    def test_committed_policy_keeps_repeated_snowboy_matches_advisory(self):
+        policy = AlertPolicy.load(
+            PROJECT_ROOT / "raspberry_pi" / "config" / "alert_policy.yaml"
+        )
+        for thermal in (None, self.negative_thermal()):
+            with self.subTest(thermal=thermal):
+                self.engine = AlertDecisionEngine(policy=policy, clock=self.clock)
+                for index in range(3):
+                    result = self.evaluate(
+                        0.75, thermal, source="snowboy",
+                        event_id=f"snowboy-repeat-{index}",
+                    )
+                    self.assertEqual(result["decision_state"], "advisory")
+                    self.assertEqual(result["alert_level"], "visual_only")
+                    self.clock.advance(1.0)
+                self.assertEqual(result["decision_factors"]["repeat_count"], 3)
+                high = self.evaluate(0.85, thermal, event_id="high-confidence")
+                self.assertEqual(high["decision_state"], "critical")
 
     def test_missing_policy_file_uses_safe_defaults(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -6,10 +6,10 @@ critical_threshold: 0.85
 repeat_escalation_floor: 0.70
 thermal_freshness_seconds: 1.25
 # KWS cooldown suppresses duplicate detections from one utterance before POST.
-# Backend repeat tracking escalates multiple unique event_id values per phrase.
+# Track repeated detections without escalating low-confidence voice matches.
 repeat_window_seconds: 10.0
 repeat_required_count: 2
-repeat_escalates_to_critical: true
+repeat_escalates_to_critical: false
 # In-memory retry deduplication. It survives HTTP retries while this backend
 # process is running, but not a backend restart; persistent idempotency is
 # deferred until a future database-migration phase.
