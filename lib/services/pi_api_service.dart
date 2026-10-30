@@ -15,6 +15,8 @@ class PiApiException implements Exception {
 }
 
 class PiApiService {
+  final String _trainingSessionId =
+      'mobile_${DateTime.now().microsecondsSinceEpoch}';
   PiApiService({required this.host, required int port, Dio? dio, this.apiToken})
     : port = AppSettings.normalizeBackendPort(port),
       _dio =
@@ -181,6 +183,8 @@ class PiApiService {
         'keyword': keyword,
         'example_kind': exampleKind,
         'language': language,
+        'recording_device': 'mobile_microphone',
+        'session_id': _trainingSessionId,
         'speaker_id': speakerId,
         'age_group': ageGroup,
         'gender': gender,

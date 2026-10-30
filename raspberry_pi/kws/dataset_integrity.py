@@ -10,6 +10,7 @@ import wave
 from pathlib import Path
 from keyword_dataset_common import (
     KEYWORDS,
+    KEYWORD_LANGUAGES,
     NEGATIVE_CLASSES,
     slugify_keyword,
     sample_subdirectory,
@@ -71,6 +72,16 @@ def validated_rows(root):
             else NEGATIVE_CLASSES
         ):
             raise ValueError("Invalid label: " + relative)
+        if kind == "positive" and provenance["language"] != KEYWORD_LANGUAGES.get(
+            label.replace("_", " ")
+        ):
+            raise ValueError(
+                "unknown_positive_language"
+                if provenance["language"] == "und"
+                else "positive_language_mismatch"
+            )
+        if provenance.get("validation_state") == "REVIEW_REQUIRED":
+            raise ValueError("unverified_recording_provenance")
         actual_relative = relative.removeprefix("augmented/")
         if not actual_relative.startswith(sample_subdirectory(kind, label) + "/"):
             raise ValueError("Path label mismatch: " + relative)

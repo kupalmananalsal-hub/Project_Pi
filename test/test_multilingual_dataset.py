@@ -472,6 +472,191 @@ class DatasetIntegrationTest(unittest.TestCase):
                 rows[0]["verification"], "human_audio_and_transcript_review"
             )
 
+    def test_pi_collection_provenance_and_strict_preparation(self):
+        import numpy as np
+        import argparse
+        import record_keyword_dataset as recorder
+        from dataset_integrity import build_strict_manifest
+        from dataset_readiness import audit_records
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rng = np.random.default_rng(54)
+
+            def capture(path, seconds, device=None):
+                with wave.open(str(path), "wb") as out:
+                    out.setnchannels(1)
+                    out.setsampwidth(2)
+                    out.setframerate(16000)
+                    out.writeframes(
+                        (rng.normal(0, 1500, 18000)).astype("<i2").tobytes()
+                    )
+                return {
+                    "name": "Fixture input, not physical ReSpeaker",
+                    "selected_device": "fixture",
+                }
+
+            for i in range(3):
+                args = argparse.Namespace(
+                    dataset_dir=root,
+                    keyword="help",
+                    speaker_id=f"sp{i}",
+                    session_id=f"session{i}",
+                    samples=1,
+                    seconds=1.125,
+                    device="fixture",
+                    recording_device_description="Fixture microphone",
+                    consent_reference="fixture-consent",
+                    reviewer_id="fixture_reviewer",
+                    age_group="adult",
+                    gender="other",
+                    distance_m="1",
+                    noise_condition="quiet",
+                    notes="",
+                )
+                with patch.object(recorder, "record_wav", side_effect=capture), patch(
+                    "builtins.input", side_effect=["", "VERIFIED"]
+                ):
+                    recorder.collect_session(args)
+                ingest.store_audio(
+                    root,
+                    rng.normal(0, 0.05, 18000).astype(np.float32),
+                    {
+                        "kind": "negative",
+                        "label": "random_speech",
+                        "source": "fixture",
+                        "sample_id": str(i),
+                        "speaker_id": f"sp{i}",
+                        "source_group": f"negative{i}",
+                        "language": "en",
+                        "verification": "source_transcript_checked",
+                        "transcript": "ordinary words",
+                    },
+                    {"license": "fixture", "archive_sha256": "fixture"},
+                )
+            records, issues, _ = audit_records(root)
+            self.assertEqual(issues, [])
+            positives = [r for r in records if r["kind"] == "positive"]
+            self.assertEqual(len(positives), 3)
+            for row in positives:
+                self.assertEqual(row["original_sha256"], row["processed_sha256"])
+                self.assertEqual(row["language"], "en")
+                self.assertTrue(row["consent_confirmed"])
+                self.assertEqual(row["capture_origin"], "pi_recorder")
+            manifest = build_strict_manifest(root)
+            self.assertEqual(
+                set(manifest["path_splits"].values()), {"train", "val", "test"}
+            )
+
+    def test_legacy_migration_unknown_review_and_immutability(self):
+        from recording_provenance import migrate
+        from dataset_readiness import audit_records
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ensure_dataset_layout(root)
+            relative = "positive/help/legacy.wav"
+            path = root / relative
+            path.write_bytes(wav_data())
+            append_metadata(
+                root / "metadata.csv",
+                {"path": relative, "label": "help", "speaker_id": "sp1"},
+            )
+            before = (path.read_bytes(), (root / "metadata.csv").read_bytes())
+            self.assertEqual(migrate(root)[0]["state"], "REVIEW_REQUIRED")
+            self.assertFalse(ingest.provenance_path(root, relative).exists())
+            migrate(root, apply=True)
+            p = ingest.load_provenance(root, relative)
+            for key in (
+                "session_id",
+                "recording_device",
+                "consent_reference",
+                "original_sha256",
+            ):
+                self.assertEqual(p[key], "unknown")
+            self.assertEqual(p["language"], "und")
+            self.assertEqual(audit_records(root)[0], [])
+            review = {
+                "expected_sha256": ingest.file_digest(path),
+                "language": "en",
+                "session_id": "session1",
+                "recording_device": "Documented USB mic",
+                "capture_device": "collection-record-1",
+                "device_verified": True,
+                "consent_confirmed": True,
+                "consent_reference": "consent-record-1",
+                "audio_reviewed": True,
+                "reviewer_id": "reviewer1",
+            }
+            migrate(root, {relative: review}, apply=True)
+            self.assertEqual(len(audit_records(root)[0]), 1)
+            self.assertEqual(
+                ingest.load_provenance(root, relative)["original_sha256"], "unknown"
+            )
+            self.assertEqual(
+                before, (path.read_bytes(), (root / "metadata.csv").read_bytes())
+            )
+            with self.assertRaisesRegex(ValueError, "approved"):
+                migrate(root, {relative: review}, apply=True)
+
+    def test_positive_language_mismatch_and_unknown_require_review(self):
+        import numpy as np
+        from dataset_readiness import audit_records
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ensure_dataset_layout(root)
+            ingest.store_audio(
+                root,
+                np.random.default_rng(3).normal(0, 0.05, 16000),
+                {
+                    "source": "fixture",
+                    "sample_id": "one",
+                    "kind": "positive",
+                    "label": "tulong",
+                    "language": "en",
+                    "speaker_id": "sp1",
+                    "source_group": "one",
+                    "verification": "operator_verified_recording",
+                },
+                {"license": "fixture", "archive_sha256": "fixture"},
+            )
+            records, issues, _ = audit_records(root)
+            self.assertFalse(records)
+            self.assertEqual(issues[0]["issue"], "positive_language_mismatch")
+            path = "positive/tulong/fixture_one.wav"
+            p = ingest.load_provenance(root, path)
+            p["language"] = "und"
+            ingest.write_provenance(root, path, p)
+            self.assertEqual(audit_records(root)[1][0]["state"], "REVIEW_REQUIRED")
+            with self.assertRaisesRegex(ValueError, "unknown_positive_language"):
+                validated_rows(root)
+
+    def test_recorder_binds_capture_to_reported_device(self):
+        import types
+        import numpy as np
+        from unittest.mock import Mock
+        import record_keyword_dataset as recorder
+
+        sd = types.SimpleNamespace(
+            default=types.SimpleNamespace(device=(7, 8)),
+            query_devices=Mock(
+                return_value={"name": "Fixture USB input", "max_input_channels": 2}
+            ),
+            rec=Mock(return_value=np.zeros((16000, 1), dtype=np.int16)),
+            wait=Mock(),
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            recorder, "_require_sounddevice", return_value=sd
+        ):
+            path = Path(tmp) / "sample.wav"
+            capture = recorder.record_wav(path, 1)
+            sd.query_devices.assert_called_once_with(7, "input")
+            self.assertEqual(sd.rec.call_args.kwargs["device"], 7)
+            self.assertEqual(capture["selected_device"], "7")
+            self.assertEqual(capture["name"], "Fixture USB input")
+            self.assertTrue(path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

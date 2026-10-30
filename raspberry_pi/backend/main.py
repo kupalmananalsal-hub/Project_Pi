@@ -66,6 +66,7 @@ from thermal_confidence import ThermalConfidenceScorer
 from keyword_dataset_common import (
     KEYWORDS as TRAINING_KEYWORDS,
     NEGATIVE_CLASSES,
+    KEYWORD_LANGUAGES as TRAINING_KEYWORD_LANG,
     METADATA_COLUMNS as TRAINING_METADATA_COLUMNS,
     METADATA_LOCK,
     append_metadata as append_training_metadata,
@@ -1132,6 +1133,8 @@ def validate_training_metadata(
         raise HTTPException(status_code=400, detail="Invalid training keyword/category")
     if example_kind == "positive" and language == "ceb":
         raise HTTPException(status_code=400, detail="Cebuano positive inventory requires competent-speaker review; collect unapproved phrases through the candidate recorder")
+    if example_kind == "positive" and language != "und" and language != TRAINING_KEYWORD_LANG[keyword]:
+        raise HTTPException(status_code=400, detail="Positive keyword language mismatch")
     if not SPEAKER_ID_PATTERN.fullmatch(speaker_id):
         raise HTTPException(status_code=400, detail="Invalid speaker_id")
     if age_group not in TRAINING_AGE_GROUPS:
@@ -1928,10 +1931,18 @@ async def upload_training_record(
     noise_condition: str = Form(...),
     example_kind: str = Form("positive"),
     language: str = Form("und"),
+    recording_device: str = Form("unknown"),
+    session_id: str = Form("unknown"),
 ):
     # Direct unit-test callers omit FastAPI Form defaults.
     example_kind = example_kind if isinstance(example_kind, str) else "positive"
     language = language if isinstance(language, str) else "und"
+    recording_device = recording_device if isinstance(recording_device, str) else "unknown"
+    session_id = session_id if isinstance(session_id, str) else "unknown"
+    if recording_device not in ("unknown", "mobile_microphone"):
+        raise HTTPException(status_code=400, detail="Upload capture device must be mobile_microphone or unknown")
+    if not SPEAKER_ID_PATTERN.fullmatch(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id")
     metadata = validate_training_metadata(
         keyword=keyword,
         speaker_id=speaker_id,
@@ -1976,6 +1987,10 @@ async def upload_training_record(
             "path": relative_path, "kind": example_kind, "label": keyword_slug,
             "language": language, "speaker_id": metadata["speaker_id"],
             "source_group": "recording-" + recording_id,
+            "session_id": session_id, "recording_device": recording_device,
+            "device_verification": "client_reported" if recording_device != "unknown" else "unknown",
+            "capture_origin": "mobile_upload" if recording_device == "mobile_microphone" else "unknown_upload",
+            "validation_state": "REVIEW_REQUIRED" if language == "und" else "PASS",
             "source": "real", "license": "local-consented-research-no-redistribution",
             "verification": "operator_verified_recording",
             "sha256": file_digest(final_path), "pcm_sha256": digest(pcm),
@@ -2103,14 +2118,6 @@ async def training_job_status(job_id: str):
 #  Training Pipeline Endpoints (Phase 2: validate, augment, export, train,
 #  deploy, evaluate, keywords)
 # ---------------------------------------------------------------------------
-
-TRAINING_KEYWORD_LANG = {
-    "help": "en", "help me": "en", "save me": "en", "please help": "en",
-    "emergency": "en", "rescue": "en", "over here": "en", "ouch": "en",
-    "tulong": "fil", "saklolo": "fil", "tulungan niyo ako": "fil",
-    "tulungan mo ako": "fil", "kailangan ko ng tulong": "fil",
-    "ang sakit": "fil", "aray": "fil", "sunog": "fil", "agai": "fil",
-}
 
 
 @app.get("/api/training/keywords")

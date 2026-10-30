@@ -13,6 +13,7 @@ import wave
 from pathlib import Path
 from keyword_dataset_common import (
     KEYWORDS,
+    KEYWORD_LANGUAGES,
     HARD_NEGATIVE_CLASSES,
     NEGATIVE_CLASSES,
     DEFAULT_DATASET_DIR,
@@ -228,6 +229,16 @@ def audit_records(root):
                 raise ValueError("metadata_label_mismatch")
             if p.get("language") not in ("en", "fil", "ceb", "und"):
                 raise ValueError("incorrect_language")
+            if p["kind"] == "positive" and p["language"] != KEYWORD_LANGUAGES.get(
+                p["label"].replace("_", " ")
+            ):
+                raise ValueError(
+                    "unknown_positive_language"
+                    if p["language"] == "und"
+                    else "positive_language_mismatch"
+                )
+            if p.get("validation_state") == "REVIEW_REQUIRED":
+                raise ValueError("unverified_recording_provenance")
             if p["kind"] == "positive" and p["language"] == "ceb":
                 raise ValueError("Cebuano_positive_inventory_not_approved")
             if p["label"] not in ("noise", "silence", "music"):

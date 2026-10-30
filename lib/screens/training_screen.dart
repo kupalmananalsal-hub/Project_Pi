@@ -17,7 +17,15 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
   ProviderSubscription<PiConnectionState>? _connectionSubscription;
   String? _selectedKeyword;
   String _exampleKind = 'positive';
-  String _language = 'en';
+  String _language = 'und';
+
+  void _selectPositive(TrainingKeyword keyword) {
+    _selectedKeyword = keyword.keyword;
+    _language = ['en', 'fil'].contains(keyword.language)
+        ? keyword.language
+        : 'und';
+  }
+
   static const _negativeLabels = [
     'hi',
     'hello',
@@ -68,7 +76,7 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
       if (_selectedKeyword == null &&
           next.keywords.isNotEmpty &&
           _exampleKind == 'positive') {
-        setState(() => _selectedKeyword = next.keywords.first.keyword);
+        setState(() => _selectPositive(next.keywords.first));
       }
     });
 
@@ -202,11 +210,18 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                               _selectedKeyword = value == 'negative'
                                   ? 'hello'
                                   : training.keywords.firstOrNull?.keyword;
+                              if (value == 'positive' &&
+                                  training.keywords.isNotEmpty) {
+                                _selectPositive(training.keywords.first);
+                              } else if (value == 'negative') {
+                                _language = 'en';
+                              }
                             });
                           },
                   ),
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
+                    key: ValueKey('language-$_exampleKind-$_language'),
                     initialValue: _language,
                     decoration: const InputDecoration(
                       labelText: 'Spoken language',
@@ -229,7 +244,8 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                     onChanged:
                         training.isRecording ||
                             training.isRecordingBusy ||
-                            training.isRecorded
+                            training.isRecorded ||
+                            _exampleKind == 'positive'
                         ? null
                         : (value) {
                             if (value != null) {
@@ -287,6 +303,13 @@ class _TrainingScreenState extends ConsumerState<TrainingScreen> {
                             if (v == _selectedKeyword) return;
                             setState(() {
                               _selectedKeyword = v;
+                              if (_exampleKind == 'positive' && v != null) {
+                                _selectPositive(
+                                  training.keywords.firstWhere(
+                                    (kw) => kw.keyword == v,
+                                  ),
+                                );
+                              }
                               if (v != null) {
                                 if (training.isRecorded) {
                                   ref

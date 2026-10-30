@@ -181,6 +181,27 @@ class TrainingApiTest(unittest.TestCase):
             finally:
                 self.cleanup(module, previous)
 
+    def test_positive_language_validation_and_mobile_provenance(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                values = dict(speaker_id="sp01", age_group="adult", gender="other", distance_m=1.0, noise_condition="quiet")
+                for keyword, language in [("tulong", "en"), ("saklolo", "en"), ("sunog", "en"), ("help", "fil")]:
+                    with self.subTest(keyword=keyword), self.assertRaises(module.HTTPException):
+                        asyncio.run(module.upload_training_record(file=FakeUploadFile("recording.wav", wav_bytes()), keyword=keyword, language=language, **values))
+                result = asyncio.run(module.upload_training_record(file=FakeUploadFile("recording.wav", wav_bytes()), keyword="tulong", language="fil", recording_device="mobile_microphone", session_id="mobile_session_01", **values))
+                from import_keyword_datasets import load_provenance
+                p = load_provenance(module.KEYWORD_DATASET_DIR, result["path"])
+                self.assertEqual(p["language"], "fil")
+                self.assertEqual(p["recording_device"], "mobile_microphone")
+                self.assertEqual(p["session_id"], "mobile_session_01")
+                result = asyncio.run(module.upload_training_record(file=FakeUploadFile("legacy.wav", wav_bytes()), keyword="help", **values))
+                p = load_provenance(module.KEYWORD_DATASET_DIR, result["path"])
+                self.assertEqual(p["language"], "und")
+                self.assertEqual(p["validation_state"], "REVIEW_REQUIRED")
+            finally:
+                self.cleanup(module, previous)
+
     def test_upload_training_record_rejects_invalid_keyword(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             module, previous = self.load_module(temp_dir)

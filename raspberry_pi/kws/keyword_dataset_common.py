@@ -35,6 +35,14 @@ KEYWORDS = [
     "agai",
 ]
 
+KEYWORD_LANGUAGES = {
+    "help": "en", "help me": "en", "save me": "en", "please help": "en",
+    "emergency": "en", "rescue": "en", "over here": "en", "ouch": "en",
+    "tulong": "fil", "saklolo": "fil", "tulungan niyo ako": "fil",
+    "tulungan mo ako": "fil", "kailangan ko ng tulong": "fil",
+    "ang sakit": "fil", "aray": "fil", "sunog": "fil", "agai": "fil",
+}
+
 HARD_NEGATIVE_CLASSES = ["hi", "hello", "kamusta", "helpful", "healthy", "helmet"]
 
 NEGATIVE_CLASSES = [
