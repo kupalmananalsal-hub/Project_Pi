@@ -48,7 +48,7 @@ class AlertPolicy:
     thermal_freshness_seconds: float = 1.25
     repeat_window_seconds: float = 10.0
     repeat_required_count: int = 2
-    repeat_escalates_to_critical: bool = True
+    repeat_escalates_to_critical: bool = False
     idempotency_ttl_seconds: float = 60.0
     idempotency_max_entries: int = 512
     policy_source: str = "safe_defaults"

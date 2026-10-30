@@ -641,6 +641,36 @@ class AlertDecisionEngineTest(unittest.TestCase):
 
         self.assertEqual(policy.policy_source, "safe_defaults")
         self.assertEqual(policy.policy_version, "phase1.3.notice_threshold")
+        self.assert_safe_fallback_decisions(policy)
+
+    def test_malformed_policy_disables_repeats_but_preserves_high_confidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "malformed.yaml"
+            path.write_text("policy_version test-policy\n", encoding="utf-8")
+            policy = AlertPolicy.load(path)
+
+        self.assertEqual(policy.policy_source, "safe_defaults")
+        self.assert_safe_fallback_decisions(policy)
+
+    def assert_safe_fallback_decisions(self, policy):
+        self.assertFalse(policy.repeat_escalates_to_critical)
+        for thermal in (None, self.negative_thermal()):
+            with self.subTest(thermal=thermal):
+                self.engine = AlertDecisionEngine(policy=policy, clock=self.clock)
+                for index in range(3):
+                    result = self.evaluate(
+                        0.75, thermal, source="snowboy",
+                        event_id=f"fallback-repeat-{index}",
+                    )
+                    self.assertEqual(result["decision_state"], "advisory")
+                    self.assertEqual(result["alert_level"], "visual_only")
+                    self.clock.advance(1.0)
+                self.assertEqual(result["decision_factors"]["repeat_count"], 3)
+                # A different phrase ensures this is confidence-driven, not a repeat.
+                high = self.evaluate(
+                    0.85, thermal, keyword="tulong", event_id="fallback-high",
+                )
+                self.assertEqual(high["decision_state"], "critical")
 
     def test_invalid_policy_files_fall_back_as_a_complete_unit(self):
         base = {
@@ -711,6 +741,7 @@ class AlertDecisionEngineTest(unittest.TestCase):
                     self.assertEqual(policy.policy_version, "phase1.3.notice_threshold")
                     self.assertEqual(policy.advisory_threshold, 0.30)
                     self.assertEqual(policy.critical_threshold, 0.85)
+                    self.assertFalse(policy.repeat_escalates_to_critical)
 
     @staticmethod
     def _policy_text(values, **overrides):

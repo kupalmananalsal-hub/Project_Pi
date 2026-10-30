@@ -667,7 +667,7 @@ class BackendAlertSmokeTest(unittest.TestCase):
             finally:
                 self.cleanup_backend(module, previous)
 
-    def test_two_unique_event_ids_can_trigger_repeat_escalation(self):
+    def test_two_unique_low_confidence_events_remain_advisory_by_default(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module, previous = load_backend_module(temp_dir)
             try:
@@ -707,8 +707,8 @@ class BackendAlertSmokeTest(unittest.TestCase):
                 )
 
                 self.assertEqual(first["event"]["decision_state"], "advisory")
-                self.assertEqual(second["event"]["decision_state"], "critical")
-                self.assertEqual(
+                self.assertEqual(second["event"]["decision_state"], "advisory")
+                self.assertNotEqual(
                     second["event"]["decision_reason"],
                     "repeated_distress_escalation",
                 )
