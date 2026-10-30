@@ -112,7 +112,7 @@ void main() {
     final container = await pumpApp(tester);
 
     expect(find.text('LISTENING'), findsOneWidget);
-    expect(find.text('KEYWORD SPOTTED!'), findsNothing);
+    expect(find.text('Keyword Spotted!'), findsNothing);
     expect(find.byKey(const ValueKey('voice-direction-arrow')), findsOneWidget);
     expect(find.byType(RadarCompass), findsOneWidget);
 
@@ -141,7 +141,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('LISTENING'), findsOneWidget);
-    expect(find.text('KEYWORD SPOTTED!'), findsNothing);
+    expect(find.text('Keyword Spotted!'), findsNothing);
     final rotation = tester.widget<AnimatedRotation>(
       find.byType(AnimatedRotation),
     );
@@ -158,15 +158,37 @@ void main() {
     container.read(alertsProvider.notifier).handleAlertForTest(keywordEvent());
     await tester.pump();
 
-    expect(find.text('KEYWORD SPOTTED!'), findsOneWidget);
+    expect(find.text('Keyword Spotted!'), findsOneWidget);
     expect(find.text('LISTENING'), findsNothing);
+    expect(find.text('Voice Detected'), findsNothing);
+    expect(find.text('HELP'), findsNothing);
+    expect(find.textContaining('90%'), findsNothing);
 
     await tester.pump(const Duration(seconds: 3));
     await tester.pump();
 
     expect(find.text('LISTENING'), findsOneWidget);
-    expect(find.text('KEYWORD SPOTTED!'), findsNothing);
+    expect(find.text('Keyword Spotted!'), findsNothing);
 
+    container.dispose();
+  });
+
+  testWidgets('notice hides raw keyword names from the active screen', (
+    tester,
+  ) async {
+    final container = await pumpApp(tester);
+    for (final keyword in ['help', 'tulong', 'saklolo', 'sunog', 'agai']) {
+      container
+          .read(alertsProvider.notifier)
+          .handleAlertForTest(
+            keywordEvent(id: 'hidden-$keyword', keyword: keyword),
+          );
+      await tester.pump();
+      expect(find.text('Keyword Spotted!'), findsOneWidget);
+      expect(find.text(keyword.toUpperCase()), findsNothing);
+      expect(find.textContaining(keyword.toUpperCase()), findsNothing);
+      expect(find.text('Voice Detected'), findsNothing);
+    }
     container.dispose();
   });
 
@@ -175,13 +197,19 @@ void main() {
   ) async {
     final container = await pumpApp(tester);
 
-    container.read(alertsProvider.notifier).handleAlertForTest(
-      keywordEvent(id: 'thermal-1', keyword: 'thermal', modality: 'thermal_only'),
-    );
+    container
+        .read(alertsProvider.notifier)
+        .handleAlertForTest(
+          keywordEvent(
+            id: 'thermal-1',
+            keyword: 'thermal',
+            modality: 'thermal_only',
+          ),
+        );
     await tester.pump();
 
     expect(find.text('LISTENING'), findsOneWidget);
-    expect(find.text('KEYWORD SPOTTED!'), findsNothing);
+    expect(find.text('Keyword Spotted!'), findsNothing);
 
     container.dispose();
   });
@@ -203,7 +231,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(seconds: 1));
 
-    expect(find.text('KEYWORD SPOTTED!'), findsOneWidget);
+    expect(find.text('Keyword Spotted!'), findsOneWidget);
 
     await tester.pump(const Duration(seconds: 2));
     await tester.pump();
@@ -244,9 +272,12 @@ void main() {
     expect(find.byKey(const ValueKey('pi-host-field')), findsOneWidget);
     expect(find.byKey(const ValueKey('pi-connect-button')), findsOneWidget);
 
-    final hostY = tester.getCenter(find.byKey(const ValueKey('pi-host-field'))).dy;
-    final connectY =
-        tester.getCenter(find.byKey(const ValueKey('pi-connect-button'))).dy;
+    final hostY = tester
+        .getCenter(find.byKey(const ValueKey('pi-host-field')))
+        .dy;
+    final connectY = tester
+        .getCenter(find.byKey(const ValueKey('pi-connect-button')))
+        .dy;
     expect(connectY, greaterThan(hostY));
 
     await tester.enterText(

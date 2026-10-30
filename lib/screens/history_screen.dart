@@ -49,7 +49,7 @@ class HistoryScreen extends ConsumerWidget {
                 if (alerts.history.isEmpty)
                   const StatusCard(
                     title: 'No alerts yet',
-                    value: 'Listening for tulong, help, and wake words',
+                    value: 'Listening for distress keywords',
                     icon: Icons.hearing_rounded,
                   )
                 else
@@ -70,7 +70,9 @@ class HistoryScreen extends ConsumerWidget {
                         ),
                       ),
                       title: Text(
-                        '${event.displayKeyword} - ${event.directionLabel}',
+                        event.isKeywordDetection
+                            ? 'Keyword Spotted!'
+                            : 'Alert recorded',
                       ),
                       subtitle: Text(
                         '${_formatTimestamp(event.timestamp)} - '

@@ -1,0 +1,26 @@
+name: Phase 4 Flutter display validation
+on:
+  push:
+    branches: [phase4/keyword-spotted-display]
+permissions:
+  contents: read
+jobs:
+  widget:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Resolve Flutter dependencies
+        run: flutter pub get
+      - name: Analyze affected Dart source and tests
+        run: dart analyze lib/screens/monitor_screen.dart lib/screens/history_screen.dart lib/screens/audio_alerts_screen.dart test/monitor_voice_keyword_test.dart
+      - name: Check Dart formatting
+        run: dart format --output=none --set-exit-if-changed lib/screens/monitor_screen.dart lib/screens/history_screen.dart lib/screens/audio_alerts_screen.dart test/monitor_voice_keyword_test.dart
+      - name: Run Monitor display widget tests
+        run: flutter test test/monitor_voice_keyword_test.dart --concurrency=1
+      - name: Run all Flutter tests
+        run: flutter test --concurrency=1

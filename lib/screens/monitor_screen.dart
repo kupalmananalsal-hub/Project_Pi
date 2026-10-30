@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../models/alert_event.dart';
 import '../models/audio_frame.dart';
 import '../models/thermal_frame.dart';
 import '../models/voice_direction.dart';
@@ -29,14 +28,6 @@ class MonitorScreen extends ConsumerStatefulWidget {
 }
 
 class _MonitorScreenState extends ConsumerState<MonitorScreen> {
-  final _scrollController = ScrollController();
-
-  @override
-  void dispose() {
-    _scrollController.dispose();
-    super.dispose();
-  }
-
   @override
   Widget build(BuildContext context) {
     final monitor = ref.watch(monitorProvider);
@@ -44,20 +35,13 @@ class _MonitorScreenState extends ConsumerState<MonitorScreen> {
     final alerts = ref.watch(alertsProvider);
     final keywordSpotted = alerts.keywordNotice != null;
     final direction = monitor.direction;
-    final voiceNotice = alerts.keywordNotice;
 
     return ColoredBox(
       color: _pageBackground,
       child: Stack(
         children: [
           ListView(
-            controller: _scrollController,
-            padding: EdgeInsets.fromLTRB(
-              18,
-              18,
-              18,
-              voiceNotice == null ? 28 : 118,
-            ),
+            padding: const EdgeInsets.fromLTRB(18, 18, 18, 28),
             children: [
               Center(
                 child: ConstrainedBox(
@@ -71,9 +55,7 @@ class _MonitorScreenState extends ConsumerState<MonitorScreen> {
                         thermalSoftAlert: alerts.thermalSoftAlert,
                       ),
                       const SizedBox(height: 18),
-                      _ThermalPanel(
-                        thermal: thermal,
-                      ),
+                      _ThermalPanel(thermal: thermal),
                       const SizedBox(height: 18),
                       _MicrophonePanel(audio: monitor.audioFrame),
                       const SizedBox(height: 26),
@@ -84,34 +66,8 @@ class _MonitorScreenState extends ConsumerState<MonitorScreen> {
               ),
             ],
           ),
-          if (voiceNotice != null)
-            Positioned(
-              left: 18,
-              right: 18,
-              bottom: 18,
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 620),
-                  child: _VoiceDetectedBanner(
-                    event: voiceNotice,
-                    onTap: _scrollToRadar,
-                  ),
-                ),
-              ),
-            ),
         ],
       ),
-    );
-  }
-
-  void _scrollToRadar() {
-    if (!_scrollController.hasClients) {
-      return;
-    }
-    _scrollController.animateTo(
-      0,
-      duration: const Duration(milliseconds: 320),
-      curve: Curves.easeOutCubic,
     );
   }
 }
@@ -141,7 +97,7 @@ class _DirectionPanel extends StatelessWidget {
               const SizedBox(height: 20),
               Center(
                 child: _StatusPill(
-                  label: keywordSpotted ? 'KEYWORD SPOTTED!' : 'LISTENING',
+                  label: keywordSpotted ? 'Keyword Spotted!' : 'LISTENING',
                   active: keywordSpotted,
                 ),
               ),
@@ -162,9 +118,7 @@ class _DirectionPanel extends StatelessWidget {
 }
 
 class _ThermalPanel extends ConsumerWidget {
-  const _ThermalPanel({
-    required this.thermal,
-  });
+  const _ThermalPanel({required this.thermal});
 
   final ThermalState thermal;
 
@@ -248,7 +202,6 @@ class _MicrophonePanel extends StatelessWidget {
     );
   }
 }
-
 
 class _DistressButton extends ConsumerWidget {
   @override
@@ -364,84 +317,6 @@ class _StatusPill extends StatelessWidget {
           style: Theme.of(context).textTheme.titleLarge?.copyWith(
             color: active ? _alertRed : _mutedText,
             fontWeight: FontWeight.w800,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _VoiceDetectedBanner extends StatelessWidget {
-  const _VoiceDetectedBanner({required this.event, required this.onTap});
-
-  final AlertEvent event;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final confidence = (event.displayedConfidence.clamp(0.0, 1.0) * 100)
-        .round();
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(22),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: const Color(0xFF201923),
-            borderRadius: BorderRadius.circular(22),
-            border: Border.all(color: _alertRed.withValues(alpha: 0.46)),
-            boxShadow: [
-              BoxShadow(
-                color: _alertRed.withValues(alpha: 0.18),
-                blurRadius: 24,
-                offset: const Offset(0, 10),
-              ),
-            ],
-          ),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(18, 15, 18, 15),
-            child: Row(
-              children: [
-                Container(
-                  width: 42,
-                  height: 42,
-                  decoration: BoxDecoration(
-                    color: _alertRed.withValues(alpha: 0.18),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(Icons.graphic_eq_rounded, color: _alertRed),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'Voice Detected',
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w900,
-                            ),
-                      ),
-                      const SizedBox(height: 3),
-                      Text(
-                        '${event.displayKeyword} - $confidence% - ${event.directionLabel}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(
-                          context,
-                        ).textTheme.bodyMedium?.copyWith(color: _mutedText),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 12),
-                const Icon(Icons.keyboard_arrow_up_rounded, color: _mutedText),
-              ],
-            ),
           ),
         ),
       ),
@@ -933,5 +808,3 @@ class _MicLevelRow extends StatelessWidget {
     );
   }
 }
-
-
