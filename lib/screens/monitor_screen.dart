@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../models/alert_event.dart';
 import '../models/audio_frame.dart';
 import '../models/thermal_frame.dart';
 import '../models/voice_direction.dart';
@@ -73,7 +72,6 @@ class _MonitorScreenState extends ConsumerState<MonitorScreen> {
       ),
     );
   }
-
 }
 
 class _DirectionPanel extends StatelessWidget {
