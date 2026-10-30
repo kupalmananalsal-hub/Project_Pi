@@ -7,10 +7,7 @@ import '../services/resident_alert_service.dart';
 import 'resident_settings_screen.dart';
 
 class ResidentModeScreen extends StatefulWidget {
-  const ResidentModeScreen({
-    super.key,
-    this.alertService,
-  });
+  const ResidentModeScreen({super.key, this.alertService});
 
   final ResidentAlertService? alertService;
 
@@ -22,6 +19,7 @@ class _ResidentModeScreenState extends State<ResidentModeScreen> {
   late final ResidentAlertService _alertService;
   bool _isPressed = false;
   bool _isSending = false;
+  bool _lastSendFailed = false;
   DateTime? _lastTapTime;
   Timer? _tapTimer;
 
@@ -41,11 +39,9 @@ class _ResidentModeScreenState extends State<ResidentModeScreen> {
   }
 
   void _openSettings() {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => const ResidentSettingsScreen(),
-      ),
-    );
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => const ResidentSettingsScreen()));
   }
 
   void _handleHelpTap() {
@@ -92,17 +88,16 @@ class _ResidentModeScreenState extends State<ResidentModeScreen> {
     if (mounted) {
       setState(() {
         _isSending = false;
+        _lastSendFailed = !success;
       });
 
       ScaffoldMessenger.of(context).clearSnackBars();
+      // A failure stays on screen (banner below) instead of a 2 s toast.
+      if (!success) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            success
-                ? (isDoubleTap
-                    ? 'EMERGENCY ALERT SENT'
-                    : 'Notice sent')
-                : 'Failed to send alert',
+            isDoubleTap ? 'EMERGENCY ALERT SENT' : 'Notice sent',
             textAlign: TextAlign.center,
             style: const TextStyle(
               color: Colors.white,
@@ -110,9 +105,9 @@ class _ResidentModeScreenState extends State<ResidentModeScreen> {
               fontSize: 16,
             ),
           ),
-          backgroundColor: success
-              ? (isDoubleTap ? Colors.red.shade900 : Colors.orange.shade800)
-              : Colors.grey.shade900,
+          backgroundColor: isDoubleTap
+              ? Colors.red.shade900
+              : Colors.orange.shade800,
           duration: const Duration(seconds: 2),
           behavior: SnackBarBehavior.floating,
           margin: const EdgeInsets.symmetric(horizontal: 40, vertical: 24),
@@ -128,7 +123,10 @@ class _ResidentModeScreenState extends State<ResidentModeScreen> {
   Widget build(BuildContext context) {
     final screenSize = MediaQuery.of(context).size;
     // Expanded button size for ease of accessibility
-    final buttonSize = math.min(screenSize.width * 0.85, screenSize.height * 0.72);
+    final buttonSize = math.min(
+      screenSize.width * 0.85,
+      screenSize.height * 0.72,
+    );
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -148,7 +146,9 @@ class _ResidentModeScreenState extends State<ResidentModeScreen> {
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
-                        color: (_isPressed ? _darkerRed : _idleRed).withValues(alpha: 0.55),
+                        color: (_isPressed ? _darkerRed : _idleRed).withValues(
+                          alpha: 0.55,
+                        ),
                         blurRadius: _isPressed ? 16 : 36,
                         spreadRadius: _isPressed ? 4 : 10,
                       ),
@@ -183,6 +183,47 @@ class _ResidentModeScreenState extends State<ResidentModeScreen> {
               ),
             ),
           ),
+
+          if (_isSending || _lastSendFailed)
+            SafeArea(
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                child: Container(
+                  key: const ValueKey('resident-send-status'),
+                  width: double.infinity,
+                  margin: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: _isSending
+                        ? Colors.grey.shade900
+                        : Colors.amber.shade900,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        _isSending
+                            ? 'Sending alert...'
+                            : 'Failed to send alert',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 18,
+                        ),
+                      ),
+                      if (!_isSending)
+                        const Text(
+                          'Tap HELP again, or call your caregiver.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white, fontSize: 15),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
 
           // Small unobtrusive gear icon in top-right corner
           SafeArea(

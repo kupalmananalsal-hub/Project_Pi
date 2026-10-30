@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Runs once per boot via project-pi-boot.service (root).
+# Runs once per boot via project-pi-boot.service (root), from the root-owned copy
+# /usr/local/sbin/project-pi-boot. It must not execute or install anything from the
+# thesis-writable repo; unit files are installed only by install_headless.sh.
 set -euo pipefail
 
-REPO="${PROJECT_PI_REPO:-/home/thesis/Project_Pi}"
-SYSTEMD_SRC="${REPO}/raspberry_pi/systemd"
 STATE_DIR="/var/lib/project-pi"
 LOG_TAG="project-pi-boot"
 APT_STAMP="${STATE_DIR}/last-apt-update"
@@ -132,28 +132,6 @@ connect_hotspot() {
     connection.autoconnect yes connection.autoconnect-priority 10 || true
 }
 
-sync_systemd_units() {
-  local units=(
-    project-pi-boot.service
-    project-pi-apt-update.service
-    project-pi-apt-update.timer
-    project-pi-log-cleanup.service
-    project-pi-log-cleanup.timer
-    project-pi.target
-    thermal-backend.service
-    kws-alert.service
-    apk-server.service
-  )
-  for unit in "${units[@]}"; do
-    install -m 0644 "${SYSTEMD_SRC}/${unit}" "/etc/systemd/system/${unit}"
-  done
-  systemctl daemon-reload
-  systemctl enable project-pi-boot.service project-pi.target
-  systemctl enable thermal-backend.service kws-alert.service apk-server.service
-  systemctl enable project-pi-apt-update.timer project-pi-log-cleanup.timer
-  systemctl disable kws-alert-vosk.service 2>/dev/null || true
-}
-
 maybe_apt_update() {
   local now last=0
   now="$(date +%s)"
@@ -177,9 +155,8 @@ main() {
   log "Headless boot script started"
   wait_for_network || true
   connect_hotspot || log "Hotspot connect did not succeed; services will still start"
-  sync_systemd_units
   maybe_apt_update
-  bash "${REPO}/raspberry_pi/scripts/log_cleanup.sh" || log "Log cleanup failed (continuing)"
+  /usr/local/sbin/project-pi-log-cleanup || log "Log cleanup failed (continuing)"
   log "Headless boot script finished (systemd will start enabled app units)"
 }
 

@@ -153,7 +153,7 @@ void main() {
   );
 
   test(
-    'large inbox survives reload and storage exhaustion without losing prior rows',
+    'inbox stays bounded and storage exhaustion still sounds the alarm once',
     () async {
       for (var i = 0; i < 10000; i++) {
         inbox.events['history-$i'] = {
@@ -168,17 +168,21 @@ void main() {
       await inbox.save();
       final restored = AlertInbox(directory);
       await restored.load();
-      expect(restored.events.length, 10000);
+      expect(restored.events.length, AlertInbox.maxEvents);
+      expect(restored.events.containsKey('history-9999'), isTrue);
+      expect(restored.events.containsKey('history-0'), isFalse);
       failWrite = true;
+      sent.clear();
       await expectLater(
         client.handleMessageForTest(alert()),
         throwsA(isA<FileSystemException>()),
       );
-      expect(inbox.events.length, 10000);
-      expect(outputs, 0);
+      expect(outputs, 1);
+      expect(sent, isEmpty);
       failWrite = false;
       await client.handleMessageForTest(alert());
       expect(outputs, 1);
+      expect(sent.any((m) => m['type'] == 'ack_received'), isTrue);
     },
   );
 
@@ -210,7 +214,7 @@ void main() {
   );
 
   test(
-    'full storage sends no receipt and recovers after writes resume',
+    'full storage still alarms but sends no receipt, then recovers',
     () async {
       failWrite = true;
       sent.clear();
@@ -219,11 +223,12 @@ void main() {
         throwsA(isA<FileSystemException>()),
       );
       expect(sent, isEmpty);
-      expect(outputs, 0);
+      expect(outputs, 1);
       expect(inbox.events, isEmpty);
       failWrite = false;
       await client.handleMessageForTest(alert());
       expect(outputs, 1);
+      expect(sent.any((m) => m['type'] == 'ack_received'), isTrue);
     },
   );
 

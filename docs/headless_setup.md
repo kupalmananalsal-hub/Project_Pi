@@ -6,7 +6,7 @@ Power-on only operation: the Pi joins hotspot **Teddy**, updates packages, start
 
 | Component | Purpose |
 |:---|:---|
-| `project-pi-boot.service` | Hotspot connect, sync systemd units from repo, apt update (≤1×/24h), log cleanup, start stack |
+| `project-pi-boot.service` | Hotspot connect, apt update (≤1×/24h), log cleanup (runs the root-owned `/usr/local/sbin/project-pi-boot`; unit files are only installed by `install_headless.sh`) |
 | `thermal-backend.service` | FastAPI on port **8765** (`~/thermal-env-sys`) |
 | `kws-alert.service` | Triple-engine KWS (`~/kws-env`) |
 | `apk-server.service` | APK HTTP server on port **8080** |
@@ -22,23 +22,29 @@ cd ~/Project_Pi
 git pull
 chmod +x raspberry_pi/scripts/*.sh
 sudo PROJECT_PI_HOTSPOT_SSID=Teddy \
-     PROJECT_PI_HOTSPOT_PASSWORD=bayadkamuna \
+     PROJECT_PI_HOTSPOT_PASSWORD='<hotspot password>' \
      bash raspberry_pi/scripts/install_headless.sh
 ```
 
-Custom hotspot credentials:
+No password is shipped: the first install needs `PROJECT_PI_HOTSPOT_PASSWORD`;
+later runs without it keep the existing `/etc/project-pi/hotspot.env` (mode `600`,
+not in git).
 
-```bash
-sudo PROJECT_PI_HOTSPOT_SSID=Teddy \
-     PROJECT_PI_HOTSPOT_PASSWORD='your-password' \
-     bash raspberry_pi/scripts/install_headless.sh
-```
+The installer also:
 
-Credentials are stored in `/etc/project-pi/hotspot.env` (mode `600`, not in git).
+- creates `/etc/project-pi/backend.env` (root, mode `600`) once, with API
+  authentication **off** (no-token mode): the app needs no token, and every
+  `/api`/`/ws` route, including reboot, shutdown, refresh and model deploy, is open
+  to anyone on the network. Use this only on an isolated, trusted hotspot. To turn
+  authentication on, follow the comments in that file (or "Enabling authentication
+  later" in [m1_m2_upgrade_and_rollback.md](m1_m2_upgrade_and_rollback.md)) and
+  enter the token in each app under **Settings → Pi API token (optional)**.
+- copies the root-run scripts to `/usr/local/sbin/project-pi-{refresh,boot,log-cleanup}`
+  and installs `/etc/sudoers.d/project-pi-thesis`, which allows only those exact
+  commands, three `systemctl restart`s and the power commands.
 
-### Optional: passwordless sudo for shutdown/reboot (if not already set)
-
-`install_headless.sh` installs `/etc/sudoers.d/project-pi-thesis` for refresh and power actions.
+Upgrading an existing Pi from before this change: follow
+[m1_m2_upgrade_and_rollback.md](m1_m2_upgrade_and_rollback.md) (phones first).
 
 ## After Install — Normal Use
 
@@ -74,16 +80,17 @@ nmcli con show --active
 iwgetid -r
 hostname -I
 
-# Backend health
-curl -s http://127.0.0.1:8765/api/status | python3 -m json.tool
+# Backend health (the header is ignored in no-token mode and required when auth is on;
+# never paste a token into a URL)
+sudo bash -c 'source /etc/project-pi/backend.env; curl -s -H "Authorization: Bearer $PROJECT_PI_API_TOKEN" http://127.0.0.1:8765/api/status' | python3 -m json.tool
 
 # Refresh API (same as mobile app)
-curl -s -X POST http://127.0.0.1:8765/api/refresh \
-  -H 'Content-Type: application/json' \
-  -d '{"git_pull": false, "restart_backend": false}'
+sudo bash -c 'source /etc/project-pi/backend.env; curl -s -X POST http://127.0.0.1:8765/api/refresh \
+  -H "Authorization: Bearer $PROJECT_PI_API_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"git_pull\": false, \"restart_backend\": false}"'
 
-# Re-run full boot script
-sudo /home/thesis/Project_Pi/raspberry_pi/scripts/headless_boot.sh
+# Re-run full boot script (root-owned copy)
+sudo /usr/local/sbin/project-pi-boot
 ```
 
 ## Mobile App Refresh Endpoint
@@ -110,7 +117,10 @@ Response:
 }
 ```
 
-Runs `raspberry_pi/scripts/pi_refresh.sh` via passwordless sudo.
+With `git_pull`, the backend runs `git pull --ff-only` as `thesis`. It then runs the
+root-owned `/usr/local/sbin/project-pi-refresh` via passwordless sudo, which only
+restarts `kws-alert` (and `thermal-backend` with `restart_backend`). Pulled changes to
+unit files, sudoers or root scripts take effect only after `install_headless.sh` is re-run.
 
 ## APK Over-the-Air
 
@@ -134,7 +144,8 @@ cd ~/Project_Pi && git pull
 sudo bash raspberry_pi/scripts/install_headless.sh
 ```
 
-Or from the app: **Refresh KWS Service**.
+The app's **Refresh KWS Service** can pull and restart, but it never reinstalls
+units, sudoers or root scripts; re-run the installer when those change.
 
 ## Troubleshooting
 
@@ -144,9 +155,11 @@ Or from the app: **Refresh KWS Service**.
 | `systemctl start` hangs | `sudo systemctl stop project-pi-boot; sudo systemctl cancel` |
 | No Wi-Fi | `cat /etc/project-pi/hotspot.env`, `nmcli dev wifi list`, `journalctl -u project-pi-boot` |
 | KWS not running | `systemctl status kws-alert`, `journalctl -u kws-alert -n 80` |
-| Refresh fails | `sudo visudo -cf /etc/sudoers.d/project-pi-thesis`, script executable |
+| Refresh fails | `ls -l /usr/local/sbin/project-pi-refresh` (re-run installer if missing), `sudo visudo -cf /etc/sudoers.d/project-pi-thesis` |
+| App shows "The Pi requires an API token" | Auth is on: enter the token from `/etc/project-pi/backend.env` in Settings, or turn auth off in that file |
+| `thermal-backend` exits at start: `API authentication is enabled but PROJECT_PI_API_TOKEN is missing…` | Set a token of 16+ random characters in `/etc/project-pi/backend.env`, or comment out `PROJECT_PI_API_AUTH=required` |
 | Disk full | `df -h /`, `systemctl start project-pi-log-cleanup.service` |
-| Old `kws-alert-vosk.service` | Deprecated; use `kws-alert.service` (boot script installs it every boot) |
+| Old `kws-alert-vosk.service` | Deprecated; use `kws-alert.service` (installed by `install_headless.sh`) |
 
 ### Raspberry Pi 5 GPIO / Blinka Diagnostics
 
@@ -189,10 +202,13 @@ GPIO chip number.
 ## File Locations
 
 ```text
-~/Project_Pi/raspberry_pi/scripts/headless_boot.sh   # boot orchestration
-~/Project_Pi/raspberry_pi/scripts/pi_refresh.sh      # mobile refresh
-~/Project_Pi/raspberry_pi/scripts/log_cleanup.sh     # journal vacuum
-~/Project_Pi/raspberry_pi/systemd/kws-alert.service  # canonical KWS unit
-/etc/project-pi/hotspot.env                          # SSID/password
+/usr/local/sbin/project-pi-boot                      # boot orchestration (root-owned copy of headless_boot.sh)
+/usr/local/sbin/project-pi-refresh                   # mobile refresh (root-owned copy of pi_refresh.sh)
+/usr/local/sbin/project-pi-log-cleanup               # journal vacuum (root-owned copy of log_cleanup.sh)
+~/Project_Pi/raspberry_pi/systemd/kws-alert.service  # canonical KWS unit (installed by install_headless.sh)
+/etc/project-pi/hotspot.env                          # SSID/password (root, 600)
+/etc/project-pi/backend.env                          # API auth mode/token (off by default), caregiver credentials path (root, 600)
+/var/lib/project-pi/backend/alerts.jsonl             # KWS outbox of undelivered alerts (thesis, 700 dir)
+/var/lib/project-pi/backend/caregivers.json          # caregiver phone verifiers
 /var/lib/project-pi/last-apt-update                  # apt throttle stamp
 ```

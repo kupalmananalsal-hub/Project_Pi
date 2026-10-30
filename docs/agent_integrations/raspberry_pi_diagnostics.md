@@ -15,6 +15,15 @@ state, ALSA enumeration, device-node names, declared boot overlays, expected mod
 filenames, and a loopback backend status request. It does not open a microphone,
 read I2C pixels, modify GPIO, restart a service, install a driver, or upload logs.
 
+API authentication is optional and off by default (no-token mode). The probe
+neither reads nor sends a token: it records only the HTTP status code of
+`/api/status`. `401` is classified as `BACKEND_REACHABLE_AUTH_REQUIRED`
+(listening, auth enforced; application health still unverified), `200` as
+`BACKEND_REACHABLE_AUTH_NOT_ENFORCED` (no-token mode, or a pre-Milestone-1
+backend), and no response as `BACKEND_UNREACHABLE`. With auth enabled,
+authenticated health checks need the root-only token and are a separate,
+authorized step.
+
 Raspberry Pi 5 GPIO is behind RP1, so any GPIO library/driver choice must be
 validated on the deployed OS and hardware rather than inferred from older Pi
 guides. Project_Pi already uses `gpiozero`/`lgpio` in the backend and systemd

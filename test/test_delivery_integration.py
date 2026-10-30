@@ -27,7 +27,8 @@ class DeliveryIntegrationTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.module, previous = load_backend_module(self.temp.name, real_http=True)
         self.addCleanup(restore_modules, previous)
-        self.client = TestClient(self.module.app)
+        self.module.API_TOKEN = "integration-api-token"
+        self.client = TestClient(self.module.app, headers={"Authorization": "Bearer integration-api-token"})
         self.addCleanup(self.client.close)
         self.secret = "integration-only-secret-" * 3
         path = Path(self.temp.name) / "credentials.json"
@@ -46,6 +47,55 @@ class DeliveryIntegrationTest(unittest.TestCase):
         connected = ws.receive_json()
         self.assertEqual(connected["type"], "connected")
         ws.send_json(dict(protocol_version=2, type="replay_request", cursor=0, instance=connected["instance"]))
+
+    def test_unauthenticated_clients_are_rejected_over_real_http(self):
+        anonymous = TestClient(self.module.app)
+        self.addCleanup(anonymous.close)
+        for method, path in (("post", "/api/alerts"), ("delete", "/api/alerts"), ("get", "/api/status")):
+            response = getattr(anonymous, method)(path, **({"json": {"keyword": "help"}} if method == "post" else {}))
+            self.assertEqual(response.status_code, 401, path)
+        with self.assertRaises(WebSocketDisconnect):
+            with anonymous.websocket_connect("/ws/thermal") as ws:
+                ws.receive_json()
+        self.assertEqual(len(self.module.alert_store.list_recent()), 0)
+
+    def test_wrong_token_is_rejected_and_correct_token_accepted(self):
+        wrong = TestClient(self.module.app, headers={"Authorization": "Bearer not-the-token-0123456789"})
+        self.addCleanup(wrong.close)
+        self.assertEqual(wrong.post("/api/alerts", json={"keyword": "help"}).status_code, 401)
+        self.assertEqual(wrong.get("/api/alerts").status_code, 401)
+        with self.assertRaises(WebSocketDisconnect):
+            with wrong.websocket_connect("/ws/alerts") as ws:
+                ws.receive_json()
+        self.assertEqual(self.client.get("/api/alerts").status_code, 200)
+        with self.client.websocket_connect("/ws/thermal") as ws:
+            self.assertIn("timestamp", ws.receive_json())
+
+    def test_no_token_mode_serves_rest_and_websockets_without_credentials(self):
+        self.module.API_TOKEN = ""
+        self.module.API_AUTH_REQUIRED = False
+        anonymous = TestClient(self.module.app)
+        self.addCleanup(anonymous.close)
+        # Request shapes the current app sends with an empty token field.
+        response = anonymous.post("/api/alerts", json={"event_id": "no-token", "keyword": "help", "confidence": .99, "source": "manual_button"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(anonymous.get("/api/alerts").status_code, 200)
+        with anonymous.websocket_connect("/ws/thermal") as ws:
+            self.assertIn("timestamp", ws.receive_json())
+        with anonymous.websocket_connect("/ws/alerts") as ws:
+            self.assertEqual(ws.receive_json()["type"], "historical")
+        # Request shape of the old APK on control routes: the former public token.
+        old_apk = TestClient(self.module.app, headers={"Authorization": "Bearer project-pi-local-token"})
+        self.addCleanup(old_apk.close)
+        self.assertEqual(old_apk.post("/api/leds", json={"led": 0, "r": 0, "g": 0, "b": 0}).status_code, 200)
+        # Caregiver protocol v2 keeps its own per-phone authentication in no-token mode.
+        with anonymous.websocket_connect("/ws/alerts?protocol=2") as ws:
+            self.hello(ws, "phone-a")
+            self.assertEqual(ws.receive_json()["event_id"], "no-token")
+        with anonymous.websocket_connect("/ws/alerts?protocol=2") as ws:
+            ws.send_json(dict(protocol_version=2, type="authenticate", installation_id="phone-a", token="wrong"))
+            with self.assertRaises(WebSocketDisconnect):
+                ws.receive_json()
 
     def test_post_persist_ack_restart_and_two_phone_replay(self):
         first = self.post("integration-critical")["event"]
@@ -162,15 +212,19 @@ class DeliveryIntegrationTest(unittest.TestCase):
             self.assertFalse(ws.receive_json()['present'])
             ws.receive_json()
 
-    def test_malformed_ack_and_duplicate_session_do_not_mutate_delivery(self):
+    def test_reconnecting_phone_supersedes_stale_session(self):
         event = self.post('bad-ack')['event']
-        with self.client.websocket_connect('/ws/alerts?protocol=2') as active:
-            self.hello(active, 'phone-a'); active.receive_json(); active.receive_json()
-            with self.client.websocket_connect('/ws/alerts?protocol=2') as duplicate:
-                duplicate.send_json(dict(protocol_version=2, type='authenticate', installation_id='phone-a', token=self.secret))
-                with self.assertRaises(WebSocketDisconnect): duplicate.receive_json()
-            active.send_json(dict(protocol_version=2, type='ack_received', event_id=event['event_id'], sequence=True))
-            with self.assertRaises(WebSocketDisconnect): active.receive_json()
+        with self.client.websocket_connect('/ws/alerts?protocol=2') as stale:
+            self.hello(stale, 'phone-a'); stale.receive_json(); stale.receive_json()
+            with self.client.websocket_connect('/ws/alerts?protocol=2') as fresh:
+                self.hello(fresh, 'phone-a')
+                self.assertEqual(fresh.receive_json()['event_id'], 'bad-ack')
+                fresh.receive_json()
+                with self.assertRaises(WebSocketDisconnect) as closed:
+                    stale.receive_json()
+                self.assertEqual(closed.exception.code, 4000)
+                fresh.send_json(dict(protocol_version=2, type='ack_received', event_id=event['event_id'], sequence=True))
+                with self.assertRaises(WebSocketDisconnect): fresh.receive_json()
         self.assertIsNone(self.module.alert_store.offer('phone-a', event['event_id'])['received_at'])
 
     def test_interrupted_server_ack_commit_recovers_on_retry(self):

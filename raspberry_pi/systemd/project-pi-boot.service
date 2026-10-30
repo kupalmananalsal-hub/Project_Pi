@@ -8,7 +8,8 @@ Wants=network-online.target
 Type=oneshot
 User=root
 RemainAfterExit=yes
-ExecStart=/home/thesis/Project_Pi/raspberry_pi/scripts/headless_boot.sh
+# Root-owned copy installed by install_headless.sh; never run the thesis-writable repo copy as root.
+ExecStart=/usr/local/sbin/project-pi-boot
 TimeoutStartSec=600
 
 [Install]

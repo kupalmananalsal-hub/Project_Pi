@@ -39,6 +39,9 @@ RUNNING = True
 SAMPLE_RATE = 16000
 CHUNK_FRAMES = 1024
 ALERT_FLUSH_INTERVAL_SECONDS = 2.0
+MAX_PENDING_ALERTS = 500
+# 50 openWakeWord frames of 80 ms: a broken model exits instead of silently never detecting.
+OPENWAKEWORD_MAX_CONSECUTIVE_FAILURES = 50
 DEFAULT_AUDIO_STATUS_PATH = Path("/tmp/project_pi_audio_status.json")
 TAGALOG_KEYWORD_ALIASES: dict[str, set[str]] = {
     "tulong": {
@@ -127,6 +130,9 @@ class AlertPoster:
         self.backend_url = backend_url
         self.queue_path = queue_path
         self.session = requests.Session()
+        token = os.getenv("PROJECT_PI_API_TOKEN", "").strip()
+        if token:
+            self.session.headers["Authorization"] = f"Bearer {token}"
         self.lock = threading.Lock()
         self._flush_queue: queue.Queue[object] = queue.Queue(maxsize=1)
         self._worker_stop = threading.Event()
@@ -160,6 +166,10 @@ class AlertPoster:
                     source=source, confidence=confidence)
         with self.lock:
             self.pending.append(event)
+            while len(self.pending) > MAX_PENDING_ALERTS:
+                dropped = self.pending.pop(0)
+                trace_alert("outbox", dropped.get("event_id"), "dropped",
+                            reason="outbox_full")
             self._persist_pending_locked()
         if self._worker_thread is not None and self._worker_thread.is_alive():
             try:
@@ -207,7 +217,10 @@ class AlertPoster:
                 pending_count = len(self.pending)
             try:
                 response = self.session.post(self.backend_url, json=event, timeout=1.0)
-                response.raise_for_status()
+                status_code = int(getattr(response, "status_code", 200))
+                # Other 4xx (409 conflict, 422) never succeed on retry and would block the queue head forever.
+                if not 400 <= status_code < 500 or status_code in (401, 408, 429):
+                    response.raise_for_status()
             except Exception as exc:  # pragma: no cover - network side effect
                 trace_alert("http_post", event.get("event_id"), "failed",
                             error_type=type(exc).__name__, pending_count=pending_count)
@@ -224,8 +237,9 @@ class AlertPoster:
                     self._persist_pending_locked()
                 else:
                     continue
-            trace_alert("http_post", sent.get("event_id"), "succeeded",
-                        keyword=sent["keyword"], status_code=getattr(response, "status_code", None))
+            trace_alert("http_post", sent.get("event_id"),
+                        "dropped" if 400 <= status_code < 500 else "succeeded",
+                        keyword=sent["keyword"], status_code=status_code)
 
     def _load_pending(self) -> tuple[list[dict[str, object]], bool]:
         if not self.queue_path.exists():
@@ -259,6 +273,8 @@ class AlertPoster:
         with temp_path.open("w", encoding="utf-8") as handle:
             for event in self.pending:
                 handle.write(json.dumps(event) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temp_path, self.queue_path)
 
     @staticmethod
@@ -698,9 +714,10 @@ def vosk_worker(
     audio_queue: queue.Queue,
     dispatcher: DetectionDispatcher,
     config: dict[str, object],
+    recognizer: KaldiRecognizer,
+    verifier: Wav2Vec2Verifier | None,
 ) -> None:
     sample_rate = int(config["sample_rate"])
-    recognizer = create_vosk_recognizer(config["model_path"], sample_rate)
     debug = bool(config["debug"])
     last_debug_text = ""
     confidence = float(config["confidence"])
@@ -709,11 +726,6 @@ def vosk_worker(
     max_context_samples = max(int(sample_rate * context_seconds), sample_rate)
     recent_audio: deque[np.ndarray] = deque()
     recent_audio_sample_count = 0
-    verifier = (
-        Wav2Vec2Verifier(sample_rate=sample_rate)
-        if bool(config["wav2vec2_enabled"])
-        else None
-    )
     print(f"Vosk ready for Tagalog distress keywords: {config['model_path']}", flush=True)
     if verifier is not None:
         print(
@@ -813,21 +825,19 @@ def vosk_worker(
             recent_audio_sample_count = 0
 
 
-def snowboy_worker(
-    audio_queue: queue.Queue,
-    dispatcher: DetectionDispatcher,
+def create_snowboy_detector(
     config: dict[str, object],
     sensitivity_controller: AdaptiveSnowboySensitivity,
-) -> None:
+):
     snowboydetect = import_snowboydetect(config["swig_path"], config["examples_path"])
     detector = snowboydetect.SnowboyDetect(
         str(config["resource_path"]).encode(),
         ",".join(str(path) for path in config["model_paths"]).encode(),
     )
     detector.SetAudioGain(float(config["audio_gain"]))
-
-    current_sensitivities = ",".join(sensitivity_controller.sensitivity_list(len(config["model_paths"])))
-    detector.SetSensitivity(current_sensitivities.encode())
+    detector.SetSensitivity(
+        ",".join(sensitivity_controller.sensitivity_list(len(config["model_paths"]))).encode()
+    )
 
     detected_sample_rate = int(detector.SampleRate())
     if detected_sample_rate != config["sample_rate"]:
@@ -835,7 +845,19 @@ def snowboy_worker(
             f"Snowboy sample rate is {detected_sample_rate}; capture uses {config['sample_rate']}.",
             flush=True,
         )
+    return detector
 
+
+def snowboy_worker(
+    audio_queue: queue.Queue,
+    dispatcher: DetectionDispatcher,
+    config: dict[str, object],
+    sensitivity_controller: AdaptiveSnowboySensitivity,
+    detector,
+) -> None:
+    current_sensitivities = ",".join(
+        sensitivity_controller.sensitivity_list(len(config["model_paths"]))
+    )
     print(
         "Snowboy ready for "
         + ", ".join(config["keywords"])
@@ -1058,14 +1080,6 @@ def main() -> None:
     if len(snowboy_keywords) != len(snowboy_model_paths):
         raise RuntimeError("SNOWBOY_KEYWORDS must match SNOWBOY_MODEL_PATHS")
 
-    missing = [
-        str(path)
-        for path in [vosk_model_path, snowboy_resource_path, *snowboy_model_paths]
-        if not path.exists()
-    ]
-    if missing:
-        raise RuntimeError(f"Missing keyword model path(s): {', '.join(missing)}")
-
     poster = AlertPoster(backend_url, queue_path)
     poster.start_worker()
     cooldown = CooldownGate(cooldown_seconds)
@@ -1079,50 +1093,62 @@ def main() -> None:
     )
     vosk_queue: queue.Queue = queue.Queue(maxsize=32)
     snowboy_queue: queue.Queue = queue.Queue(maxsize=32)
+    vosk_config = {
+        "model_path": vosk_model_path,
+        "sample_rate": sample_rate,
+        "confidence": float(os.getenv("VOSK_KEYWORD_CONFIDENCE", "0.75")),
+        "debug": debug,
+        "wav2vec2_verify_below_confidence": float(
+            os.getenv("WAV2VEC2_VERIFY_BELOW_CONFIDENCE", "0.70")
+        ),
+        "wav2vec2_context_seconds": float(
+            os.getenv("WAV2VEC2_CONTEXT_SECONDS", "2.0")
+        ),
+    }
+    snowboy_config = {
+        "swig_path": os.getenv("SNOWBOY_SWIG_PATH", "/home/thesis/snowboy/swig/Python3"),
+        "examples_path": os.getenv(
+            "SNOWBOY_EXAMPLES_PATH", "/home/thesis/snowboy/examples/Python3"
+        ),
+        "resource_path": snowboy_resource_path,
+        "model_paths": snowboy_model_paths,
+        "keywords": snowboy_keywords,
+        "alert_keyword": os.getenv("SNOWBOY_ALERT_KEYWORD", "help"),
+        "audio_gain": float(os.getenv("SNOWBOY_AUDIO_GAIN", "1.0")),
+        "confidence": float(os.getenv("SNOWBOY_CONFIDENCE", "0.95")),
+        "sample_rate": sample_rate,
+    }
 
-    vosk_thread = threading.Thread(
-        target=vosk_worker,
-        args=(
-            vosk_queue,
-            dispatcher,
-            {
-                "model_path": vosk_model_path,
-                "sample_rate": sample_rate,
-                "confidence": float(os.getenv("VOSK_KEYWORD_CONFIDENCE", "0.75")),
-                "debug": debug,
-                "wav2vec2_enabled": _env_bool("WAV2VEC2_VERIFIER_ENABLED", True),
-                "wav2vec2_verify_below_confidence": float(
-                    os.getenv("WAV2VEC2_VERIFY_BELOW_CONFIDENCE", "0.70")
-                ),
-                "wav2vec2_context_seconds": float(
-                    os.getenv("WAV2VEC2_CONTEXT_SECONDS", "2.0")
-                ),
-            },
-        ),
-        daemon=True,
-    )
-    snowboy_thread = threading.Thread(
-        target=snowboy_worker,
-        args=(
-            snowboy_queue,
-            dispatcher,
-            {
-                "swig_path": os.getenv("SNOWBOY_SWIG_PATH", "/home/thesis/snowboy/swig/Python3"),
-                "examples_path": os.getenv(
-                    "SNOWBOY_EXAMPLES_PATH", "/home/thesis/snowboy/examples/Python3"
-                ),
-                "resource_path": snowboy_resource_path,
-                "model_paths": snowboy_model_paths,
-                "keywords": snowboy_keywords,
-                "alert_keyword": os.getenv("SNOWBOY_ALERT_KEYWORD", "help"),
-                "audio_gain": float(os.getenv("SNOWBOY_AUDIO_GAIN", "1.0")),
-                "confidence": float(os.getenv("SNOWBOY_CONFIDENCE", "0.95")),
-                "sample_rate": sample_rate,
-            },
-            adaptive_sensitivity,
-        ),
-        daemon=True,
-    )
+    # Engines initialise here, not in their threads: a missing optional engine is
+    # disabled up front, and any worker thread that dies later stops the process.
+    workers: list[threading.Thread] = []
+    try:
+        recognizer = create_vosk_recognizer(vosk_model_path, sample_rate)
+        verifier = (
+            Wav2Vec2Verifier(sample_rate=sample_rate)
+            if _env_bool("WAV2VEC2_VERIFIER_ENABLED", True)
+            else None
+        )
+        workers.append(threading.Thread(
+            target=vosk_worker,
+            args=(vosk_queue, dispatcher, vosk_config, recognizer, verifier),
+            name="vosk",
+            daemon=True,
+        ))
+    except Exception as exc:
+        print(f"Vosk disabled: {exc!r}", file=sys.stderr, flush=True)
+    try:
+        detector = create_snowboy_detector(snowboy_config, adaptive_sensitivity)
+        workers.append(threading.Thread(
+            target=snowboy_worker,
+            args=(snowboy_queue, dispatcher, snowboy_config, adaptive_sensitivity, detector),
+            name="snowboy",
+            daemon=True,
+        ))
+    except Exception as exc:
+        print(f"Snowboy disabled: {exc!r}", file=sys.stderr, flush=True)
+    if not workers and not audio_preprocessor.available:
+        raise RuntimeError("No keyword engine available (openWakeWord, Vosk and Snowboy all failed)")
 
     pa = pyaudio.PyAudio()
     stream = None
@@ -1147,8 +1173,8 @@ def main() -> None:
             packet = split_audio_chunk(data, channels)
             noise_suppressor.capture_noise_profile(packet["raw_mono_samples"])
 
-        vosk_thread.start()
-        snowboy_thread.start()
+        for worker in workers:
+            worker.start()
         print(
             "Listening with openWakeWord as primary VAD/keyword engine; "
             "Vosk/Snowboy run only as speech fallback"
@@ -1160,13 +1186,18 @@ def main() -> None:
             flush=True,
         )
 
-        next_flush_at = 0.0
         next_noise_log_at = 0.0
         next_openwakeword_score_log_at = 0.0
         next_config_poll_at = 0.0
+        openwakeword_failures = 0
         while RUNNING:
             now = time.monotonic()
             if now >= next_config_poll_at:
+                dead = [worker.name for worker in workers if not worker.is_alive()]
+                if dead:
+                    raise RuntimeError(
+                        f"Keyword engine thread(s) died: {dead}; exiting so systemd restarts KWS"
+                    )
                 latest_config = config_store.load()
                 if latest_config != current_noise_config:
                     current_noise_config = latest_config
@@ -1189,6 +1220,16 @@ def main() -> None:
             packet = split_audio_chunk(data, channels)
             raw_samples = packet["raw_mono_samples"]
             preprocessor_result = audio_preprocessor.process(raw_samples)
+            if audio_preprocessor.available:
+                if preprocessor_result.get("available"):
+                    openwakeword_failures = 0
+                else:
+                    openwakeword_failures += 1
+                    if openwakeword_failures >= OPENWAKEWORD_MAX_CONSECUTIVE_FAILURES:
+                        raise RuntimeError(
+                            "openWakeWord prediction keeps failing: "
+                            f"{preprocessor_result.get('error')}"
+                        )
             speech_active = fallback_speech_active(preprocessor_result, raw_samples)
             cleaned_samples, metrics = noise_suppressor.process(raw_samples)
             preprocessed_samples = np.asarray(
@@ -1291,10 +1332,8 @@ def main() -> None:
                     flush=True,
                 )
                 next_noise_log_at = now + noise_log_interval
-
-            if now >= next_flush_at:
-                poster.flush()
-                next_flush_at = now + ALERT_FLUSH_INTERVAL_SECONDS
+            # No poster.flush() here: the alert-poster thread owns all network I/O, so a
+            # slow backend can never stall capture and drop spoken keywords.
     finally:
         poster.stop_worker()
         if stream is not None:

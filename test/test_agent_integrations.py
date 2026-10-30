@@ -99,6 +99,20 @@ class ReadOnlyProbeTests(unittest.TestCase):
         result = preflight.bounded_run([sys.executable, '-c', 'import time; time.sleep(2)'], timeout=.05)
         self.assertTrue(result['timeout'])
 
+    def test_backend_probe_never_reads_body_or_sends_credentials(self):
+        argv = preflight.PROBES['backend']
+        self.assertNotIn('--fail', argv)  # --fail would turn 401 into "probe failed"
+        self.assertIn('/dev/null', argv)
+        self.assertFalse(any('authorization' in part.lower() or 'token' in part.lower() for part in argv))
+
+    def test_backend_401_means_reachable_not_healthy(self):
+        classify = preflight.classify_backend
+        self.assertEqual(classify({'exit_code': 0, 'output': '401'}), 'BACKEND_REACHABLE_AUTH_REQUIRED')
+        self.assertEqual(classify({'exit_code': 0, 'output': '200'}), 'BACKEND_REACHABLE_AUTH_NOT_ENFORCED')
+        self.assertEqual(classify({'exit_code': 7, 'output': '000'}), 'BACKEND_UNREACHABLE')
+        self.assertEqual(classify({'exit_code': 0, 'output': '500'}), 'BACKEND_HTTP_500')
+        self.assertEqual(classify({'exit_code': None, 'output': ''}), 'BACKEND_UNREACHABLE')
+
 
 class OfflineHilTests(unittest.TestCase):
     def test_valid_thermal_fixture(self):

@@ -188,6 +188,51 @@ class KwsEventIdTest(unittest.TestCase):
             finally:
                 restore_modules(previous)
 
+    def test_non_retryable_rejection_is_dropped_so_queue_keeps_moving(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_kws_module()
+            try:
+                poster = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
+
+                class StatusSession(FakeSession):
+                    def __init__(self, codes):
+                        super().__init__()
+                        self.codes = list(codes)
+
+                    def post(self, url, json, timeout):
+                        self.posts.append(dict(json))
+                        code = self.codes.pop(0)
+
+                        def raise_for_status():
+                            if code >= 400:
+                                raise RuntimeError(f"HTTP {code}")
+                        return types.SimpleNamespace(status_code=code, raise_for_status=raise_for_status)
+
+                # 409 conflict is dropped; 503 and 401 stay queued for retry.
+                poster.session = StatusSession([409, 503, 401])
+                poster.publish("help", 0.9, "openwakeword")
+                poster.publish("tulong", 0.9, "openwakeword")
+                poster.flush()
+                poster.flush()
+                self.assertEqual([event["keyword"] for event in poster.pending], ["tulong"])
+            finally:
+                restore_modules(previous)
+
+    def test_outbox_is_bounded(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_kws_module()
+            try:
+                module.MAX_PENDING_ALERTS = 3
+                poster = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
+                poster.flush = lambda: None
+                for index in range(5):
+                    poster.publish(f"kw{index}", 0.9, "openwakeword")
+                self.assertEqual(
+                    [event["keyword"] for event in poster.pending], ["kw2", "kw3", "kw4"]
+                )
+            finally:
+                restore_modules(previous)
+
     def test_worker_publish_does_not_wait_for_slow_network_post(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module, previous = load_kws_module()

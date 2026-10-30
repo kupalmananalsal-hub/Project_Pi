@@ -11,10 +11,14 @@ User=thesis
 Group=audio
 SupplementaryGroups=gpio i2c spi
 WorkingDirectory=/home/thesis/Project_Pi
+EnvironmentFile=-/etc/project-pi/backend.env
+StateDirectory=project-pi/backend
+StateDirectoryMode=0700
 Environment=PYTHONUNBUFFERED=1
 Environment=VOSK_MODEL_PATH=/home/thesis/vosk-models/vosk-model-tl-ph-generic-0.6
 Environment=BACKEND_ALERT_URL=http://127.0.0.1:8765/api/alerts
-Environment=ALERT_QUEUE_PATH=/tmp/project_pi_alerts.jsonl
+# Durable outbox: /tmp is tmpfs and is lost on power cut.
+Environment=ALERT_QUEUE_PATH=/var/lib/project-pi/backend/alerts.jsonl
 Environment=PROJECT_PI_AUDIO_STATUS_PATH=/tmp/project_pi_audio_status.json
 Environment=MIC_NAME_HINT=seeed
 Environment=VOSK_KEYWORD_CONFIDENCE=0.75

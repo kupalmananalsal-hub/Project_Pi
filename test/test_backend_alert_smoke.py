@@ -8,6 +8,7 @@ import threading
 import types
 import unittest
 import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -385,6 +386,86 @@ class BackendAlertSmokeTest(unittest.TestCase):
                 self.assertEqual(mlx.calls, 3)
                 self.assertIsNone(camera.mlx)
                 self.assertIsNone(camera.address)
+            finally:
+                self.cleanup_backend(module, previous)
+
+    def test_thermal_i2c_oserror_releases_sensor_for_reinit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_backend_module(temp_dir)
+            try:
+                class UnpluggedMlx:
+                    def getFrame(self, frame):
+                        raise OSError(121, "Remote I/O error")
+
+                class FakeBus:
+                    deinit_calls = 0
+
+                    def deinit(self):
+                        FakeBus.deinit_calls += 1
+
+                camera = module.ThermalCamera()
+                camera.mlx = UnpluggedMlx()
+                camera.address = 0x33
+                camera._i2c = FakeBus()
+                module.THERMAL_FRAME_RETRY_COUNT = 2
+                module.THERMAL_FRAME_RETRY_DELAY_SECONDS = 0
+
+                with self.assertRaisesRegex(RuntimeError, "Remote I/O error"):
+                    camera.read()
+
+                self.assertIsNone(camera.mlx)
+                self.assertIsNone(camera._i2c)
+                self.assertEqual(FakeBus.deinit_calls, 1)
+            finally:
+                self.cleanup_backend(module, previous)
+
+    def test_health_monitor_alerts_once_per_confirmed_outage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_backend_module(temp_dir)
+            try:
+                self.prepare_backend(module)
+                module.thermal = FakeThermal(module, {"thermal_state": "negative"})
+                module.thermal.mlx = object()
+                status_path = Path(temp_dir) / "audio.json"
+                module.AUDIO_STATUS_PATH = status_path
+                monitor = module.HealthMonitor()
+
+                def kws_alive(alive):
+                    if alive:
+                        status_path.write_text(
+                            '{"timestamp": "%s"}' % datetime.now(timezone.utc).isoformat(),
+                            encoding="utf-8",
+                        )
+                    else:
+                        status_path.unlink(missing_ok=True)
+
+                def faults():
+                    return [e for e in module.alert_store.inserted if e["decision_state"] == "system_fault"]
+
+                kws_alive(False)
+                asyncio.run(monitor.check_once())
+                self.assertEqual(faults(), [])  # one failed check may be a restart
+                asyncio.run(monitor.check_once())
+                asyncio.run(monitor.check_once())
+                self.assertEqual([e["keyword"] for e in faults()], ["keyword detection offline"])
+
+                kws_alive(True)
+                asyncio.run(monitor.check_once())
+                kws_alive(False)
+                asyncio.run(monitor.check_once())
+                asyncio.run(monitor.check_once())
+                self.assertEqual(len(faults()), 2)
+            finally:
+                self.cleanup_backend(module, previous)
+
+    def test_audio_read_never_opens_the_microphone(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_backend_module(temp_dir)
+            try:
+                module.AUDIO_STATUS_PATH = Path(temp_dir) / "missing.json"
+                with self.assertRaisesRegex(RuntimeError, "kws-alert"):
+                    module.audio.read()
+                self.assertFalse(hasattr(module, "pyaudio"))
             finally:
                 self.cleanup_backend(module, previous)
 

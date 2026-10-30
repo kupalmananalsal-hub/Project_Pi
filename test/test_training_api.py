@@ -24,11 +24,6 @@ class FakeUploadFile:
         return self._data
 
 
-class FakeRequest:
-    def __init__(self, headers=None):
-        self.headers = headers or {}
-
-
 class FakeAsyncStream:
     def __init__(self, payload=b""):
         self._payload = payload
@@ -650,33 +645,100 @@ class TrainingApiTest(unittest.TestCase):
             finally:
                 self.cleanup(module, previous)
 
-    def test_sensitive_training_routes_require_api_token(self):
+    def run_through_auth(self, module, scope):
+        reached, sent = [], []
+
+        async def app(scope, receive, send):
+            reached.append(scope["path"])
+
+        async def send(message):
+            sent.append(message)
+
+        asyncio.run(module.ApiTokenMiddleware(app)(scope, None, send))
+        return reached, sent
+
+    def test_api_token_middleware_guards_every_api_and_ws_route(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             module, previous = self.load_module(temp_dir)
             try:
-                bad_request = FakeRequest(headers={})
-                with self.assertRaises(module.HTTPException) as raised:
-                    asyncio.run(
-                        module.training_deploy(
-                            onnx_file=FakeUploadFile("help.onnx", b"model"),
-                            onnx_data_file=FakeUploadFile("help.onnx.data", b"data"),
-                            keyword="help",
-                            request=bad_request,
-                        )
-                    )
-                self.assertEqual(raised.exception.status_code, 401)
+                module.API_TOKEN = "test-token"
+                good = [(b"authorization", b"Bearer test-token")]
+                bad = [(b"authorization", b"Bearer project-pi-local-token")]
 
-                with self.assertRaises(module.HTTPException) as raised:
-                    asyncio.run(module.api_refresh(module.RefreshRequest(), bad_request))
-                self.assertEqual(raised.exception.status_code, 401)
+                for method, path in [("POST", "/api/alerts"), ("DELETE", "/api/alerts"),
+                                     ("POST", "/api/alerts/manual"), ("POST", "/api/leds"),
+                                     ("POST", "/api/refresh"), ("GET", "/api/status")]:
+                    for headers in ([], bad):
+                        reached, sent = self.run_through_auth(module, {
+                            "type": "http", "method": method, "path": path, "headers": headers})
+                        self.assertEqual(reached, [], path)
+                        self.assertEqual(sent[0]["status"], 401, path)
+                    reached, _ = self.run_through_auth(module, {
+                        "type": "http", "method": method, "path": path, "headers": good})
+                    self.assertEqual(reached, [path])
 
-                with self.assertRaises(module.HTTPException) as raised:
-                    asyncio.run(module.api_shutdown(bad_request))
-                self.assertEqual(raised.exception.status_code, 401)
+                for path in ("/ws/thermal", "/ws/audio", "/ws/alerts"):
+                    reached, sent = self.run_through_auth(module, {
+                        "type": "websocket", "path": path, "query_string": b"", "headers": []})
+                    self.assertEqual(reached, [], path)
+                    self.assertEqual(sent, [{"type": "websocket.close", "code": 1008}])
 
-                with self.assertRaises(module.HTTPException) as raised:
-                    asyncio.run(module.api_reboot(bad_request))
-                self.assertEqual(raised.exception.status_code, 401)
+                # Protocol v2 authenticates caregivers itself; CORS preflight carries no token.
+                reached, _ = self.run_through_auth(module, {
+                    "type": "websocket", "path": "/ws/alerts",
+                    "query_string": b"protocol=2", "headers": []})
+                self.assertEqual(reached, ["/ws/alerts"])
+                reached, _ = self.run_through_auth(module, {
+                    "type": "http", "method": "OPTIONS", "path": "/api/alerts", "headers": []})
+                self.assertEqual(reached, ["/api/alerts"])
+
+                # Auth explicitly required but no token: fail closed, never fall open.
+                module.API_TOKEN = ""
+                module.API_AUTH_REQUIRED = True
+                reached, sent = self.run_through_auth(module, {
+                    "type": "http", "method": "GET", "path": "/api/status",
+                    "headers": [(b"authorization", b"Bearer ")]})
+                self.assertEqual(reached, [])
+                self.assertEqual(sent[0]["status"], 401)
+            finally:
+                self.cleanup(module, previous)
+
+    def test_no_token_mode_passes_every_route_through(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                module.API_TOKEN = ""
+                module.API_AUTH_REQUIRED = False
+                self.assertFalse(module.api_auth_enabled())
+                for scope in (
+                    {"type": "http", "method": "POST", "path": "/api/alerts", "headers": []},
+                    {"type": "http", "method": "POST", "path": "/api/reboot", "headers": []},
+                    # The old APK sends the former public token on control routes.
+                    {"type": "http", "method": "POST", "path": "/api/shutdown",
+                     "headers": [(b"authorization", b"Bearer project-pi-local-token")]},
+                    {"type": "websocket", "path": "/ws/thermal", "query_string": b"", "headers": []},
+                ):
+                    reached, sent = self.run_through_auth(module, scope)
+                    self.assertEqual(reached, [scope["path"]])
+                    self.assertEqual(sent, [])
+            finally:
+                self.cleanup(module, previous)
+
+    def test_startup_modes(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                # No token, auth not required: starts in no-token mode (warning only).
+                module.API_TOKEN, module.API_AUTH_REQUIRED = "", False
+                module.check_security_config()
+                # Enabled with an unusable token: refuse to start.
+                for token, required in (("", True), ("project-pi-local-token", False),
+                                        ("project-pi-local-token", True), ("short", False)):
+                    module.API_TOKEN, module.API_AUTH_REQUIRED = token, required
+                    with self.assertRaisesRegex(RuntimeError, "PROJECT_PI_API_TOKEN"):
+                        module.check_security_config()
+                module.API_TOKEN, module.API_AUTH_REQUIRED = "a-real-secret-0123456789", True
+                module.check_security_config()
             finally:
                 self.cleanup(module, previous)
 
@@ -711,15 +773,11 @@ class TrainingApiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             module, previous = self.load_module(temp_dir)
             try:
-                token_request = FakeRequest(
-                    headers={"authorization": "Bearer project-pi-local-token"}
-                )
                 result = asyncio.run(
                     module.training_model_import(
                         onnx_file=FakeUploadFile("help.onnx", b"model"),
                         onnx_data_file=FakeUploadFile("help.onnx.data", b"data"),
                         keyword="help",
-                        request=token_request,
                     )
                 )
                 self.assertTrue(result["deployed"])

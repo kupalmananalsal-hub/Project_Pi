@@ -4,6 +4,7 @@ import '../models/alert_event.dart';
 import '../models/app_settings.dart';
 import '../models/button_event.dart';
 import '../models/system_status.dart';
+import 'api_token.dart';
 
 class PiApiException implements Exception {
   const PiApiException(this.message);
@@ -15,7 +16,7 @@ class PiApiException implements Exception {
 }
 
 class PiApiService {
-  PiApiService({required this.host, required int port, Dio? dio, this.apiToken})
+  PiApiService({required this.host, required int port, Dio? dio})
     : port = AppSettings.normalizeBackendPort(port),
       _dio =
           dio ??
@@ -25,6 +26,7 @@ class PiApiService {
               connectTimeout: const Duration(seconds: 3),
               receiveTimeout: const Duration(seconds: 5),
               sendTimeout: const Duration(seconds: 3),
+              headers: ApiToken.headers,
             ),
           );
 
@@ -32,18 +34,7 @@ class PiApiService {
   final int port;
   final Dio _dio;
 
-  /// Token sent as `Authorization: Bearer <token>` on control-plane endpoints
-  /// (shutdown, reboot, refresh). Matches the `PROJECT_PI_API_TOKEN` env var
-  /// on the Pi backend. Defaults to the well-known dev token so existing
-  /// callers that don't pass a token continue to work against a default-config
-  /// backend.
-  final String? apiToken;
-
-  static const _defaultApiToken = 'project-pi-local-token';
-
-  Options get _controlOptions => Options(
-    headers: {'Authorization': 'Bearer ${apiToken ?? _defaultApiToken}'},
-  );
+  void close() => _dio.close();
 
   String get _backendBaseUrl =>
       'http://$host:${AppSettings.normalizeBackendPort(port)}';
@@ -106,17 +97,11 @@ class PiApiService {
   }
 
   Future<void> shutdown() async {
-    await _dio.post<void>(
-      '$_backendBaseUrl/api/shutdown',
-      options: _controlOptions,
-    );
+    await _dio.post<void>('$_backendBaseUrl/api/shutdown');
   }
 
   Future<void> reboot() async {
-    await _dio.post<void>(
-      '$_backendBaseUrl/api/reboot',
-      options: _controlOptions,
-    );
+    await _dio.post<void>('$_backendBaseUrl/api/reboot');
   }
 
   Future<Map<String, dynamic>> refreshServices({
@@ -126,10 +111,7 @@ class PiApiService {
     final response = await _dio.post<Map<String, dynamic>>(
       '/api/refresh',
       data: {'git_pull': gitPull, 'restart_backend': restartBackend},
-      options: Options(
-        headers: {'Authorization': 'Bearer ${apiToken ?? _defaultApiToken}'},
-        receiveTimeout: const Duration(seconds: 130),
-      ),
+      options: Options(receiveTimeout: const Duration(seconds: 130)),
     );
     return Map<String, dynamic>.from(response.data ?? const {});
   }
@@ -318,7 +300,7 @@ class PiApiService {
     final response = await _dio.post<Map<String, dynamic>>(
       '/api/training/deploy',
       data: formData,
-      options: _controlOptions.copyWith(
+      options: Options(
         sendTimeout: const Duration(seconds: 45),
         receiveTimeout: const Duration(seconds: 45),
       ),

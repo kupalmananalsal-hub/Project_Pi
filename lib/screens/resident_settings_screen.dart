@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/app_settings.dart';
+import '../services/api_token.dart';
 
 class ResidentSettingsScreen extends StatefulWidget {
   const ResidentSettingsScreen({super.key, this.isInitialSetup = false});
@@ -16,6 +17,7 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
   final _formKey = GlobalKey<FormState>();
   final _hostController = TextEditingController();
   final _portController = TextEditingController();
+  final _tokenController = TextEditingController(text: ApiToken.current);
   bool _isLoading = true;
   bool _isSaving = false;
 
@@ -29,6 +31,7 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
   void dispose() {
     _hostController.dispose();
     _portController.dispose();
+    _tokenController.dispose();
     super.dispose();
   }
 
@@ -62,6 +65,9 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('host', host!);
     await prefs.setInt('port', port);
+    if (_tokenController.text.trim() != ApiToken.current) {
+      await ApiToken.save(_tokenController.text);
+    }
 
     if (mounted) {
       setState(() {
@@ -242,6 +248,42 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
                           }
                           return null;
                         },
+                      ),
+                      const SizedBox(height: 20),
+                      TextFormField(
+                        controller: _tokenController,
+                        key: const ValueKey('pi-api-token-field'),
+                        obscureText: true,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                        ),
+                        decoration: InputDecoration(
+                          labelText: 'Pi API token (optional)',
+                          helperText:
+                              'Leave empty unless the Pi requires a token',
+                          helperStyle: const TextStyle(color: Colors.white54),
+                          labelStyle: const TextStyle(color: Colors.white70),
+                          prefixIcon: const Icon(
+                            Icons.key,
+                            color: Colors.white70,
+                          ),
+                          filled: true,
+                          fillColor: const Color(0xFF1E1E1E),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            borderSide: BorderSide(color: Colors.grey.shade800),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            borderSide: const BorderSide(
+                              color: Color(0xFFE53935),
+                              width: 2,
+                            ),
+                          ),
+                        ),
                       ),
                       const SizedBox(height: 36),
                       SizedBox(

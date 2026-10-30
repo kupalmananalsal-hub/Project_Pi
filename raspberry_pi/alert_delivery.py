@@ -39,7 +39,7 @@ def replay_eligible(event, delivery, now=None):
 
 
 class DeliverySessions:
-    def __init__(self, heartbeat_interval=15, heartbeat_timeout=10, clock=None):
+    def __init__(self, heartbeat_interval=5, heartbeat_timeout=5, clock=None):
         self.active = {}
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_timeout = heartbeat_timeout
@@ -61,11 +61,16 @@ class DeliverySessions:
             if hello.get("type") != "authenticate" or not authenticate(installation, hello.get("token")):
                 await ws.close(code=1008, reason="authentication_failed")
                 return
-            # Reject concurrent same-identity connections rather than displacing an active phone.
-            if installation in self.active:
-                await ws.close(code=1008, reason="installation_already_connected")
-                return
+            # A reconnecting phone replaces its own stale session: after a Wi-Fi drop the old one
+            # stays registered until its heartbeat times out, and rejecting the phone meanwhile
+            # delays alerts. Delivery state lives in SQLite, so displacing a session loses nothing.
+            previous = self.active.get(installation)
             self.active[installation] = ws
+            if previous is not None:
+                try:
+                    await asyncio.wait_for(previous.close(code=4000, reason="superseded"), 2)
+                except Exception:
+                    pass
             instance, high = await asyncio.to_thread(store.delivery_boundary)
             recovery_cursor = await asyncio.to_thread(store.recovery_cursor, installation, high, self.clock())
             await send("connected", instance=instance, high_water=high, recovery_cursor=recovery_cursor)
