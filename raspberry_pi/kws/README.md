@@ -305,14 +305,24 @@ reporting) is in [docs/m3_recognition_evidence_protocol.md](../../docs/m3_recogn
   "center").
 
 Outputs:
-- `predictions.csv`: one row per recording, with alert raised, number of alert
-  events, detected keywords and engines, latency, speaker, and the highest
-  openWakeWord score per model. It also works with
-  `evaluate_keyword_models.py --predictions-dir`.
-- `events.jsonl`: every alert the loop published.
+- `predictions.csv`: one row per recording, with the exact-keyword score
+  (`score`), whether any alarm fired (`any_distress`), wrongly detected keywords,
+  per-keyword event counts, detected keywords and engines, latency, speaker, and
+  the highest openWakeWord score per model. It also works with
+  `evaluate_keyword_models.py --predictions-dir` (scored exact-keyword).
+- `events.jsonl`: every alert the loop published, tagged with the recording it
+  belongs to (`path`, `recording_t`; `path` is null for lead-in alerts).
 - `summary.json`, covering:
-  - recording-level TP/TN/FP/FN, precision, recall, specificity, F1, and false-positive and false-negative rates, each with its denominator;
-  - event-level false alarms per hour of negative audio;
+  - `exact_keyword` (primary): a positive counts as detected only when its own
+    keyword fires, so "help" heard as "tulong" is a miss; TP/TN/FP/FN, precision,
+    recall, specificity, F1, and false-positive and false-negative rates, each
+    with its denominator;
+  - `any_distress`: the same metrics for "some alarm was raised", whichever keyword;
+  - `per_keyword`: one confusion matrix per keyword (a wrongly predicted keyword
+    is that keyword's FP), plus counts of positives with only a wrong keyword and
+    with extra keywords;
+  - event-level false alarms, in total and per keyword (all repeats counted),
+    and per hour of negative audio;
   - per-class negatives;
   - latency from keyword onset (needs `--onsets`) and from recording start;
   - recordings and speakers per class;

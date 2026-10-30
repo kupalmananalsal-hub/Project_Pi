@@ -378,7 +378,19 @@ def run_replay(kws, recordings: list[array], *, env: dict[str, str], gap_seconds
 
 
 def score_rows(items: list[dict[str, object]], runs):
-    """Per-recording prediction rows (label/score also usable by evaluate_keyword_models)."""
+    """Per-recording prediction rows plus every event, each tagged with its recording.
+
+    Scoring conventions (label/score also usable by evaluate_keyword_models):
+    - score (exact match): a positive recording scores 1 only if its own expected
+      keyword fired; a different keyword is a miss (FN), never a TP. A negative
+      recording scores 1 if any alert fired.
+    - any_distress: 1 if any alert fired (system-level "an alarm was raised").
+    - Extra or repeated detections never turn a miss into a hit; every event is
+      kept in event_keyword_counts, and per-keyword scoring charges a wrongly
+      predicted keyword as that keyword's FP.
+    - Latency is measured to the first event of the expected keyword.
+    Returns (rows, lead_in_events, tagged_events).
+    """
     attributed: list[list[dict[str, object]]] = [[] for _ in items]
     max_scores: list[dict[str, float]] = [{} for _ in items]
     windows: list[tuple[float, float]] = []
@@ -400,22 +412,34 @@ def score_rows(items: list[dict[str, object]], runs):
         offset += len(timeline.windows)
 
     rows = []
+    tagged_events = [{**event, "path": None, "recording_t": None} for event in lead_in_events]
     for index, item in enumerate(items):
         start, end = windows[index]
         events = sorted(attributed[index], key=lambda e: e["t"])
+        tagged_events.extend({**e, "path": item["path"], "recording_t": round(float(e["t"]) - start, 3)}
+                             for e in events)
         keywords = list(dict.fromkeys(str(e["keyword"]) for e in events))
+        keyword_counts: dict[str, int] = {}
+        for event in events:
+            keyword_counts[str(event["keyword"])] = keyword_counts.get(str(event["keyword"]), 0) + 1
         expected = str(item.get("expected_keyword") or "")
-        first = float(events[0]["t"]) if events else None
+        is_positive = int(item["label"]) == 1
+        matched = bool(expected) and expected in keywords
+        matching = [e for e in events if str(e["keyword"]) == expected] if is_positive else events
+        first = float(matching[0]["t"]) if matching else None
         onset = item.get("onset_s")
         rows.append({
             "path": item["path"],
             "label": item["label"],
             "category": item.get("category", ""),
-            "score": 1.0 if events else 0.0,
+            "score": 1.0 if (matched if is_positive else events) else 0.0,
+            "any_distress": int(bool(events)),
             "event_count": len(events),
             "expected_keyword": expected,
-            "expected_detected": int(bool(expected) and expected in keywords),
+            "expected_detected": int(matched),
+            "wrong_keywords": ";".join(k for k in keywords if is_positive and k != expected),
             "detected_keywords": ";".join(keywords),
+            "event_keyword_counts": ";".join(f"{k}={n}" for k, n in sorted(keyword_counts.items())),
             "sources": ";".join(dict.fromkeys(str(e["source"]) for e in events)),
             "latency_from_recording_start_s": round(first - start, 3) if first is not None else "",
             "latency_from_onset_s": (round(first - start - float(onset), 3)
@@ -425,7 +449,15 @@ def score_rows(items: list[dict[str, object]], runs):
             "openwakeword_max_scores": ";".join(
                 f"{name}={score:.4f}" for name, score in sorted(max_scores[index].items())),
         })
-    return rows, lead_in_events
+    return rows, lead_in_events, tagged_events
+
+
+def _keyword_counts(row: dict[str, object]) -> dict[str, int]:
+    counts = {}
+    for part in filter(None, str(row.get("event_keyword_counts", "")).split(";")):
+        keyword, _, count = part.rpartition("=")
+        counts[keyword] = int(count)
+    return counts
 
 
 def _latency_stats(values):
@@ -458,42 +490,57 @@ def summarize(rows: list[dict[str, object]], lead_in_events: list[dict[str, obje
         entry["false_positive_recordings"] += int(float(row["score"]) >= 0.5)
         entry["false_alarm_events"] += int(row["event_count"])
 
+    false_alarm_events_by_keyword: dict[str, int] = {}
+    for row in negatives:
+        for keyword, count in _keyword_counts(row).items():
+            false_alarm_events_by_keyword[keyword] = false_alarm_events_by_keyword.get(keyword, 0) + count
+
+    # One binary problem per keyword: actual = recording's expected keyword is K,
+    # predicted = K fired. A "help" recording that fires only "tulong" is an FN for
+    # help and an FP for tulong.
+    keywords = sorted({str(r["expected_keyword"]) for r in positives if r["expected_keyword"]}
+                      | {k for r in rows for k in _keyword_counts(r)})
+    per_keyword = {
+        keyword: compute_binary_metrics(
+            [{"label": int(r["expected_keyword"] == keyword), "score": float(keyword in _keyword_counts(r))}
+             for r in rows],
+            threshold=0.5)
+        for keyword in keywords
+    }
+
     return {
-        # Recording level: one row per recording; an alert anywhere in it is a detection.
-        "recording_level": compute_binary_metrics(rows, threshold=0.5),
+        # Primary, recording level, exact keyword: a positive is detected only when its
+        # own keyword fires; a negative is a false positive when any alert fires.
+        "exact_keyword": compute_binary_metrics(rows, threshold=0.5),
+        # System level: was any distress alert raised, whichever keyword?
+        "any_distress": compute_binary_metrics(
+            [{"label": r["label"], "score": r["any_distress"]} for r in rows], threshold=0.5),
+        "per_keyword": per_keyword,
+        "positives_with_wrong_keyword_only": sum(
+            1 for r in positives if int(r["any_distress"]) and not int(r["expected_detected"])),
+        "positives_with_extra_keywords": sum(
+            1 for r in positives if int(r["expected_detected"]) and r["wrong_keywords"]),
         # Event level: every alert the loop published during negative audio.
         "event_level": {
             "false_alarm_events": false_alarm_events,
+            "false_alarm_events_by_keyword": dict(sorted(false_alarm_events_by_keyword.items())),
             "negative_audio_hours": round(negative_hours, 6),
             "false_alarm_events_per_hour": (round(false_alarm_events / negative_hours, 6)
                                             if negative_hours > 0 else None),
         },
-        "expected_keyword_recall": {
-            "value": (round(sum(int(r["expected_detected"]) for r in positives) / len(positives), 6)
-                      if positives else None),
-            "denominator": len(positives),
-        },
         "latency": {
             "from_keyword_onset_s": _latency_stats(onset_latencies),
             "from_recording_start_s": _latency_stats(start_latencies),
-            "note": ("from_keyword_onset_s needs annotated onsets (--onsets); "
-                     "from_recording_start_s includes any silence before the keyword"),
+            "note": ("to the first event of the expected keyword; from_keyword_onset_s needs "
+                     "annotated onsets (--onsets); from_recording_start_s includes any silence "
+                     "before the keyword"),
         },
         "recordings": {"positive": len(positives), "negative": len(negatives)},
         "speakers": {"positive": speakers(positives), "negative": speakers(negatives),
                      "total": speakers(rows)},
         "negatives_by_category": dict(sorted(by_category.items())),
-        "false_alarm_events_by_keyword": _count_keywords(negatives),
         "lead_in_events": len(lead_in_events),
     }
-
-
-def _count_keywords(rows):
-    counts: dict[str, int] = {}
-    for row in rows:
-        for keyword in filter(None, str(row["detected_keywords"]).split(";")):
-            counts[keyword] = counts.get(keyword, 0) + 1
-    return dict(sorted(counts.items()))
 
 
 def load_items(dataset_dir: Path, *, split: str, subset: str | None, limit: int | None,
@@ -611,7 +658,7 @@ def main(argv: list[str] | None = None) -> int:
     runs, engines = run_replay(kws, recordings, env=env, gap_seconds=args.gap_seconds,
                                lead_in=dither(args.lead_in_seconds), speed=args.speed,
                                isolate=isolate, require_engines=required)
-    rows, lead_in_events = score_rows(items, runs)
+    rows, lead_in_events, tagged_events = score_rows(items, runs)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     with (args.out_dir / "predictions.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -619,9 +666,8 @@ def main(argv: list[str] | None = None) -> int:
         writer.writeheader()
         writer.writerows(rows)
     with (args.out_dir / "events.jsonl").open("w", encoding="utf-8") as handle:
-        for _timeline, recorder, _pacing in runs:
-            for event in recorder.events:
-                handle.write(json.dumps(event) + "\n")
+        for event in tagged_events:  # path = owning recording (null: lead-in)
+            handle.write(json.dumps(event) + "\n")
     max_lag = max((p["max_lag_s"] or 0.0) for _t, _r, p in runs)
     chunk_s = next((p["chunk_s"] for _t, _r, p in runs if p["chunk_s"]), None)
     summary = summarize(rows, lead_in_events)
@@ -642,7 +688,8 @@ def main(argv: list[str] | None = None) -> int:
         **configuration_record(source, env),
     }
     (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({k: summary[k] for k in ("recording_level", "event_level", "recordings", "speakers")},
+    print(json.dumps({k: summary[k] for k in ("exact_keyword", "any_distress", "event_level",
+                                               "recordings", "speakers")},
                      indent=2))
     if not summary["run"]["valid_as_evidence"]:
         print("WARNING: run not valid as evidence (speed != 1.0 or the machine could not keep real time)",

@@ -135,8 +135,10 @@ missing: the baseline would then describe a degraded detector.
 
 For each run and split, report exactly, with denominators:
 
-- Recording level: TP, TN, FP, FN; precision (TP/(TP+FP)), recall (TP/(TP+FN)), specificity (TN/(TN+FP)), F1, false-positive rate (FP/(FP+TN)), false-negative rate (FN/(FN+TP)).
-- Event level: false alarm events and events per hour of negative audio (one negative recording can contain several false alerts).
+- Recording level, exact keyword (primary): TP, TN, FP, FN; precision (TP/(TP+FP)), recall (TP/(TP+FN)), specificity (TN/(TN+FP)), F1, false-positive rate (FP/(FP+TN)), false-negative rate (FN/(FN+TP)). A positive counts only when its own keyword fires: "help" detected as "tulong" is an FN.
+- Recording level, any distress (system level): the same metrics for "an alarm was raised", reported alongside, never in place of, the exact-keyword figures.
+- Per keyword: one confusion matrix per keyword; a wrongly predicted keyword is that keyword's FP. Report how many positives fired only a wrong keyword.
+- Event level: false alarm events in total and per keyword (every repeat counted, so the per-keyword counts sum to the total), and events per hour of negative audio (one negative recording can contain several false alerts).
 - Per negative class: recordings, false-positive recordings, false alarm events.
 - Latency: median, p90 and max, from keyword onset when annotated; otherwise labelled "from recording start".
 - Recordings and distinct speakers per class and split.

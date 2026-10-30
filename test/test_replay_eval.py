@@ -193,8 +193,22 @@ def replay(recordings, items, *, kws_dir=KWS_DIR, isolate=True, gap=0.6,
                 lead_in=replay_eval.dither(0.3), isolate=isolate)
     finally:
         restore(previous)
-    rows, lead_in_events = replay_eval.score_rows(items, runs)
+    rows, lead_in_events, _tagged = replay_eval.score_rows(items, runs)
     return rows, lead_in_events, runs, engines
+
+
+def synthetic_runs(durations, events, gap=3.5, lead_in=1.0):
+    """One continuous run with silent recordings and hand-placed alerts.
+
+    events: (recording index, seconds after that recording starts, keyword).
+    """
+    sr = replay_eval.SAMPLE_RATE
+    timeline = replay_eval.Timeline(array("h", bytes(2 * int(lead_in * sr))),
+                                    [array("h", bytes(2 * int(d * sr))) for d in durations], gap)
+    recorder = types.SimpleNamespace(scores=[], events=[
+        {"t": timeline.windows[i][0] + dt, "keyword": k, "confidence": 0.9, "source": "openwakeword"}
+        for i, dt, k in events])
+    return [(timeline, recorder, {"max_lag_s": 0.0, "chunk_s": 0.08})]
 
 
 def item(path, label, keyword="", speaker="sp", onset=None):
@@ -242,7 +256,7 @@ class ReplayHarnessTest(unittest.TestCase):
         self.assertEqual(lead_in_events, [])
 
         summary = replay_eval.summarize(rows, lead_in_events)
-        metrics = summary["recording_level"]
+        metrics = summary["exact_keyword"]
         self.assertEqual((metrics["true_positives"], metrics["true_negatives"],
                           metrics["false_positives"], metrics["false_negatives"]), (1, 1, 0, 0))
         self.assertEqual(metrics["denominators"]["recall"], 1)
@@ -273,26 +287,67 @@ class ReplayHarnessTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "openwakeword"):
             replay([tone(0.2, 10)], [item("negative/silence/a.wav", 0)], preprocessor=Unavailable)
 
-    def test_event_level_counts_every_false_alarm_and_recording_level_counts_once(self):
-        rows = [
-            {"path": "negative/hello/a.wav", "label": 0, "category": "hello", "score": 1.0, "event_count": 3,
-             "expected_detected": 0, "detected_keywords": "help", "latency_from_onset_s": "",
-             "latency_from_recording_start_s": "", "duration_s": 1800.0, "speaker_id": "s1"},
-            {"path": "negative/hi/b.wav", "label": 0, "category": "hi", "score": 0.0, "event_count": 0,
-             "expected_detected": 0, "detected_keywords": "", "latency_from_onset_s": "",
-             "latency_from_recording_start_s": "", "duration_s": 1800.0, "speaker_id": "s2"},
-        ]
-        summary = replay_eval.summarize(rows, [])
-        self.assertEqual(summary["recording_level"]["false_positives"], 1)
-        self.assertEqual(summary["event_level"]["false_alarm_events"], 3)
+    def test_repeated_false_alarms_are_all_counted_per_keyword_and_traceable(self):
+        # Review finding 2: three false 'help' alerts in one negative WAV must count 3 in the
+        # per-keyword breakdown (it used to say 1) and agree with the event total.
+        items = [item("negative/hello/a.wav", 0, speaker="s1"), item("negative/hi/b.wav", 0, speaker="s2")]
+        rows, lead_in, tagged = replay_eval.score_rows(
+            items, synthetic_runs([1800.0, 1800.0],
+                                  [(0, 0.5, "help"), (0, 10.0, "help"), (0, 20.0, "help")]))
+        summary = replay_eval.summarize(rows, lead_in)
+        self.assertEqual(rows[0]["event_keyword_counts"], "help=3")
+        self.assertEqual(summary["exact_keyword"]["false_positives"], 1)  # one recording
+        self.assertEqual(summary["event_level"]["false_alarm_events"], 3)  # three alerts
+        self.assertEqual(summary["event_level"]["false_alarm_events_by_keyword"], {"help": 3})
+        self.assertEqual(sum(summary["event_level"]["false_alarm_events_by_keyword"].values()),
+                         summary["event_level"]["false_alarm_events"])
         self.assertEqual(summary["event_level"]["false_alarm_events_per_hour"], 3.0)  # 3 events / 1 h
         self.assertEqual(summary["negatives_by_category"]["hello"],
                          {"recordings": 1, "false_positive_recordings": 1, "false_alarm_events": 3})
+        # Every exported event names its recording.
+        self.assertEqual([e["path"] for e in tagged], ["negative/hello/a.wav"] * 3)
+        self.assertEqual([e["recording_t"] for e in tagged], [0.5, 10.0, 20.0])
         # No positives: recall-side metrics are not estimable, never 0.
-        self.assertIsNone(summary["recording_level"]["recall"])
-        self.assertIsNone(summary["recording_level"]["false_negative_rate"])
-        self.assertIsNone(summary["expected_keyword_recall"]["value"])
+        self.assertIsNone(summary["exact_keyword"]["recall"])
+        self.assertIsNone(summary["exact_keyword"]["false_negative_rate"])
         self.assertIsNone(summary["latency"]["from_recording_start_s"]["median"])
+
+    def test_wrong_keyword_on_a_positive_is_a_miss_not_a_hit(self):
+        # Review finding 1: a 'help' recording that only fires 'tulong' is an FN for the
+        # exact-keyword metric (and for help), an FP for tulong, and still an alarm at
+        # system level.
+        items = [item("positive/help/a.wav", 1, "help", onset=0.2),
+                 item("positive/tulong/b.wav", 1, "tulong"),
+                 item("negative/hi/c.wav", 0)]
+        rows, lead_in, _ = replay_eval.score_rows(
+            items, synthetic_runs([1.0, 1.0, 1.0], [(0, 0.6, "tulong"), (1, 0.5, "tulong")]))
+        summary = replay_eval.summarize(rows, lead_in)
+        self.assertEqual(rows[0]["score"], 0.0)
+        self.assertEqual(rows[0]["any_distress"], 1)
+        self.assertEqual(rows[0]["wrong_keywords"], "tulong")
+        self.assertEqual(rows[0]["latency_from_onset_s"], "")  # the wrong keyword is not a detection
+        exact = summary["exact_keyword"]
+        self.assertEqual((exact["true_positives"], exact["false_negatives"],
+                          exact["false_positives"], exact["true_negatives"]), (1, 1, 0, 1))
+        any_distress = summary["any_distress"]
+        self.assertEqual((any_distress["true_positives"], any_distress["false_negatives"]), (2, 0))
+        help_metrics, tulong_metrics = summary["per_keyword"]["help"], summary["per_keyword"]["tulong"]
+        self.assertEqual((help_metrics["true_positives"], help_metrics["false_negatives"],
+                          help_metrics["false_positives"], help_metrics["true_negatives"]), (0, 1, 0, 2))
+        self.assertEqual((tulong_metrics["true_positives"], tulong_metrics["false_negatives"],
+                          tulong_metrics["false_positives"], tulong_metrics["true_negatives"]), (1, 0, 1, 1))
+        self.assertEqual(summary["positives_with_wrong_keyword_only"], 1)
+        self.assertEqual(summary["latency"]["from_recording_start_s"]["count"], 1)  # tulong recording only
+
+    def test_extra_keyword_does_not_undo_a_correct_detection(self):
+        items = [item("positive/help/a.wav", 1, "help")]
+        rows, lead_in, _ = replay_eval.score_rows(
+            items, synthetic_runs([1.0], [(0, 0.3, "tulong"), (0, 0.5, "help")]))
+        summary = replay_eval.summarize(rows, lead_in)
+        self.assertEqual(rows[0]["score"], 1.0)
+        self.assertEqual(rows[0]["latency_from_recording_start_s"], 0.5)  # first *help* event
+        self.assertEqual(summary["positives_with_extra_keywords"], 1)
+        self.assertEqual(summary["per_keyword"]["tulong"]["false_positives"], 1)
 
     def test_holdout_is_excluded_from_development_runs(self):
         with tempfile.TemporaryDirectory() as temp:
