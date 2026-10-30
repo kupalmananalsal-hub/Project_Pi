@@ -55,9 +55,7 @@ class _MonitorScreenState extends ConsumerState<MonitorScreen> {
                         thermalSoftAlert: alerts.thermalSoftAlert,
                       ),
                       const SizedBox(height: 18),
-                      _ThermalPanel(
-                        thermal: thermal,
-                      ),
+                      _ThermalPanel(thermal: thermal),
                       const SizedBox(height: 18),
                       _MicrophonePanel(audio: monitor.audioFrame),
                       const SizedBox(height: 26),
@@ -120,9 +118,7 @@ class _DirectionPanel extends StatelessWidget {
 }
 
 class _ThermalPanel extends ConsumerWidget {
-  const _ThermalPanel({
-    required this.thermal,
-  });
+  const _ThermalPanel({required this.thermal});
 
   final ThermalState thermal;
 
@@ -206,7 +202,6 @@ class _MicrophonePanel extends StatelessWidget {
     );
   }
 }
-
 
 class _DistressButton extends ConsumerWidget {
   @override
@@ -813,5 +808,3 @@ class _MicLevelRow extends StatelessWidget {
     );
   }
 }
-
-
