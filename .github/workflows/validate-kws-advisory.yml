@@ -21,6 +21,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/mock-bin"
           printf '#!/bin/sh\\nexit 0\\n' > "$RUNNER_TEMP/mock-bin/systemctl"
-          chmod +x "$RUNNER_TEMP/mock-bin/systemctl"
+          printf '#!/bin/sh\\nexit 0\\n' > "$RUNNER_TEMP/mock-bin/sudo"
+          chmod +x "$RUNNER_TEMP/mock-bin/systemctl" "$RUNNER_TEMP/mock-bin/sudo"
           export PATH="$RUNNER_TEMP/mock-bin:$PATH"
           python -m unittest discover -s test -p 'test_*.py' -v
