@@ -18,10 +18,8 @@ jobs:
         run: flutter pub get
       - name: Analyze affected Dart source and tests
         run: dart analyze lib/screens/monitor_screen.dart lib/screens/history_screen.dart lib/screens/audio_alerts_screen.dart test/monitor_voice_keyword_test.dart
-      - name: Print exact Dart formatting changes
-        run: |
-          dart format lib/screens/monitor_screen.dart lib/screens/history_screen.dart lib/screens/audio_alerts_screen.dart test/monitor_voice_keyword_test.dart
-          git diff -- lib/screens/monitor_screen.dart lib/screens/history_screen.dart lib/screens/audio_alerts_screen.dart test/monitor_voice_keyword_test.dart
+      - name: Check Dart formatting
+        run: dart format --output=none --set-exit-if-changed lib/screens/monitor_screen.dart lib/screens/history_screen.dart lib/screens/audio_alerts_screen.dart test/monitor_voice_keyword_test.dart
       - name: Run Monitor display widget tests
         run: flutter test test/monitor_voice_keyword_test.dart --concurrency=1
       - name: Run all Flutter tests
