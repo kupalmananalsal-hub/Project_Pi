@@ -1,0 +1,21 @@
+name: Validate KWS advisory threshold fix
+on:
+  push:
+    branches: [fix/keyword-advisory-030-validation]
+permissions:
+  contents: read
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install delivery test dependencies
+        run: python -m pip install -r test/requirements-delivery.txt numpy
+      - name: Targeted decision engine regression
+        run: python -m unittest test.test_alert_decision -v
+      - name: Complete Python suite
+        run: python -m unittest discover -s test -p 'test_*.py' -v
