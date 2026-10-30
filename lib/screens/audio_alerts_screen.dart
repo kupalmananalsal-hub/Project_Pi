@@ -95,7 +95,7 @@ class AudioAlertsScreen extends ConsumerWidget {
         if (alerts.history.isEmpty)
           const StatusCard(
             title: 'No alerts yet',
-            value: 'Listening for Help and Tulong',
+            value: 'Listening for distress keywords',
             icon: Icons.hearing_rounded,
           )
         else
@@ -108,7 +108,7 @@ class AudioAlertsScreen extends ConsumerWidget {
                       : Icons.record_voice_over_rounded,
                   color: event.isEmergencyKeyword ? Colors.redAccent : null,
                 ),
-                title: Text(event.displayKeyword),
+                title: Text(event.isKeywordDetection ? 'Keyword Spotted!' : 'Alert recorded'),
                 subtitle: Text(
                   '${_formatTimestamp(event.timestamp)} - '
                   'voice ${event.directionLabel.toLowerCase()} - '
