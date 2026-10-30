@@ -9,8 +9,9 @@ import json
 from pathlib import Path
 
 
-def _safe_divide(numerator: float, denominator: float) -> float:
-    return 0.0 if denominator == 0 else round(numerator / denominator, 6)
+def _safe_divide(numerator: float, denominator: float) -> float | None:
+    # None (JSON null) = not estimable; e.g. recall with no positive samples is unknown, not 0.
+    return None if denominator == 0 else round(numerator / denominator, 6)
 
 
 def compute_binary_metrics(
@@ -34,7 +35,14 @@ def compute_binary_metrics(
 
     precision = _safe_divide(true_positives, true_positives + false_positives)
     recall = _safe_divide(true_positives, true_positives + false_negatives)
-    f1 = _safe_divide(2 * precision * recall, precision + recall)
+    if precision is None or recall is None:
+        f1 = None
+    elif precision + recall == 0:
+        f1 = 0.0  # both defined and zero: the detector found nothing it should have
+    else:
+        f1 = round(2 * precision * recall / (precision + recall), 6)
+    # Recording-level: false-positive recordings per hour of negative audio. A recording
+    # with several false alerts counts once here; event-level rates need event counts.
     false_accepts_per_hour = None
     if negative_hours and negative_hours > 0:
         false_accepts_per_hour = round(false_positives / negative_hours, 6)
@@ -48,7 +56,18 @@ def compute_binary_metrics(
         "precision": precision,
         "recall": recall,
         "f1": f1,
+        "specificity": _safe_divide(true_negatives, true_negatives + false_positives),
+        "false_positive_rate": _safe_divide(false_positives, false_positives + true_negatives),
+        "false_negative_rate": _safe_divide(false_negatives, false_negatives + true_positives),
         "false_accepts_per_hour": false_accepts_per_hour,
+        "denominators": {
+            "precision": true_positives + false_positives,
+            "recall": true_positives + false_negatives,
+            "specificity": true_negatives + false_positives,
+            "false_positive_rate": false_positives + true_negatives,
+            "false_negative_rate": false_negatives + true_positives,
+            "negative_hours": negative_hours,
+        },
         "confusion_matrix": {
             "actual_positive": {
                 "predicted_positive": true_positives,

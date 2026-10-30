@@ -529,12 +529,43 @@ class KeywordDatasetPipelineTest(unittest.TestCase):
         self.assertEqual(metrics["recall"], 0.5)
         self.assertEqual(metrics["f1"], 0.5)
         self.assertEqual(metrics["false_accepts_per_hour"], 2.0)
+        self.assertEqual(metrics["specificity"], 0.5)
+        self.assertEqual(metrics["false_positive_rate"], 0.5)
+        self.assertEqual(metrics["false_negative_rate"], 0.5)
+
+    def test_rate_metrics_use_their_own_denominators(self):
+        evaluator = load_script("evaluate_keyword_models.py")
+        predictions = (
+            [{"label": 1, "score": 1.0}] * 3 + [{"label": 1, "score": 0.0}]
+            + [{"label": 0, "score": 0.0}] * 9 + [{"label": 0, "score": 1.0}]
+        )
+        metrics = evaluator.compute_binary_metrics(predictions, threshold=0.5)
+        self.assertEqual(metrics["specificity"], 0.9)        # TN / (TN + FP) = 9 / 10
+        self.assertEqual(metrics["false_positive_rate"], 0.1)  # FP / (FP + TN)
+        self.assertEqual(metrics["false_negative_rate"], 0.25)  # FN / (FN + TP) = 1 / 4
 
     def test_evaluation_results_are_json_serializable(self):
         evaluator = load_script("evaluate_keyword_models.py")
         metrics = evaluator.compute_binary_metrics([], threshold=0.5)
 
         json.dumps(metrics)
+
+    def test_undefined_metrics_are_null_not_zero(self):
+        evaluator = load_script("evaluate_keyword_models.py")
+        # Negatives only: anything about positives is not estimable.
+        metrics = evaluator.compute_binary_metrics(
+            [{"label": 0, "score": 0.0}, {"label": 0, "score": 0.9}], threshold=0.5)
+        self.assertIsNone(metrics["recall"])
+        self.assertIsNone(metrics["false_negative_rate"])
+        self.assertIsNone(metrics["f1"])
+        self.assertEqual(metrics["precision"], 0.0)  # 0 TP of 1 alert: defined, and zero
+        self.assertEqual(metrics["specificity"], 0.5)
+        self.assertEqual(metrics["denominators"]["recall"], 0)
+        self.assertEqual(metrics["denominators"]["specificity"], 2)
+        # Defined but all wrong: F1 is 0, not null.
+        metrics = evaluator.compute_binary_metrics(
+            [{"label": 1, "score": 0.0}, {"label": 0, "score": 0.9}], threshold=0.5)
+        self.assertEqual(metrics["f1"], 0.0)
 
     def test_dataset_downloaders_reject_archive_traversal(self):
         with tempfile.TemporaryDirectory() as temp_dir:

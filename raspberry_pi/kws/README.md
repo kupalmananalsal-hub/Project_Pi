@@ -273,6 +273,65 @@ Alert: tulong detected by vosk!
 Backend alert posted: tulong
 ```
 
+## Measuring Recognition (Replay Evaluation)
+
+Measure before tuning anything below. `replay_eval.py` runs recorded WAV files
+(16 kHz mono, listed in the dataset's `metadata.csv`) through the unmodified
+`kws_alert_dual.main()` with real engines. No microphone is opened and nothing is
+posted to the backend. It runs in real time; stop `kws-alert` first, or run on
+another Linux machine with the same models, because sharing the CPU with the live
+service distorts both. The full procedure (Pi inspection, recordings, splits,
+reporting) is in [docs/m3_recognition_evidence_protocol.md](../../docs/m3_recognition_evidence_protocol.md).
+
+```bash
+~/kws-env/bin/python raspberry_pi/kws/replay_eval.py \
+  --dataset-dir dataset/audio/keyword_dataset \
+  --env-file ~/kws-effective-YYYYMMDD.env \
+  --onsets dataset/audio/keyword_dataset/onsets.csv \
+  --out-dir build/kws-replay/baseline-dev
+```
+
+- `--env-file` is the running service's effective engine environment (captured in
+  the protocol's Level 1 step). `--unit` reads a unit file's `Environment=` lines
+  only, missing drop-ins and environment files.
+- Each recording runs through its own `main()` by default (`--isolation
+  per-recording`), so cooldowns, pending "help" timers, Vosk partial text and
+  openWakeWord buffers never carry between recordings. `--isolation continuous`
+  models one long listening session instead.
+- The run aborts if any engine in `--require-engines` (default: all three) fails
+  to load, instead of measuring a degraded detector.
+- `--split holdout` reads only `physical_holdout/`; development runs never do.
+- Recordings are mono, so the same audio feeds every channel (direction is always
+  "center").
+
+Outputs:
+- `predictions.csv`: one row per recording, with the exact-keyword score
+  (`score`), whether any alarm fired (`any_distress`), wrongly detected keywords,
+  per-keyword event counts, detected keywords and engines, latency, speaker, and
+  the highest openWakeWord score per model. It also works with
+  `evaluate_keyword_models.py --predictions-dir` (scored exact-keyword).
+- `events.jsonl`: every alert the loop published, tagged with the recording it
+  belongs to (`path`, `recording_t`; `path` is null for lead-in alerts).
+- `summary.json`, covering:
+  - `exact_keyword` (primary): a positive counts as detected only when its own
+    keyword fires, so "help" heard as "tulong" is a miss; TP/TN/FP/FN, precision,
+    recall, specificity, F1, and false-positive and false-negative rates, each
+    with its denominator;
+  - `any_distress`: the same metrics for "some alarm was raised", whichever keyword;
+  - `per_keyword`: one confusion matrix per keyword (a wrongly predicted keyword
+    is that keyword's FP), plus counts of positives with only a wrong keyword and
+    with extra keywords;
+  - event-level false alarms, in total and per keyword (all repeats counted),
+    and per hour of negative audio;
+  - per-class negatives;
+  - latency from keyword onset (needs `--onsets`) and from recording start;
+  - recordings and speakers per class;
+  - which engines loaded;
+  - configuration and model checksums, and the code commit;
+  - `valid_as_evidence`, which is false unless the run used `--speed 1.0` and kept real time.
+
+Undefined metrics are `null` (N/A), never 0.
+
 ## Tuning False Help Alerts
 
 If saying `tulong` sometimes posts `help`, Snowboy is too sensitive for the
