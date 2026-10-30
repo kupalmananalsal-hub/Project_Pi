@@ -32,8 +32,8 @@ Tests ran on the Windows development host. Python integration uses real FastAPI 
 
 | Check | Result |
 | --- | --- |
-| Complete Python suite, including ASGI integration | 199 passed, 9.750 seconds in the recorded run |
-| Complete Flutter suite | 62 passed, 17 seconds in the recorded run |
+| Complete Python suite on Windows, including ASGI integration | 203 discovered: 200 passed, 3 Linux-only permission tests skipped; 11.330 seconds |
+| Complete Flutter suite | 69 passed, 17 seconds in the recorded run |
 | Dart analysis | No issues found |
 | Review recovery/storage regression | Intent crash, confirmation, expiry, failed writes, stale sessions and acknowledgement retry covered |
 | Dart formatting, review correction sources/tests | Checked; 0 pending format changes |
@@ -50,7 +50,7 @@ flutter test --concurrency=1
 dart analyze lib test
 ```
 
-The base Python environment lacks FastAPI/HTTPX; integration tests explicitly skip there. The recorded 199-test run used the provisioned environment and had no skips. The first analyzer run failed on its shared Windows performance-cache directory; the successful run set LOCALAPPDATA to the ignored `build/phase3-local` directory. Initial integration failures exposed cancellation cleanup and test-loader registration issues, both repaired. The widget smoke test now pumps teardown so bounded cleanup timers can finish.
+The base Python environment lacks FastAPI/HTTPX; integration tests explicitly skip there. The latest run used the provisioned environment; its three skips are explicitly Linux-only permission tests, covered separately by the Linux workflow. The first analyzer run failed on its shared Windows performance-cache directory; the successful run set LOCALAPPDATA to the ignored `build/phase3-local` directory. Initial integration failures exposed cancellation cleanup and test-loader registration issues, both repaired. The widget smoke test now pumps teardown so bounded cleanup timers can finish.
 
 ### Reproduced event traces
 
@@ -83,7 +83,7 @@ Pair each phone using **Connection → Pair reliable alert delivery**. Copy its 
 python raspberry_pi/scripts/provision_caregiver.py --installation PHONE_ID --file /secure/path/caregivers.json
 ```
 
-Enter the generated secret on that phone, save, and reconnect. Set `PROJECT_PI_CAREGIVER_CREDENTIALS` to the verifier file path in the backend environment. Restrict the file to the backend account. Remove an installation's verifier to prevent future authentication; disconnect/restart the backend to terminate an already authenticated session. Provisioning refuses to replace an existing verifier implicitly. The app uses the existing local `ws://` connection configuration: credentials are not protected against network interception on an untrusted network. Use a trusted isolated network for development; protected transport deployment remains a release requirement. Unpaired phones remain legacy best-effort clients; no automatic downgrade occurs after a paired version 2 setup failure.
+Enter the generated secret on that phone, save, and reconnect. Set `PROJECT_PI_CAREGIVER_CREDENTIALS` to the verifier file path in the backend environment. Restrict the file to the backend account. Remove an installation's verifier to prevent future authentication; disconnect/restart the backend to terminate an already authenticated session. Provisioning refuses to replace an existing verifier implicitly. The app uses the existing local `ws://` connection configuration: credentials are not protected against network interception on an untrusted network. Use a trusted isolated network for development; protected transport deployment remains a release requirement. Fresh installations may use legacy best-effort delivery. Once any endpoint is paired, an installation-level secure-storage marker requires reliable delivery independently of hostname. Missing credentials for a changed endpoint block connection and show a reconfiguration state. Pre-marker installations migrate by detecting any saved endpoint credential. Re-pair via the existing pairing dialog, or deliberately unpair via the administrator action requiring an existing pairing secret. Interrupted pairing/unpair writes leave the marker enabled; legacy mode is permitted only after all token deletions and the final explicit unpair write succeed. Backend revocation is still a separate administrator operation.
 
 ## Migration and rollback
 
@@ -93,7 +93,7 @@ Before running the new backend on a real database, create a consistent backup:
 python raspberry_pi/scripts/backup_alerts.py /path/alerts.db /path/alerts-before-phase3.db
 ```
 
-The helper uses SQLite's backup API, includes committed WAL contents, checks integrity and refuses to overwrite a destination. Startup migrates in a transaction. Legacy IDs and rows remain intact; unknown historical UUIDs and decision factors are not fabricated. The migration test starts with legacy row ID 8 and confirms the next new sequence is 9.
+The helper uses SQLite's backup API, includes committed WAL contents, checks integrity and refuses to overwrite a destination. On Linux/POSIX, prepare an owner-only backup directory (for example `install -d -m 700 /secure/backup-directory`). The helper rejects a destination directory not owned by the effective user or accessible to group/others, and creates each backup with explicit 0600 permissions even under a permissive umask. It does not silently change directory permissions. Windows operators must restrict destination directory ACLs separately. Startup migrates in a transaction. Legacy IDs and rows remain intact; unknown historical UUIDs and decision factors are not fabricated. The migration test starts with legacy row ID 8 and confirms the next new sequence is 9.
 
 Stop the backend before rollback. The Phase 2 code can read the additive schema, but its new writes lack version 2 UUID/envelope data and cannot participate in durable recovery. To restore the backup instead, explicitly account for all events written since backup; restoring loses those writes. Never delete live WAL/SHM files while a database is open. No automatic database pruning, dataset deletion, model changes, threshold changes or research-data modifications were made.
 
@@ -157,3 +157,31 @@ Compared with the approved Phase 2 baseline; includes the original Phase 3 commi
 - `test/test_backend_alert_smoke.py`
 - `test/test_delivery_integration.py`
 - `test/widget_test.dart`
+
+
+## PR #4 source-review follow-up
+
+Reviewed head: `03f5793da484869dfe163b6c2c7023cf47f13209`. The follow-up preserves replay, classification, model and dataset behavior and corrects all three requested code paths:
+
+1. A hostname/IP change cannot silently downgrade an already paired installation. A durable installation marker and explicit endpoint state block the legacy socket path; the UI offers re-pairing and deliberate administrator-secret-controlled unpairing. This is local possession-of-pairing-secret authorization, not a separate administrator-account system.
+2. Audio initialization retains single-flight behavior while in progress, clears the cached Future on failure before notifying callers, and logs `audio_configuration` failure with the initiating event ID. Concurrent callers share one attempt; the next emergency may retry after a transient failure. A permanently hung native call still has the previously documented OS/plugin limitations.
+3. Backups use exclusive creation with mode 0600 and validate owner-only destination directory access on POSIX. The new Linux workflow checks actual mode/ownership under umask 000, consistent contents, integrity, refusal to overwrite, shared-directory rejection and symlink destination protection.
+
+Local regression results: full Python suite discovered 203 tests (200 passed, three Linux-only permission skips); full Flutter suite passed 69 tests. Additional tests cover the pre-marker paired-host migration, explicit re-pair/unpair, wrong administrator secret, interrupted pairing marker, audio failure then recovery, concurrent audio callers, 20 reconnects without repeating an active alarm, a 10,000-row inbox reload plus injected disk exhaustion, and storage/registry recreation during six live ASGI deliveries. The latter is an in-process backend restart simulation, not an OS process kill or physical-device trial. `ack_presented` remains app overlay-state acceptance, not physical output success, and the intent-before-callback regression remains included.
+
+Linux permission execution is delegated to `.github/workflows/backup-permissions.yml` on Ubuntu because this Windows host has no installed WSL distribution. CI results must be reported separately from Windows skips. Physical Raspberry Pi/Android results remain **NOT RUN**. Large-inbox coverage is a correctness stress test, not a mobile performance or storage-retention certification.
+
+Exact follow-up file set:
+
+- `.github/workflows/backup-permissions.yml`
+- `docs/phase3_implementation_report.md`
+- `lib/providers/alerts_provider.dart`
+- `lib/screens/connection_status_screen.dart`
+- `lib/services/alert_delivery_service.dart`
+- `lib/services/alert_runtime_service.dart`
+- `raspberry_pi/scripts/backup_alerts.py`
+- `test/alert_pairing_test.dart`
+- `test/alert_recovery_failure_test.dart`
+- `test/alert_runtime_execution_test.dart`
+- `test/test_backup_permissions.py`
+- `test/test_delivery_integration.py`

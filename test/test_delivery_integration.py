@@ -189,3 +189,19 @@ class DeliveryIntegrationTest(unittest.TestCase):
             self.hello(ws, 'phone-a'); ws.receive_json(); ws.receive_json()
             ws.send_json(dict(protocol_version=2, type='ack_received', event_id=event['event_id'], sequence=event['sequence']))
             self.assertEqual(ws.receive_json()['type'], 'ack_committed')
+
+    def test_storage_and_registry_restart_while_live_session_receives_traffic(self):
+        with self.client.websocket_connect('/ws/alerts?protocol=2') as ws:
+            self.hello(ws, 'phone-a'); ws.receive_json()
+            for i in range(6):
+                if i == 3:
+                    self.module.alert_store = self.module.AlertStore(self.module.alert_store.path)
+                    self.module.alert_idempotency = self.module.AlertIdempotencyRegistry(ttl_seconds=60, max_entries=100)
+                event = self.post(f'active-restart-{i}')['event']
+                received = ws.receive_json()
+                self.assertEqual(received['event_id'], event['event_id'])
+                self.assertEqual(received['sequence'], i + 1)
+                ws.receive_json()
+                ws.send_json(dict(protocol_version=2, type='ack_received', event_id=event['event_id'], sequence=event['sequence']))
+                self.assertEqual(ws.receive_json()['type'], 'ack_committed')
+            self.assertTrue(self.post('active-restart-0')['duplicate_event'])
