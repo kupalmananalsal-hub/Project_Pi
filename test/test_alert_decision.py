@@ -26,8 +26,9 @@ class AlertDecisionEngineTest(unittest.TestCase):
         self.clock = FakeClock()
         self.policy = AlertPolicy(
             policy_version="test-policy",
-            advisory_threshold=0.70,
+            advisory_threshold=0.30,
             critical_threshold=0.85,
+            repeat_escalation_floor=0.70,
             thermal_freshness_seconds=1.25,
             repeat_window_seconds=5.0,
             repeat_required_count=2,
@@ -98,12 +99,53 @@ class AlertDecisionEngineTest(unittest.TestCase):
         self.assertFalse(result["should_alert"])
         self.assertEqual(result["thermal_state"], "unavailable")
 
-    def test_medium_voice_positive_thermal_is_confirmed(self):
+
+    def test_spoken_tulong_score_035_is_visual_advisory_even_with_poor_snr(self):
+        result = self.evaluate(0.35, None, keyword="tulong", snr_db=0.0)
+        self.assert_decision(
+            result, "advisory", "thermal_unavailable", "voice_only", "visual_only"
+        )
+        self.assertTrue(result["should_alert"])
+        self.assertEqual(result["keyword_confidence"], 0.35)
+        self.assertEqual(result["final_confidence"], 0.25)
+
+    def test_below_notice_floor_remains_suppressed_with_positive_thermal(self):
+        result = self.evaluate(0.29, self.positive_thermal())
+        self.assert_decision(
+            result, "suppressed", "voice_below_threshold", "voice_only", "none"
+        )
+        self.assertFalse(result["should_alert"])
+
+    def test_low_confidence_notice_does_not_escalate_on_repeated_hits(self):
+        first = self.evaluate(0.35, self.negative_thermal(), keyword="tulong")
+        self.clock.advance(1)
+        second = self.evaluate(0.36, self.negative_thermal(), keyword="tulong")
+        self.assertEqual(first["decision_state"], "advisory")
+        self.assertEqual(second["decision_state"], "advisory")
+        self.assertEqual(second["decision_factors"]["repeat_count"], 0)
+
+    def test_low_confidence_thermal_positive_escalates_to_critical(self):
+        result = self.evaluate(0.35, self.positive_thermal(), keyword="tulong")
+        self.assert_decision(
+            result, "critical", "voice_confirmed_by_thermal",
+            "voice_thermal", "full_alert"
+        )
+
+    def test_low_confidence_stale_thermal_only_notifies(self):
+        result = self.evaluate(
+            0.35, self.positive_thermal(frame_age_seconds=2.0),
+            keyword="tulong",
+        )
+        self.assert_decision(
+            result, "advisory", "thermal_stale", "voice_only", "visual_only"
+        )
+
+    def test_medium_voice_positive_thermal_is_critical(self):
         result = self.evaluate(0.75, self.positive_thermal())
 
         self.assert_decision(
             result,
-            "confirmed",
+            "critical",
             "voice_confirmed_by_thermal",
             "voice_thermal",
             "full_alert",
@@ -192,17 +234,17 @@ class AlertDecisionEngineTest(unittest.TestCase):
         self.assertEqual(result["decision_factors"]["adjusted_voice_confidence"], 0.75)
         self.assertEqual(result["final_confidence"], 0.75)
 
-    def test_medium_voice_poor_snr_without_thermal_is_suppressed(self):
+    def test_medium_voice_poor_snr_without_thermal_still_notifies(self):
         result = self.evaluate(0.75, self.negative_thermal(), snr_db=0.0)
 
         self.assert_decision(
             result,
-            "suppressed",
-            "adjusted_voice_below_threshold",
+            "advisory",
+            "thermal_negative",
             "voice_only",
-            "none",
+            "visual_only",
         )
-        self.assertFalse(result["should_alert"])
+        self.assertTrue(result["should_alert"])
         self.assertEqual(result["decision_factors"]["adjusted_voice_confidence"], 0.65)
         self.assertEqual(result["final_confidence"], 0.65)
 
@@ -211,7 +253,7 @@ class AlertDecisionEngineTest(unittest.TestCase):
 
         self.assert_decision(
             result,
-            "confirmed",
+            "critical",
             "voice_confirmed_by_thermal",
             "voice_thermal",
             "full_alert",
@@ -220,7 +262,7 @@ class AlertDecisionEngineTest(unittest.TestCase):
         self.assertEqual(result["decision_factors"]["applied_thermal_boost"], 0.15)
         self.assertEqual(result["final_confidence"], 0.80)
 
-    def test_medium_voice_very_poor_snr_insufficient_thermal_is_suppressed(self):
+    def test_positive_thermal_overrides_noisy_midrange_score(self):
         result = self.evaluate(
             0.70,
             self.positive_thermal(confidence_boost=0.05),
@@ -229,22 +271,22 @@ class AlertDecisionEngineTest(unittest.TestCase):
 
         self.assert_decision(
             result,
-            "suppressed",
-            "adjusted_voice_below_threshold",
-            "voice_only",
-            "none",
+            "critical",
+            "voice_confirmed_by_thermal",
+            "voice_thermal",
+            "full_alert",
         )
         self.assertEqual(result["final_confidence"], 0.65)
 
-    def test_weak_voice_cannot_be_confirmed_by_positive_thermal_alone(self):
+    def test_weak_but_valid_voice_with_positive_thermal_escalates(self):
         result = self.evaluate(0.60, self.positive_thermal(), snr_db=25.0)
 
         self.assert_decision(
             result,
-            "suppressed",
-            "voice_below_threshold",
-            "voice_only",
-            "none",
+            "critical",
+            "voice_confirmed_by_thermal",
+            "voice_thermal",
+            "full_alert",
         )
         self.assertEqual(result["final_confidence"], 0.75)
 
@@ -253,7 +295,7 @@ class AlertDecisionEngineTest(unittest.TestCase):
         self.clock.advance(2.0)
         second = self.evaluate(0.76, self.negative_thermal(), snr_db=0.0)
 
-        self.assertEqual(first["decision_state"], "suppressed")
+        self.assertEqual(first["decision_state"], "advisory")
         self.assert_decision(
             second,
             "critical",
@@ -336,7 +378,7 @@ class AlertDecisionEngineTest(unittest.TestCase):
         self.assertEqual(second["decision_factors"]["repeat_count"], 1)
 
     def test_exact_advisory_threshold(self):
-        result = self.evaluate(0.70, self.negative_thermal())
+        result = self.evaluate(0.30, self.negative_thermal())
 
         self.assert_decision(
             result,
@@ -537,7 +579,7 @@ class AlertDecisionEngineTest(unittest.TestCase):
 
         self.assert_decision(
             result,
-            "confirmed",
+            "critical",
             "voice_confirmed_by_thermal",
             "voice_thermal",
             "full_alert",
@@ -563,10 +605,11 @@ class AlertDecisionEngineTest(unittest.TestCase):
         policy = AlertPolicy.load(policy_path)
 
         self.assertEqual(policy.policy_source, "file")
-        self.assertEqual(policy.policy_version, "phase1.2.2026-08-20")
-        self.assertEqual(policy.advisory_threshold, 0.70)
+        self.assertEqual(policy.policy_version, "phase1.3.2026-10-30")
+        self.assertEqual(policy.advisory_threshold, 0.30)
         self.assertEqual(policy.critical_threshold, 0.85)
         self.assertEqual(policy.thermal_freshness_seconds, 1.25)
+        self.assertEqual(policy.repeat_escalation_floor, 0.70)
         self.assertEqual(policy.repeat_window_seconds, 10.0)
         self.assertEqual(policy.repeat_required_count, 2)
         self.assertTrue(policy.repeat_escalates_to_critical)
@@ -578,13 +621,14 @@ class AlertDecisionEngineTest(unittest.TestCase):
             policy = AlertPolicy.load(Path(temp_dir) / "missing.yaml")
 
         self.assertEqual(policy.policy_source, "safe_defaults")
-        self.assertEqual(policy.policy_version, "phase1.2.safe_defaults")
+        self.assertEqual(policy.policy_version, "phase1.3.notice_threshold")
 
     def test_invalid_policy_files_fall_back_as_a_complete_unit(self):
         base = {
             "policy_version": "test-policy",
-            "advisory_threshold": "0.70",
+            "advisory_threshold": "0.30",
             "critical_threshold": "0.85",
+            "repeat_escalation_floor": "0.70",
             "thermal_freshness_seconds": "1.25",
             "repeat_window_seconds": "10.0",
             "repeat_required_count": "2",
@@ -645,8 +689,8 @@ class AlertDecisionEngineTest(unittest.TestCase):
                     policy = AlertPolicy.load(path)
 
                     self.assertEqual(policy.policy_source, "safe_defaults")
-                    self.assertEqual(policy.policy_version, "phase1.2.safe_defaults")
-                    self.assertEqual(policy.advisory_threshold, 0.70)
+                    self.assertEqual(policy.policy_version, "phase1.3.notice_threshold")
+                    self.assertEqual(policy.advisory_threshold, 0.30)
                     self.assertEqual(policy.critical_threshold, 0.85)
 
     @staticmethod

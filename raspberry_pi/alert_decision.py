@@ -41,9 +41,10 @@ DEFAULT_POLICY_PATH = (
 
 @dataclass(frozen=True)
 class AlertPolicy:
-    policy_version: str = "phase1.2.safe_defaults"
-    advisory_threshold: float = 0.70
+    policy_version: str = "phase1.3.notice_threshold"
+    advisory_threshold: float = 0.30
     critical_threshold: float = 0.85
+    repeat_escalation_floor: float = 0.70
     thermal_freshness_seconds: float = 1.25
     repeat_window_seconds: float = 10.0
     repeat_required_count: int = 2
@@ -145,6 +146,8 @@ class AlertPolicy:
                 "thresholds must satisfy "
                 "0.0 <= advisory_threshold < critical_threshold <= 1.0"
             )
+        if not self.advisory_threshold <= self.repeat_escalation_floor < self.critical_threshold:
+            raise ValueError("repeat_escalation_floor must be between advisory and critical thresholds")
         if self.thermal_freshness_seconds <= 0:
             raise ValueError("thermal_freshness_seconds must be positive")
         if self.repeat_window_seconds <= 0:
@@ -252,7 +255,7 @@ class AlertDecisionEngine:
 
         repeat_count = 0
         is_medium_voice = (
-            self.policy.advisory_threshold
+            self.policy.repeat_escalation_floor
             <= raw_voice_confidence
             < self.policy.critical_threshold
         )
@@ -266,7 +269,6 @@ class AlertDecisionEngine:
             thermal=thermal,
             repeat_count=repeat_count,
             raw_voice_confidence=raw_voice_confidence,
-            final_confidence=final_confidence,
         )
         alert_level = self._legacy_alert_level(state)
         should_alert = state in {
@@ -364,7 +366,6 @@ class AlertDecisionEngine:
         thermal: ThermalEvidence,
         repeat_count: int,
         raw_voice_confidence: float,
-        final_confidence: float,
     ) -> tuple[DecisionState, AlertModality, str]:
         if str(keyword_event.get("event", "")).strip().lower() == "system_fault":
             return (
@@ -420,16 +421,12 @@ class AlertDecisionEngine:
                 "repeated_distress_escalation",
             )
 
-        if final_confidence < self.policy.advisory_threshold:
-            return (
-                DecisionState.SUPPRESSED,
-                AlertModality.VOICE_ONLY,
-                "adjusted_voice_below_threshold",
-            )
-
+        # Scores at the KWS notice floor remain visual advisory events even
+        # when their SNR-adjusted score is lower; retain SNR in decision_factors.
+        # Only validated, fresh thermal positives escalate these to emergency.
         if thermal_positive:
             return (
-                DecisionState.CONFIRMED,
+                DecisionState.CRITICAL,
                 AlertModality.VOICE_THERMAL,
                 "voice_confirmed_by_thermal",
             )

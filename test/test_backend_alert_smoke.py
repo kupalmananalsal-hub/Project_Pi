@@ -484,6 +484,32 @@ class BackendAlertSmokeTest(unittest.TestCase):
             finally:
                 self.cleanup_backend(module, previous)
 
+    def test_low_confidence_tulong_is_published_as_advisory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_backend_module(temp_dir)
+            try:
+                self.prepare_backend(module)
+                module.alerts = FakeAlertHub()
+                module.audio.latest = {"direction": "front", "snr_db": 0.0}
+                module.thermal = FakeThermal(
+                    module, {"thermal_state": "negative",
+                             "human_detected": False, "confidence_boost": 0.0,
+                             "temperatures": [24.0] * 768},
+                )
+                response = self.run_alert(
+                    module, {"event_id": "tulong-notice-035", "keyword": "tulong",
+                             "confidence": 0.35, "source": "openwakeword",
+                             "snr_db": 0.0},
+                )
+                event = response["event"]
+                self.assertEqual(event["decision_state"], "advisory")
+                self.assertEqual(event["alert_level"], "visual_only")
+                self.assertTrue(event["should_alert"])
+                self.assertEqual(event["event_id"], "tulong-notice-035")
+                self.assertEqual(module.alerts.published[-1]["decision_state"], "advisory")
+            finally:
+                self.cleanup_backend(module, previous)
+
     def test_thermal_read_failure_without_payload_is_unavailable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module, previous = load_backend_module(temp_dir)
@@ -625,12 +651,12 @@ class BackendAlertSmokeTest(unittest.TestCase):
                 first = self.run_alert(module, payload)
                 second = self.run_alert(module, payload)
 
-                self.assertEqual(first["event"]["decision_state"], "suppressed")
-                self.assertEqual(second["event"]["decision_state"], "suppressed")
+                self.assertEqual(first["event"]["decision_state"], "advisory")
+                self.assertEqual(second["event"]["decision_state"], "advisory")
                 self.assertTrue(second["duplicate_event"])
                 self.assertEqual(
                     first["event"]["decision_reason"],
-                    "adjusted_voice_below_threshold",
+                    "thermal_negative",
                 )
                 self.assertEqual(
                     len(module.decision_engine.repeat_history["help"]),
