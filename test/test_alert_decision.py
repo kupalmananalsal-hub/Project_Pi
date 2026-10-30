@@ -579,7 +579,7 @@ class AlertDecisionEngineTest(unittest.TestCase):
 
         self.assert_decision(
             result,
-            "confirmed",
+            "critical",
             "voice_confirmed_by_thermal",
             "voice_thermal",
             "full_alert",
