@@ -1,0 +1,385 @@
+[
+  {
+    "requested": "claudius-ars/embedded-agent-skills",
+    "url": "https://github.com/claudius-ars/embedded-agent-skills",
+    "canonical": "claudius-ars/embedded-agent-skills",
+    "sha": "51039fe6400b91e792ff723879a68134ceac75ff",
+    "license": "MIT",
+    "archived": false,
+    "pushed_at": "2026-02-08T07:09:19Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.md",
+      "embedded-agent-skills/gpio-config/SKILL.md"
+    ]
+  },
+  {
+    "requested": "tomekness/agent-ssh-access",
+    "url": "https://github.com/tomekness/agent-ssh-access",
+    "canonical": "tomekness/agent-ssh-access",
+    "sha": "bbf6ab3f9777f31db098fede67fde29a5ac3967c",
+    "license": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-10T17:03:08Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.md",
+      "package.json",
+      "install.js",
+      "server_setup/01_install.sh",
+      "SKILL.md",
+      "client/mount_sshfs.sh"
+    ]
+  },
+  {
+    "requested": "Ormus-Solutions/LibreEmbed-Claude-Code",
+    "url": "https://github.com/Ormus-Solutions/LibreEmbed-Claude-Code",
+    "canonical": "Ormus-Solutions/LibreEmbed-Claude-Code",
+    "sha": "b3840586de7181db1cfb04214f8fbdb49a63ab09",
+    "license": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-09T22:19:32Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.md",
+      "README.zh-CN.md",
+      ".claude-plugin/marketplace.json",
+      "plugins/embedded-linux/skills/embedded-linux-patterns/SKILL.md",
+      "plugins/communication-buses/skills/communication-buses/SKILL.md",
+      "plugins/libre-embed-hooks/hooks/hooks.json",
+      "plugins/libre-embed-hooks/hooks/session-start.sh"
+    ]
+  },
+  {
+    "requested": "kuochenfu/ai-hil-mcp",
+    "url": "https://github.com/kuochenfu/ai-hil-mcp",
+    "canonical": "kuochenfu/ai-hil-mcp",
+    "sha": "6f1cdfbb94e40ff37680ecb56ffc8757b5e9cdfe",
+    "license": "MIT",
+    "archived": false,
+    "pushed_at": "2026-08-07T22:35:16Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.md",
+      ".mcp.json",
+      "serial-mcp-rs/src/main.rs",
+      "build-flash-mcp-rs/src/main.rs",
+      "audio-mcp-rs/Cargo.toml"
+    ]
+  },
+  {
+    "requested": "alphaonedev/raspberry-pi",
+    "url": "https://github.com/alphaonedev/raspberry-pi",
+    "canonical": null,
+    "sha": null,
+    "license": "UNKNOWN",
+    "archived": false,
+    "pushed_at": null,
+    "status": "BLOCKED_UNVERIFIED",
+    "error": "Public GitHub API returned 404; may be private, moved or absent",
+    "files": []
+  },
+  {
+    "requested": "zhinkgit/embeddedskills",
+    "url": "https://github.com/zhinkgit/embeddedskills",
+    "canonical": "zhinkgit/embeddedskills",
+    "sha": "0e2fb630e1106cd2868abd250c45a159d1e29ba8",
+    "license": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-20T02:23:22Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.en.md",
+      "README.md",
+      "ssh/SKILL.md",
+      "ssh/scripts/ssh_exec.py",
+      "ssh/scripts/ssh_config.py",
+      "workflow/SKILL.md",
+      "serial/SKILL.md"
+    ]
+  },
+  {
+    "requested": "ChrisCompton/omniroute",
+    "url": "https://github.com/ChrisCompton/omniroute",
+    "canonical": "ChrisCompton/omniroute",
+    "sha": "515674b6cf7cc29b3db027c9119e9b2ef12e0ba7",
+    "license": "MIT",
+    "archived": false,
+    "pushed_at": "2026-04-11T12:44:48Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.md",
+      "package.json",
+      "bin/mcp-server.mjs",
+      "docs/MCP-SERVER.md"
+    ]
+  },
+  {
+    "requested": "thedotmack/claude-mem",
+    "url": "https://github.com/thedotmack/claude-mem",
+    "canonical": "thedotmack/claude-mem",
+    "sha": "325afb60108d4ab04e24d715f244bd591ca33fbe",
+    "license": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-10-30T03:07:33Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.md",
+      "package.json",
+      "plugin/hooks/hooks.json",
+      "plugin/.claude-plugin/plugin.json",
+      "docs/adr/2026-10-12-tool-hook-early-environment-optout.md"
+    ]
+  },
+  {
+    "requested": "headroomlabs-ai/headroom",
+    "url": "https://github.com/headroomlabs-ai/headroom",
+    "canonical": "headroomlabs-ai/headroom",
+    "sha": "1fe8549f9ca77a2bc1280e4319980e0b9b31f5b9",
+    "license": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-10-30T01:33:37Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.md",
+      "pyproject.toml",
+      "headroom/cli/install.py",
+      "headroom/cli/mcp.py",
+      "docs/content/docs/agent-hooks.mdx",
+      "docs/content/docs/mcp.mdx"
+    ]
+  },
+  {
+    "requested": "anthropics/claude-plugins-official",
+    "url": "https://github.com/anthropics/claude-plugins-official",
+    "canonical": "anthropics/claude-plugins-official",
+    "sha": "f8c5e7a1dcb71b10cb74586224b5401f3de5db28",
+    "license": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-10-30T06:00:23Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.md",
+      "plugins/claude-code-setup/README.md",
+      "plugins/claude-code-setup/LICENSE",
+      "plugins/claude-code-setup/skills/claude-automation-recommender/SKILL.md"
+    ]
+  },
+  {
+    "requested": "rebelytics/one-skill-to-rule-them-all",
+    "url": "https://github.com/rebelytics/one-skill-to-rule-them-all",
+    "canonical": "rebelytics/one-skill-to-rule-them-all",
+    "sha": "ba696b2c2673be959dcd4a1dbdbc92085df8b41a",
+    "license": "CC-BY-4.0",
+    "archived": false,
+    "pushed_at": "2026-10-28T14:57:56Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.md",
+      "SKILL.md",
+      ".claude-plugin/marketplace.json"
+    ]
+  },
+  {
+    "requested": "obra/superpowers",
+    "url": "https://github.com/obra/superpowers",
+    "canonical": "obra/superpowers",
+    "sha": "2ce8aa15d05bd57213e6f746f953aafb7ded7a8b",
+    "license": "MIT",
+    "archived": false,
+    "pushed_at": "2026-10-29T23:35:34Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.md",
+      "package.json",
+      ".agents/plugins/marketplace.json",
+      ".claude-plugin/marketplace.json",
+      "hooks/hooks.json",
+      "hooks/session-start",
+      "skills/systematic-debugging/SKILL.md",
+      "skills/verification-before-completion/SKILL.md"
+    ]
+  },
+  {
+    "requested": "respeaker/mic_hat",
+    "url": "https://github.com/respeaker/mic_hat",
+    "canonical": "respeaker/mic_hat",
+    "sha": "fca6d595f4c84f545058ea1c3e9367e10f6fbce4",
+    "license": "GPL-2.0",
+    "archived": false,
+    "pushed_at": "2023-04-26T01:42:39Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.md",
+      "requirements.txt"
+    ]
+  },
+  {
+    "requested": "best-007/Solution-for-ReSpeaker-2-Mics-Pi-HAT-V2.0-Driver-Installation-Issues",
+    "url": "https://github.com/best-007/Solution-for-ReSpeaker-2-Mics-Pi-HAT-V2.0-Driver-Installation-Issues",
+    "canonical": "best-007/Solution-for-ReSpeaker-2-Mics-Pi-HAT-V2.0-Driver-Installation-Issues",
+    "sha": "6796afd4d7f62e3973d5db49de082d4036433788",
+    "license": "UNKNOWN",
+    "archived": false,
+    "pushed_at": "2025-08-04T10:04:47Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "README.md",
+      "README_en.md"
+    ]
+  },
+  {
+    "requested": "dscripka/openWakeWord",
+    "url": "https://github.com/dscripka/openWakeWord",
+    "canonical": "dscripka/openWakeWord",
+    "sha": "368c03716d1e92591906a84949bc477f3a834455",
+    "license": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2025-12-30T16:47:27Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.md",
+      "pyproject.toml",
+      "openwakeword/model.py"
+    ]
+  },
+  {
+    "requested": "DisruptionEngineer/build-useful-skills",
+    "url": "https://github.com/DisruptionEngineer/build-useful-skills",
+    "canonical": null,
+    "sha": null,
+    "license": "UNKNOWN",
+    "archived": false,
+    "pushed_at": null,
+    "status": "BLOCKED_UNVERIFIED",
+    "error": "Public GitHub API returned 404; may be private, moved or absent",
+    "files": []
+  },
+  {
+    "requested": "alphacep/vosk-api",
+    "url": "https://github.com/alphacep/vosk-api",
+    "canonical": "alphacep/vosk-api",
+    "sha": "4ab9821510b488efb7740094714a130bd3545e90",
+    "license": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2026-10-15T08:36:44Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "README.md",
+      "COPYING",
+      "python/example/test_microphone.py",
+      "python/setup.py"
+    ]
+  },
+  {
+    "requested": "m15-ai/Local-Voice",
+    "url": "https://github.com/m15-ai/Local-Voice",
+    "canonical": "m15-ai/Local-Voice",
+    "sha": "e70dbf5f867bea765e3af8747f34b4e33fe706a4",
+    "license": "MIT",
+    "archived": false,
+    "pushed_at": "2025-05-13T23:52:35Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.md",
+      "requirements.txt"
+    ]
+  },
+  {
+    "requested": "adafruit/Adafruit_CircuitPython_MLX90640",
+    "url": "https://github.com/adafruit/Adafruit_CircuitPython_MLX90640",
+    "canonical": "adafruit/Adafruit_CircuitPython_MLX90640",
+    "sha": "6a537df6af2fce6ad301e2022a7084da9b25af19",
+    "license": "MIT",
+    "archived": false,
+    "pushed_at": "2026-04-23T21:01:14Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.rst",
+      "README.rst.license",
+      "pyproject.toml",
+      "requirements.txt",
+      "adafruit_mlx90640.py",
+      "examples/mlx90640_simpletest.py"
+    ]
+  },
+  {
+    "requested": "obstruse/ThermalCamera",
+    "url": "https://github.com/obstruse/ThermalCamera",
+    "canonical": "obstruse/ThermalCamera",
+    "sha": "5c881161ec33328d725db343c881dd73707e5aed",
+    "license": "Apache-2.0",
+    "archived": false,
+    "pushed_at": "2025-09-22T15:31:00Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.md",
+      "install/installThermalCamera.sh"
+    ]
+  },
+  {
+    "requested": "Ballistyxx/thermal-camera",
+    "url": "https://github.com/Ballistyxx/thermal-camera",
+    "canonical": "Ballistyxx/thermal-camera",
+    "sha": "03fbe3cee51bd90bfe98ef81780a2320bd4b3317",
+    "license": "AGPL-3.0",
+    "archived": false,
+    "pushed_at": "2026-05-18T13:45:06Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "LICENSE",
+      "README.md"
+    ]
+  },
+  {
+    "requested": "labirthermal/lrc-skill",
+    "url": "https://github.com/labirthermal/lrc-skill",
+    "canonical": "labirthermal/lrc-skill",
+    "sha": "6ed002cc9b3d3c43452cadcf526414e2145b53ee",
+    "license": "UNKNOWN",
+    "archived": false,
+    "pushed_at": "2026-10-23T12:26:27Z",
+    "status": "REFERENCE_ONLY",
+    "error": null,
+    "files": [
+      "README.md",
+      "skills/lrc-thermo/SKILL.md",
+      "skills/lrc-thermo/requirements.txt"
+    ]
+  }
+]
