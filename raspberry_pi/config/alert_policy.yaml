@@ -1,6 +1,9 @@
-policy_version: phase1.2.2026-08-20
-advisory_threshold: 0.70
+policy_version: phase1.3.2026-10-30
+# Soft notice floor (inclusive); KWS may detect below it.
+advisory_threshold: 0.30
 critical_threshold: 0.85
+# Repeated low-confidence notices must not trigger a siren.
+repeat_escalation_floor: 0.70
 thermal_freshness_seconds: 1.25
 # KWS cooldown suppresses duplicate detections from one utterance before POST.
 # Backend repeat tracking escalates multiple unique event_id values per phrase.
