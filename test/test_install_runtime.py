@@ -6,7 +6,9 @@ files so stop/mask/enable are observable. Linux-compatible; also runs under Git 
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -94,6 +96,24 @@ class InstallerRuntimeTest(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-qm", "the upgrade")
         self.after_sha = self.git("rev-parse", "HEAD")
+        # The Pi's untracked production database, backed up at the old commit (step 0).
+        (self.repo / "raspberry_pi" / "backend").mkdir()
+        db = sqlite3.connect(self.repo / "raspberry_pi" / "backend" / "alerts.db")
+        db.execute("CREATE TABLE alerts (id INTEGER PRIMARY KEY)")
+        db.commit()
+        db.close()
+        manifest = base / "protected_assets.txt"
+        manifest.write_text("raspberry_pi/backend/alerts.db\n", encoding="utf-8", newline="\n")
+        self.preupgrade = base / "preupgrade-backup"
+        self.git("checkout", "-q", self.before_sha)
+        backup = subprocess.run(
+            [shutil.which("bash"), (PROJECT_ROOT / "raspberry_pi/scripts/preupgrade_backup.sh").as_posix(),
+             f"--repo={self.repo.as_posix()}", f"--manifest={manifest.as_posix()}",
+             f"--backup-dir={self.preupgrade.as_posix()}"],
+            env=dict(os.environ, PYTHON=Path(sys.executable).as_posix()),
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(backup.returncode, 0, backup.stdout + backup.stderr)
+        self.git("checkout", "-q", "-")
 
     def git(self, *args):
         return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
@@ -129,17 +149,21 @@ class InstallerRuntimeTest(unittest.TestCase):
         return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
 
     def run_installer(self, *args, fail=None, noop=None, rollback_commit="before",
-                      api_auth="required"):
+                      api_auth="required", backup="preupgrade"):
         if "--apply" in args and rollback_commit:
             sha = self.before_sha if rollback_commit == "before" else rollback_commit
             args = (*args, f"--rollback-commit={sha}")
         if "--apply" in args and api_auth:
             args = (*args, f"--api-auth={api_auth}")
+        if "--apply" in args and backup:
+            path = self.preupgrade if backup == "preupgrade" else backup
+            args = (*args, f"--backup-dir={Path(path).as_posix()}")
         env = dict(os.environ,
                    PATH=f"{self.stubs.as_posix()}{os.pathsep}{os.environ.get('PATH', '')}",
                    PROJECT_PI_INSTALL_ROOT=self.root.as_posix(),
                    PROJECT_PI_REPO=self.repo.as_posix(),
-                   STUB_STATE=self.state.as_posix())
+                   STUB_STATE=self.state.as_posix(),
+                   PYTHON=Path(sys.executable).as_posix())
         env.pop("STUB_FAIL", None)
         env.pop("STUB_NOOP", None)
         if fail:
@@ -344,13 +368,38 @@ class InstallerRuntimeTest(unittest.TestCase):
         self.assertIn("kws-alert-vosk.service", self.state_of("masked"))
         self.assertFalse(any(c.split()[0] in {"mask", "unmask"} for c in self.calls()))
 
-    def test_rollback_never_touches_the_checkout_or_local_edits(self):
+    def test_local_edits_block_apply_and_are_never_touched(self):
         self.legacy_pi()
         (self.repo / "VERSION").write_text("edited on the Pi\n", encoding="utf-8")
-        result = self.run_installer("--apply", fail="enable project-pi-boot")
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        result = self.run_installer("--apply")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("tracked files have local edits", result.stdout)
         self.assertEqual((self.repo / "VERSION").read_text(encoding="utf-8"), "edited on the Pi\n")
-        self.assert_code_untouched_and_reported(result)
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.after_sha)
+        self.assertEqual(self.calls(), [])
+
+    def test_apply_runs_the_preupgrade_gate_itself(self):
+        legacy_files = None
+        for kwargs, reason in (
+                ({"backup": None}, "needs --backup-dir"),
+                ({"backup": self.state / "no-such-backup"}, "not a complete backup"),
+                ({"rollback_commit": self.after_sha}, "the backup was made at")):
+            result = self.run_installer("--apply", **kwargs)
+            self.assertEqual(result.returncode, 2, (kwargs, result.stdout + result.stderr))
+            self.assertIn(reason, result.stdout)
+            self.assertIn("Refusing --apply: the pre-upgrade gate did not pass", result.stderr)
+            self.assertEqual(self.files(), [])
+            self.assertEqual(self.calls(), [])
+        # A backup that no longer verifies (protected file changed after it was made).
+        (self.preupgrade / "raspberry_pi/backend/alerts.db").write_bytes(b"not a database")
+        result = self.run_installer("--apply")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("changed since", result.stdout)
+        self.assertEqual(self.files(), legacy_files or [])
+        # The dry run reports the gate without refusing.
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("GATE       --apply needs --backup-dir", result.stdout)
 
     def test_failed_restoration_is_reported_as_incomplete(self):
         self.legacy_pi()

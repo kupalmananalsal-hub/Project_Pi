@@ -97,8 +97,11 @@ class InstallHeadlessTest(unittest.TestCase):
 
     def test_installer_never_changes_the_git_checkout(self):
         # Code rollback is a separate, authorized step; the installer only reads git.
-        git_calls = re.findall(r"repo_git\s+(\S+)|\bgit\s+(?:-C\s+\S+\s+)?(\S+)", self.code)
-        subcommands = {a or b for a, b in git_calls}
+        # Message text (echo lines and their quoted continuations) is not a command.
+        commands = "\n".join(line for line in self.code.splitlines()
+                             if not line.lstrip().startswith(("echo ", '"', "#")))
+        git_calls = re.findall(r"repo_git\s+(\S+)|\bgit\s+(?:-C\s+\S+\s+)?(\S+)", commands)
+        subcommands = {(a or b).rstrip(";") for a, b in git_calls}
         self.assertTrue(subcommands)
         self.assertLessEqual(subcommands, {"rev-parse", '"$@"'}, subcommands)
 

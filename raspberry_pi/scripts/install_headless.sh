@@ -16,6 +16,9 @@
 #                         this upgrade (ROLLBACK_COMMIT, or HEAD for a reinstall). If
 #                         --apply fails it is reported next to the current HEAD; the
 #                         installer never changes the git checkout itself.
+#   --backup-dir=DIR      required with --apply: the backup from preupgrade_backup.sh,
+#                         made at --rollback-commit. The installer re-runs the read-only
+#                         preupgrade_inventory.sh on it and refuses unless it passes.
 #   --api-auth=MODE       required with --apply: required (bearer token; generated if
 #                         backend.env is created) or open (NO authentication; also needs
 #                         --i-verified-network-isolation). An existing backend.env is never
@@ -35,6 +38,7 @@ ACCEPT_ENV_DRIFT=0
 ROLLBACK_COMMIT=""
 API_AUTH=""
 VERIFIED_ISOLATION=0
+PREUPGRADE_BACKUP=""
 for arg in "$@"; do
   case "${arg}" in
     --dry-run) MODE=dry-run ;;
@@ -44,6 +48,7 @@ for arg in "$@"; do
     --accept-env-drift) ACCEPT_ENV_DRIFT=1 ;;
     --rollback-commit=*) ROLLBACK_COMMIT="${arg#*=}" ;;
     --api-auth=*) API_AUTH="${arg#*=}" ;;
+    --backup-dir=*) PREUPGRADE_BACKUP="${arg#*=}" ;;
     --i-verified-network-isolation) VERIFIED_ISOLATION=1 ;;
     *) echo "Unknown option: ${arg}" >&2; exit 2 ;;
   esac
@@ -82,13 +87,14 @@ echo "Project Pi installer (${MODE}) from ${REPO}"
 
 # The application code is the checkout itself; git runs as its owner, never as root.
 REPO_OWNER="$(stat -c %U "${REPO}")"
-repo_git() {
+as_owner() {
   if [[ -n "${ROOT}" || "$(id -un)" == "${REPO_OWNER}" ]]; then
-    git -C "${REPO}" "$@"
+    "$@"
   else
-    runuser -u "${REPO_OWNER}" -- git -C "${REPO}" "$@"
+    runuser -u "${REPO_OWNER}" -- "$@"
   fi
 }
+repo_git() { as_owner git -C "${REPO}" "$@"; }
 CODE_HEAD_BEFORE="$(repo_git rev-parse HEAD)"
 ROLLBACK_SHA=""
 if [[ -n "${ROLLBACK_COMMIT}" ]]; then
@@ -103,6 +109,28 @@ elif [[ "${MODE}" == "apply" ]]; then
   exit 2
 else
   echo "CODE       HEAD ${CODE_HEAD_BEFORE}; --apply will need --rollback-commit=SHA"
+fi
+
+# Release gate: the installer runs the read-only inventory itself (no PASS file to
+# forge): the pre-upgrade backup must verify, hold every protected file, have been made
+# from the rollback commit, and no local file may collide with the installed checkout.
+GATE=BLOCKED
+if [[ -z "${PREUPGRADE_BACKUP}" ]]; then
+  echo "GATE       --apply needs --backup-dir=DIR from preupgrade_backup.sh"
+elif ! as_owner bash "${SCRIPTS}/preupgrade_inventory.sh" --repo="${REPO}" --target=HEAD \
+    --backup-dir="${PREUPGRADE_BACKUP}" | sed 's/^/GATE       /'; then
+  echo "GATE       BLOCKED by the inventory above"
+elif [[ -n "${ROLLBACK_SHA}" && "$(cat "${PREUPGRADE_BACKUP}/ROLLBACK_COMMIT")" != "${ROLLBACK_SHA}" ]]; then
+  echo "GATE       BLOCKED: the backup was made at $(cat "${PREUPGRADE_BACKUP}/ROLLBACK_COMMIT")," \
+    "not at --rollback-commit ${ROLLBACK_SHA}"
+else
+  GATE=PASS
+  echo "GATE       PASS (backup ${PREUPGRADE_BACKUP})"
+fi
+if [[ "${MODE}" == apply && "${GATE}" != PASS ]]; then
+  echo "Refusing --apply: the pre-upgrade gate did not pass (see GATE above). Nothing was" \
+    "changed. Never bypass it with git clean, reset --hard or checkout -f." >&2
+  exit 2
 fi
 
 # 1. Package drift: read-only comparison with the recorded Pi baseline.
