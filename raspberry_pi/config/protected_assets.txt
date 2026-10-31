@@ -1,15 +1,16 @@
 # Production files on the Pi that git does not track and an upgrade must preserve.
-# One path per line, relative to the checkout. Every entry must exist, must not be
-# tracked by the target commit, and must have a verified backup before an upgrade
-# (raspberry_pi/scripts/preupgrade_backup.sh, then preupgrade_inventory.sh, which
-# install_headless.sh --apply also runs).
+# Format: "<role> <path>", path relative to the checkout. All four roles are mandatory
+# and appear exactly once (raspberry_pi/scripts/preupgrade_manifest.sh): a model may be
+# given its confirmed real path, but no asset may be left out. Each must exist, must not
+# be tracked by the target commit, and must have a verified backup before an upgrade
+# (preupgrade_backup.sh, then preupgrade_inventory.sh, which preupgrade_switch.sh and
+# install_headless.sh --apply also run).
 #
-# From the read-only Pi audit (2026-11-01). "? path" marks a PROVISIONAL path: the
-# audit gave only the file names, and these are the paths the repo's 1a5c309 unit
-# used. preupgrade_backup.sh and preupgrade_inventory.sh refuse any "? " entry, so
-# the upgrade cannot proceed until each is confirmed on the Pi (read-only: ls -la)
-# and the "? " removed in the copy passed with --manifest.
-raspberry_pi/backend/alerts.db
-raspberry_pi/backend/alerts.db.backup
-? dataset/thermal/models/thermal_human_shape.tflite
-? dataset/thermal/models/thermal_human_shape_labels.json
+# From the read-only Pi audit (2026-11-01). "? " marks a PROVISIONAL path: the audit gave
+# only the file names, and these are the paths the repo's 1a5c309 unit used. Both
+# scripts refuse any "? " entry, so the upgrade cannot proceed until each is confirmed
+# on the Pi (read-only: ls -la) and the "? " removed in the copy passed with --manifest.
+alerts_db raspberry_pi/backend/alerts.db
+alerts_db_backup raspberry_pi/backend/alerts.db.backup
+? thermal_model dataset/thermal/models/thermal_human_shape.tflite
+? thermal_labels dataset/thermal/models/thermal_human_shape_labels.json

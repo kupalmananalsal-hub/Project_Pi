@@ -14,7 +14,16 @@ from test.test_install_runtime import bash_usable
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "raspberry_pi" / "scripts"
 ASSETS = ["raspberry_pi/backend/alerts.db", "raspberry_pi/backend/alerts.db.backup",
-          "dataset/thermal/models/thermal_human_shape.tflite"]
+          "dataset/thermal/models/thermal_human_shape.tflite",
+          "dataset/thermal/models/thermal_human_shape_labels.json"]
+ROLES = ["alerts_db", "alerts_db_backup", "thermal_model", "thermal_labels"]
+
+
+def manifest_text(entries):
+    return "# test manifest\n" + "".join(f"{role} {path}\n" for role, path in entries)
+
+
+FULL = list(zip(ROLES, ASSETS))
 
 
 def make_production_files(repo):
@@ -32,6 +41,7 @@ def make_production_files(repo):
     model = repo / ASSETS[2]
     model.parent.mkdir(parents=True, exist_ok=True)
     model.write_bytes(b"\x00tflite model bytes")
+    (repo / ASSETS[3]).write_bytes(b'{"labels": []}')
     return live
 
 
@@ -50,8 +60,7 @@ class PreupgradeInventoryTest(unittest.TestCase):
         self.repo = base / "Project_Pi"
         self.backup = base / "backup"
         self.manifest = base / "protected_assets.txt"
-        self.manifest.write_text("# test manifest\n" + "".join(a + "\n" for a in ASSETS),
-                                 encoding="utf-8", newline="\n")
+        self.manifest.write_text(manifest_text(FULL), encoding="utf-8", newline="\n")
         (self.repo / "raspberry_pi").mkdir(parents=True)
         (self.repo / "README").write_text("tracked\n", encoding="utf-8")
         (self.repo / ".gitignore").write_text(
@@ -188,15 +197,78 @@ class PreupgradeInventoryTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("WARN     untracked, not in the manifest: notes.txt", result.stdout)
 
-    def test_provisional_manifest_entries_block_backup_and_inventory(self):
-        provisional = self.manifest.with_name("provisional.txt")
-        provisional.write_text(f"{ASSETS[0]}\n? {ASSETS[2]}\n", encoding="utf-8", newline="\n")
+    def try_backup(self, text):
+        bad = self.manifest.with_name("bad.txt")
+        bad.write_text(text, encoding="utf-8", newline="\n")
+        before = sorted(p.relative_to(self.backup.parent).as_posix()
+                        for p in self.backup.parent.rglob("*"))
         result = run_script("preupgrade_backup.sh", f"--repo={self.repo.as_posix()}",
-                            f"--manifest={provisional.as_posix()}",
+                            f"--manifest={bad.as_posix()}",
                             f"--backup-dir={self.backup.as_posix()}")
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("provisional", result.stderr)
-        self.assertFalse(self.backup.exists())
+        self.assertEqual(result.returncode, 2, (text, result.stdout + result.stderr))
+        self.assertFalse(self.backup.exists(), text)  # nothing created
+        after = sorted(p.relative_to(self.backup.parent).as_posix()
+                       for p in self.backup.parent.rglob("*"))
+        self.assertEqual(after, before, text)  # nothing written anywhere
+        return result.stderr
+
+    def test_incomplete_or_malformed_manifests_are_refused_before_any_write(self):
+        cases = {
+            "": "mandatory asset alerts_db is not listed",            # comment-only
+            manifest_text(FULL[:2]): "mandatory asset thermal_model is not listed",
+            manifest_text(FULL + [("alerts_db", ASSETS[1])]): "duplicate role alerts_db",
+            manifest_text(FULL[:3] + [("thermal_labels", ASSETS[2])]): "duplicate path",
+            manifest_text(FULL + [("recordings", "README")]): "unknown role 'recordings'",
+            manifest_text(FULL[:3]) + "thermal_labels\n": "malformed line",
+            manifest_text(FULL[:3]) + f"? thermal_labels {ASSETS[3]}\n": "unconfirmed entry",
+        }
+        for text, reason in cases.items():
+            self.assertIn(reason, self.try_backup(manifest_text([]) + text if text == "" else text))
+
+    def test_path_traversal_and_symlinks_are_refused(self):
+        outside = self.repo.parent / "outside.dat"
+        outside.write_bytes(b"not a protected file")
+        escape = self.backup.parent / "escape"
+        cases = {
+            "../outside.dat": "'.', '..' or empty path parts",
+            "dataset/../../outside.dat": "'.', '..' or empty path parts",
+            "./README": "'.', '..' or empty path parts",
+            "dataset//thermal/models/thermal_human_shape_labels.json": "empty path parts",
+            outside.as_posix(): "must be relative",
+        }
+        for path, reason in cases.items():
+            stderr = self.try_backup(manifest_text(FULL[:3] + [("thermal_labels", path)]))
+            self.assertIn(reason, stderr, path)
+            self.assertFalse(escape.exists())
+            self.assertEqual(outside.read_bytes(), b"not a protected file")
+
+    def test_paths_through_a_symlink_are_refused(self):
+        (self.repo.parent / "outside.dat").write_bytes(b"not a protected file")
+        link = self.repo / "linked"
+        try:
+            link.symlink_to(self.repo.parent, target_is_directory=True)
+        except OSError:
+            self.skipTest("symlinks need privileges on this Windows account")
+        stderr = self.try_backup(manifest_text(FULL[:3] + [("thermal_labels", "linked/outside.dat")]))
+        self.assertIn("is a symlink", stderr)
+
+    def test_inventory_rejects_a_backup_whose_manifest_omits_an_asset(self):
+        self.backup_now()
+        # Rebuild the backup's records consistently, but without the thermal model.
+        (self.backup / "protected_assets.txt").write_text(
+            manifest_text(FULL[:2] + FULL[3:]), encoding="utf-8", newline="\n")
+        subprocess.run([shutil.which("bash"), "-c",
+                        "sha256sum -- ROLLBACK_COMMIT protected_assets.txt "
+                        f"{ASSETS[0]} {ASSETS[1]} {ASSETS[3]} > SHA256SUMS"],
+                       cwd=self.backup, check=True)
+        result = self.inventory()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("mandatory asset thermal_model is not listed", result.stdout)
+
+    def test_provisional_manifest_entries_block_backup_and_inventory(self):
+        provisional = manifest_text(FULL[:2]) + f"? thermal_model {ASSETS[2]}\n" \
+            + f"thermal_labels {ASSETS[3]}\n"
+        self.assertIn("unconfirmed entry", self.try_backup(provisional))
         # The repo's own manifest is provisional until the Pi paths are confirmed.
         repo_manifest = SCRIPTS.parent / "config" / "protected_assets.txt"
         self.assertRegex(repo_manifest.read_text(encoding="utf-8"), r"(?m)^\? ")
@@ -211,7 +283,7 @@ class PreupgradeInventoryTest(unittest.TestCase):
         (self.repo / ASSETS[1]).unlink()
         result = self.inventory()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("alerts.db.backup: missing", result.stdout)
+        self.assertIn("alerts.db.backup is missing", result.stdout)
 
     def test_tampered_backup_or_manifest_and_tracked_edits_are_blocked(self):
         self.backup_now()
@@ -220,7 +292,7 @@ class PreupgradeInventoryTest(unittest.TestCase):
         (self.backup / ASSETS[1]).write_bytes(b"older database copy")
         manifest = self.backup / "protected_assets.txt"
         original = manifest.read_bytes()
-        manifest.write_bytes(original.replace(ASSETS[2].encode() + b"\n", b""))
+        manifest.write_bytes(original.replace(f"thermal_model {ASSETS[2]}\n".encode(), b""))
         self.assertIn("changed since", self.inventory().stdout)
         manifest.write_bytes(original)
         (self.repo / "README").write_text("edited on the Pi\n", encoding="utf-8")

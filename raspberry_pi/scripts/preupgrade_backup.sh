@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
 # Authorized pre-upgrade step: copy every protected asset into a NEW backup directory.
-# Run as thesis, with the checkout that is still deployed:
+# Run as thesis, with the checkout that is still deployed, from a freshly extracted and
+# verified copy of the reviewed tools (docs/m1_m2_upgrade_and_rollback.md, step 0c):
 #
-#   bash <tools>/raspberry_pi/scripts/preupgrade_backup.sh --repo=~/Project_Pi \
-#     --manifest=<confirmed protected_assets.txt> --backup-dir=~/project-pi-backups/pre-<date>
+#   bash "$V/raspberry_pi/scripts/preupgrade_backup.sh" --repo="$PI_REPO" \
+#     --manifest="$T/protected_assets.confirmed.txt" --backup-dir="$B"
 #
-# It writes only inside --backup-dir (which must not exist yet) and never touches the
-# checkout. A live SQLite database (WAL) is opened read-only (URI mode=ro) and copied
-# with SQLite's online backup API, which gives a consistent snapshot, then checked with
-# PRAGMA integrity_check; other files are copied with cp -a. The manifest used is
-# copied into the backup, and SHA256SUMS records the hashes of every copy. Backups stay
-# on the Pi or offline media, never in git. Provisional manifest entries ("? path")
-# must be confirmed on the Pi first: the backup refuses them.
+# The manifest is validated first (preupgrade_manifest.sh: all four mandatory assets,
+# each once, contained relative paths, no symlinks, no unconfirmed entries); on any
+# problem nothing is created. It writes only inside --backup-dir (which must not exist
+# yet) and never touches the checkout. The live SQLite database (WAL) is opened
+# read-only (URI mode=ro) and copied with SQLite's online backup API, which gives a
+# consistent snapshot, then checked with PRAGMA integrity_check; other files are copied
+# with cp -a. The manifest used is copied into the backup, and SHA256SUMS records the
+# hashes of every copy. Backups stay on the Pi or offline media, never in git.
 set -Eeuo pipefail
 
-TOOLS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=preupgrade_manifest.sh
+source "${HERE}/preupgrade_manifest.sh"
 REPO=""
-MANIFEST="${TOOLS}/raspberry_pi/config/protected_assets.txt"
+MANIFEST="${HERE}/../config/protected_assets.txt"
 BACKUP_DIR=""
 for arg in "$@"; do
   case "${arg}" in
@@ -30,35 +34,35 @@ if [[ -z "${REPO}" || -z "${BACKUP_DIR}" ]]; then
   echo "Usage: $0 --repo=CHECKOUT --backup-dir=NEW_DIR [--manifest=FILE]" >&2
   exit 2
 fi
-if [[ -e "${BACKUP_DIR}" ]]; then
+if [[ -e "${BACKUP_DIR}" || -L "${BACKUP_DIR}" ]]; then
   echo "Refusing: ${BACKUP_DIR} already exists; use a new directory." >&2
   exit 2
 fi
-if grep -q '^? ' "${MANIFEST}"; then
-  echo "Refusing: ${MANIFEST} has provisional entries ('? path'). Confirm each path on the" \
-    "Pi (read-only), then remove the '? ' in a copy and pass it with --manifest." >&2
-  grep '^? ' "${MANIFEST}" >&2
+if ! entries="$(read_manifest "${MANIFEST}" "${REPO}")"; then
+  echo "Refusing: ${MANIFEST} is not a complete, confirmed manifest (see above). Nothing" \
+    "was written." >&2
   exit 2
 fi
 PYTHON="${PYTHON:-python3}"
 
 mkdir -p "${BACKUP_DIR}"
 chmod 700 "${BACKUP_DIR}"
+BACKUP_REAL="$(cd "${BACKUP_DIR}" && pwd -P)"
 git -C "${REPO}" rev-parse HEAD >"${BACKUP_DIR}/ROLLBACK_COMMIT"
 cp "${MANIFEST}" "${BACKUP_DIR}/protected_assets.txt"
 (cd "${BACKUP_DIR}" && sha256sum -- ROLLBACK_COMMIT protected_assets.txt >SHA256SUMS)
 failed=0
-while IFS= read -r path; do
-  [[ -z "${path}" || "${path}" == \#* ]] && continue
+while read -r role path; do
   src="${REPO}/${path}"
   dest="${BACKUP_DIR}/${path}"
-  if [[ ! -f "${src}" ]]; then
-    echo "FAIL     ${path}: missing (correct the manifest after checking the Pi)" >&2
+  mkdir -p "$(dirname "${dest}")"
+  # Validated paths cannot escape; this checks the directory that was actually created.
+  if [[ "$(cd "$(dirname "${dest}")" && pwd -P)/" != "${BACKUP_REAL}/"* ]]; then
+    echo "FAIL     ${path}: destination resolves outside ${BACKUP_DIR}" >&2
     failed=1
     continue
   fi
-  mkdir -p "$(dirname "${dest}")"
-  if [[ "${path}" == *.db ]]; then
+  if [[ "${role}" == alerts_db ]]; then
     companions_before="$(ls "${src}"-wal "${src}"-shm 2>/dev/null || true)"
     if ! result="$("${PYTHON}" - "${src}" "${dest}" 2>&1 <<'PY'
 import pathlib, sqlite3, sys
@@ -92,7 +96,7 @@ PY
     echo "COPY     ${path}"
   fi
   (cd "${BACKUP_DIR}" && sha256sum -- "${path}" >>SHA256SUMS)
-done <"${MANIFEST}"
+done <<<"${entries}"
 
 if [[ "${failed}" -ne 0 ]]; then
   echo "Backup INCOMPLETE in ${BACKUP_DIR}: do not upgrade." >&2
