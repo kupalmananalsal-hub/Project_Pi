@@ -211,6 +211,20 @@ def augment_dataset(
                     created += 1
                     operations[operation] = operations.get(operation, 0) + 1
 
+                parent_relative = source_path.relative_to(dataset_dir).as_posix()
+                from import_keyword_datasets import provenance_path, load_provenance, write_provenance, file_digest, digest
+                parent_provenance = None
+                if provenance_path(dataset_dir, parent_relative).exists():
+                    parent_provenance = load_provenance(dataset_dir, parent_relative)
+                    import wave
+                    with wave.open(str(output_path), "rb") as generated:
+                        pcm = generated.readframes(generated.getnframes())
+                    write_provenance(dataset_dir, relative_output_path, {
+                        **parent_provenance, "path": relative_output_path,
+                        "source": "augmentation", "parent_path": parent_relative,
+                        "sha256": file_digest(output_path), "pcm_sha256": digest(pcm),
+                        "augmentation": operation,
+                    })
                 if not metadata_exists:
                     append_metadata(
                         metadata_path,
@@ -218,7 +232,7 @@ def augment_dataset(
                             "path": relative_output_path,
                             "keyword": keyword_slug,
                             "label": keyword_slug,
-                            "speaker_id": "synthetic",
+                            "speaker_id": parent_provenance["speaker_id"] if parent_provenance else "synthetic",
                             "age_group": "augmented",
                             "gender": "unknown",
                             "distance_m": "unknown",

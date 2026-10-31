@@ -514,6 +514,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Delete the temporary extraction folder after chunking completes.",
     )
+    parser.add_argument("--include-speech", action="store_true", help="Use the unified verified v0.02 importer with official splits, speech, noise and silence")
+    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--seed",
         type=int,
@@ -527,6 +529,20 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     dataset_dir = args.dataset_dir.resolve()
+    if args.include_speech:
+        from import_keyword_datasets import download_speech_commands, scan_archive, import_archive
+        import json
+        archive_path = args.local_archive or dataset_dir.parents[1] / "archives" / ARCHIVE_NAME
+        if not archive_path.exists():
+            if args.dry_run:
+                raise ValueError("Dry run requires an existing archive/catalog; no automatic download")
+            download_speech_commands(archive_path)
+        catalog = dataset_dir / "catalogs" / "speech_commands_v002.sqlite"
+        if not catalog.exists():
+            scan_archive(archive_path, catalog, "speech_commands")
+        report = import_archive(archive_path, catalog, dataset_dir, per_label=args.min_clips, dry_run=args.dry_run)
+        print(json.dumps(report, indent=2))
+        return 0
     output_dir = args.output_dir.resolve()
     metadata_path = (
         args.metadata_path.resolve()

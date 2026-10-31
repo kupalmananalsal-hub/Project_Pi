@@ -35,7 +35,20 @@ KEYWORDS = [
     "agai",
 ]
 
-NEGATIVE_CLASSES = ["random_speech", "noise", "silence", "music"]
+KEYWORD_LANGUAGES = {
+    "help": "en", "help me": "en", "save me": "en", "please help": "en",
+    "emergency": "en", "rescue": "en", "over here": "en", "ouch": "en",
+    "tulong": "fil", "saklolo": "fil", "tulungan niyo ako": "fil",
+    "tulungan mo ako": "fil", "kailangan ko ng tulong": "fil",
+    "ang sakit": "fil", "aray": "fil", "sunog": "fil", "agai": "fil",
+}
+
+HARD_NEGATIVE_CLASSES = ["hi", "hello", "kamusta", "helpful", "healthy", "helmet"]
+
+NEGATIVE_CLASSES = [
+    "hi", "hello", "kamusta", "helpful", "healthy", "helmet",
+    "random_speech", "noise", "silence", "music",
+]
 
 METADATA_COLUMNS = [
     "path",
@@ -106,6 +119,12 @@ def slugify_keyword(keyword: str) -> str:
     return slug.strip("_")
 
 
+def sample_subdirectory(kind: str, label: str) -> str:
+    if kind == "negative" and label in HARD_NEGATIVE_CLASSES:
+        return f"negative/hard_negative/{label}"
+    return f"{kind}/{label}"
+
+
 def ensure_dataset_layout(dataset_dir: Path) -> None:
     """Create positive/negative folders and metadata header if missing."""
     dataset_dir.mkdir(parents=True, exist_ok=True)
@@ -114,7 +133,7 @@ def ensure_dataset_layout(dataset_dir: Path) -> None:
             parents=True, exist_ok=True
         )
     for negative_class in NEGATIVE_CLASSES:
-        (dataset_dir / "negative" / negative_class).mkdir(parents=True, exist_ok=True)
+        (dataset_dir / sample_subdirectory("negative", negative_class)).mkdir(parents=True, exist_ok=True)
     metadata_path = dataset_dir / "metadata.csv"
     with metadata_file_lock(metadata_path):
         if not metadata_path.exists():

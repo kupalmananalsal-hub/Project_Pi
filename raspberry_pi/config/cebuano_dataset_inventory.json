@@ -1,0 +1,8 @@
+{
+  "language": "ceb",
+  "approved_positive_phrases": [],
+  "candidate_phrases": [],
+  "approval_requirement": "Competent Cebuano speakers must verify meaning, pronunciation and audio labels before positive approval.",
+  "status": "INSUFFICIENT_POSITIVES",
+  "runtime_model_activation": false
+}

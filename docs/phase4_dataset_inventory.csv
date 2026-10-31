@@ -1,0 +1,7 @@
+Language,Keyword/Negative Class,Data Source,Valid Samples,Distinct Speakers,Sessions,Train,Validation,Test,Missing Samples,Issues
+ceb,random_speech,pld,85,85,85,57,13,15,NOT_SPECIFIED,PASS: source transcript labels; no recognition claim
+en,random_speech,mswc,97,97,0,72,11,14,NOT_SPECIFIED,PASS: source transcript labels; no recognition claim
+en,random_speech,pld,95,19,19,53,16,26,NOT_SPECIFIED,PASS: source transcript labels; no recognition claim
+en,random_speech,speech_commands,93,93,0,77,9,7,NOT_SPECIFIED,PASS: source transcript labels; no recognition claim
+fil,random_speech,pld,98,98,98,74,8,16,NOT_SPECIFIED,PASS: source transcript labels; no recognition claim
+und,noise,speech_commands,95,0,0,95,0,0,NOT_SPECIFIED,PASS: source transcript labels; no recognition claim

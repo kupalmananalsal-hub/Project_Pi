@@ -33,6 +33,8 @@ class TrainingRecordingUpload {
     required this.gender,
     required this.distanceM,
     required this.noiseCondition,
+    this.exampleKind = 'positive',
+    this.language = 'und',
   });
 
   final String filePath;
@@ -42,6 +44,8 @@ class TrainingRecordingUpload {
   final String gender;
   final double distanceM;
   final String noiseCondition;
+  final String exampleKind;
+  final String language;
 }
 
 class TrainingWavInfo {
@@ -233,6 +237,8 @@ class TrainingNotifier extends Notifier<TrainingState> {
     required String gender,
     required double distanceM,
     required String noiseCondition,
+    String exampleKind = 'positive',
+    String language = 'und',
   }) async {
     if (!state.isRecording) {
       return false;
@@ -307,6 +313,8 @@ class TrainingNotifier extends Notifier<TrainingState> {
         gender: gender,
         distanceM: distanceM,
         noiseCondition: noiseCondition,
+        exampleKind: exampleKind,
+        language: language,
       );
       state = state.copyWith(
         recordingStatus: TrainingRecordingStatus.recorded,
@@ -396,6 +404,8 @@ class TrainingNotifier extends Notifier<TrainingState> {
     required String gender,
     required double distanceM,
     required String noiseCondition,
+    String exampleKind = 'positive',
+    String language = 'und',
   }) async {
     final stopped = await stopRecordingForVerification(
       keyword: keyword,
@@ -404,6 +414,8 @@ class TrainingNotifier extends Notifier<TrainingState> {
       gender: gender,
       distanceM: distanceM,
       noiseCondition: noiseCondition,
+      exampleKind: exampleKind,
+      language: language,
     );
     if (!stopped) return false;
     return verifyAndUpload();
@@ -440,6 +452,8 @@ class TrainingNotifier extends Notifier<TrainingState> {
       gender: upload.gender,
       distanceM: upload.distanceM,
       noiseCondition: upload.noiseCondition,
+      exampleKind: upload.exampleKind,
+      language: upload.language,
     );
     if (ok) {
       _pendingUpload = null;
@@ -644,6 +658,8 @@ class TrainingNotifier extends Notifier<TrainingState> {
     required String gender,
     required double distanceM,
     required String noiseCondition,
+    String exampleKind = 'positive',
+    String language = 'und',
   }) async {
     state = state.copyWith(isLoading: true, errorMessage: null);
     try {
@@ -655,6 +671,8 @@ class TrainingNotifier extends Notifier<TrainingState> {
         gender: gender,
         distanceM: distanceM,
         noiseCondition: noiseCondition,
+        exampleKind: exampleKind,
+        language: language,
       );
       await refresh();
       return true;
