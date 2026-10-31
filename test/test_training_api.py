@@ -1,9 +1,11 @@
 import asyncio
 import csv
 import os
+import subprocess
 import tempfile
 import threading
 import time
+import types
 import unittest
 import wave
 from pathlib import Path
@@ -876,6 +878,49 @@ class TrainingApiTest(unittest.TestCase):
                 asyncio.run(_run())
             finally:
                 self.cleanup(module, previous)
+
+    def run_refresh(self, temp_dir, returncodes, **request):
+        module, previous = self.load_module(temp_dir)
+        try:
+            calls = []
+
+            def fake_run(args, **kwargs):
+                calls.append(args)
+                return types.SimpleNamespace(returncode=returncodes.pop(0), stdout="", stderr="")
+
+            module.REFRESH_HELPER = Path(temp_dir) / "project-pi-refresh"
+            module.REFRESH_HELPER.write_text("")
+            module.subprocess = types.SimpleNamespace(
+                run=fake_run, TimeoutExpired=subprocess.TimeoutExpired)
+            result = asyncio.run(module.api_refresh(module.RefreshRequest(**request)))
+            return result, calls
+        finally:
+            self.cleanup(module, previous)
+
+    def test_refresh_on_detached_head_skips_pull_and_restart(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            result, calls = self.run_refresh(temp_dir, [1], git_pull=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][-3:], ["symbolic-ref", "-q", "HEAD"])
+        self.assertIn("detached HEAD", result["stderr"])
+
+    def test_refresh_on_branch_pulls_then_runs_helper(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            result, calls = self.run_refresh(
+                temp_dir, [0, 0, 0], git_pull=True, restart_backend=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual([c[3:] for c in calls[:2]],
+                         [["symbolic-ref", "-q", "HEAD"], ["pull", "--ff-only"]])
+        self.assertEqual(calls[2][:2], ["sudo", "-n"])
+        self.assertEqual(calls[2][-1], "--restart-backend")
+
+    def test_refresh_without_pull_skips_branch_check(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            result, calls = self.run_refresh(temp_dir, [0])
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:2], ["sudo", "-n"])
 
 
 if __name__ == "__main__":

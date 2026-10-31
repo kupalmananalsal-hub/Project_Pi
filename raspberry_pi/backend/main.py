@@ -2743,7 +2743,10 @@ async def api_refresh(request: RefreshRequest):
 
     # git runs as this unprivileged service user; only the root-owned helper gets sudo.
     commands = []
+    # `git pull` needs a branch; a detached checkout (e.g. after a rollback) must fail clearly.
+    head_check = ["git", "-C", str(PROJECT_ROOT), "symbolic-ref", "-q", "HEAD"]
     if request.git_pull:
+        commands.append(head_check)
         commands.append(["git", "-C", str(PROJECT_ROOT), "pull", "--ff-only"])
     helper = ["sudo", "-n", str(REFRESH_HELPER)]
     if request.restart_backend:
@@ -2766,6 +2769,11 @@ async def api_refresh(request: RefreshRequest):
         stdout_parts.append((completed.stdout or "").strip())
         stderr_parts.append((completed.stderr or "").strip())
         if completed.returncode != 0:
+            if args is head_check:
+                stderr_parts.append(
+                    "Pi checkout is not on a branch (detached HEAD); git pull skipped and "
+                    "nothing was restarted. See docs/m1_m2_upgrade_and_rollback.md."
+                )
             break
 
     stdout = "\n".join(part for part in stdout_parts if part)

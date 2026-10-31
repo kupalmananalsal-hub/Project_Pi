@@ -85,7 +85,15 @@ systemctl daemon-reload
 systemctl enable project-pi-boot.service project-pi.target
 systemctl enable thermal-backend.service kws-alert.service apk-server.service
 systemctl enable project-pi-apt-update.timer project-pi-log-cleanup.timer
-systemctl disable kws-alert-vosk.service 2>/dev/null || true
+# The legacy unit also opens the ReSpeaker: stop it (not just disable) so kws-alert is the
+# only microphone owner. A failed stop aborts the install (set -e) instead of being hidden.
+if systemctl cat kws-alert-vosk.service >/dev/null 2>&1; then
+  systemctl disable --now kws-alert-vosk.service
+fi
+if systemctl is-active --quiet kws-alert-vosk.service; then
+  echo "ERROR: kws-alert-vosk.service is still active; refusing to start a second microphone owner." >&2
+  exit 1
+fi
 
 if [[ -x /home/thesis/kws-env/bin/python ]]; then
   bash "${SCRIPTS}/install_kws_openwakeword_deps.sh"

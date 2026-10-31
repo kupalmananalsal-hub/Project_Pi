@@ -117,7 +117,9 @@ Response:
 }
 ```
 
-With `git_pull`, the backend runs `git pull --ff-only` as `thesis`. It then runs the
+With `git_pull`, the backend runs `git pull --ff-only` as `thesis`; the Pi checkout
+must be on a branch tracking `origin/main` (a detached checkout returns `ok: false`
+and restarts nothing; see `docs/m1_m2_upgrade_and_rollback.md`, step 2). It then runs the
 root-owned `/usr/local/sbin/project-pi-refresh` via passwordless sudo, which only
 restarts `kws-alert` (and `thermal-backend` with `restart_backend`). Pulled changes to
 unit files, sudoers or root scripts take effect only after `install_headless.sh` is re-run.

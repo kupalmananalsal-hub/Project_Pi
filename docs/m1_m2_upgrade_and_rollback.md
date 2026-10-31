@@ -96,11 +96,27 @@ Run the SQLite backup as `thesis`, never as root: root would leave root-owned
 
 ## 2. Pi code (as `thesis`)
 
+Deploy only after the PR is merged: `<REVIEWED_COMMIT>` must be on `origin/main`
+(the repo squash-merges, so a PR-branch commit would leave `main` diverged and every
+later app Refresh would fail). The Pi stays on a `main` branch that tracks
+`origin/main`, because the app's Refresh runs `git pull --ff-only` and refuses a
+detached checkout.
+
 ```bash
 cd ~/Project_Pi
+git status --short                                    # must still be empty
 git fetch origin
-git checkout <REVIEWED_COMMIT>   # do not use the app's Refresh button for this step
+git merge-base --is-ancestor <REVIEWED_COMMIT> origin/main || echo "STOP: not on origin/main"
+git switch main                                       # creates a tracking main from origin/main if absent
+git branch --set-upstream-to=origin/main main
+git merge --ff-only <REVIEWED_COMMIT>                 # STOP if this refuses: local main has diverged
+git rev-parse HEAD                                    # must equal <REVIEWED_COMMIT>
 ```
+
+If the fast-forward refuses, do not reset or discard anything: run
+`git log --oneline origin/main..main` to see the local commits, back them up
+(`git branch backup/pi-local-$(date +%Y%m%d)`) and get them reviewed before retrying.
+Do not use the app's Refresh button for this step.
 
 ## 3. Installer, immediately after step 2 (as root)
 
@@ -118,7 +134,14 @@ sudoers, installs and enables the units, runs `install_kws_openwakeword_deps.sh`
 if `~/kws-env` exists (network, pip), runs the boot script (nmcli, `apt-get
 update`, log cleanup) and finally restarts `thermal-backend` and `kws-alert`.
 Expect several minutes and a brief alert outage. KWS keeps undelivered alerts in
-its outbox across the backend restart.
+its outbox across the backend restart. Keyword detection is down from the moment
+the installer stops the legacy `kws-alert-vosk.service` (if it is still running)
+until `kws-alert` restarts at the end; the installer aborts rather than start a
+second microphone owner if the legacy unit fails to stop. Afterwards check:
+
+```bash
+systemctl is-active kws-alert.service kws-alert-vosk.service   # expect: active, inactive
+```
 
 If `/tmp/project_pi_alerts.jsonl` existed in step 0 and still exists now:
 
@@ -207,7 +230,7 @@ recordings, models and datasets (none are modified by the upgrade).
 ```bash
 cd ~/Project_Pi
 B=~/project-pi-backups/pre-m1m2-<timestamp>
-git checkout "$(cat "$B/ROLLBACK_COMMIT")"                    # as thesis
+git checkout "$(cat "$B/ROLLBACK_COMMIT")"                    # as thesis; detached on purpose
 sudo visudo -cf "$B/sudoers.d/project-pi-thesis" && \
   sudo install -o root -g root -m 0440 "$B/sudoers.d/project-pi-thesis" /etc/sudoers.d/project-pi-thesis
 sudo cp -a "$B"/*.service "$B"/*.timer "$B"/*.target /etc/systemd/system/
@@ -220,6 +243,9 @@ fi
 sudo systemctl restart thermal-backend.service kws-alert.service
 ```
 
+- The rollback checkout is detached on purpose, so the app's Refresh cannot
+  fast-forward the Pi back onto the new code; Refresh with `git_pull` fails at
+  `git pull` until someone runs step 2 again.
 - Leave `/etc/project-pi/backend.env`, `/var/lib/project-pi/backend/` and the
   `/usr/local/sbin/project-pi-*` helpers in place; the old units do not use them.
   Remove them only once rollback is confirmed final.
