@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Replace PROJECT_PI_API_TOKEN in /etc/project-pi/backend.env with a new random token.
-# Run on the Pi console as root:  sudo bash raspberry_pi/scripts/rotate_api_token.sh
+# Installed root-owned by install_headless.sh --apply as /usr/local/sbin/project-pi-rotate-token
+# (never run it from the thesis-writable checkout as root). On the Pi console:
+#   sudo /usr/local/sbin/project-pi-rotate-token
 #
 # The token exists only in this shell's memory and is written with the printf builtin:
 # it never appears in a process's arguments, in output, logs, shell history or git.
@@ -10,7 +12,7 @@
 set -Eeuo pipefail
 
 if [[ "$(id -u)" -ne 0 ]]; then
-  echo "Run as root: sudo bash raspberry_pi/scripts/rotate_api_token.sh" >&2
+  echo "Run as root: sudo /usr/local/sbin/project-pi-rotate-token" >&2
   exit 1
 fi
 ROOT="${PROJECT_PI_INSTALL_ROOT:-}"  # tests only

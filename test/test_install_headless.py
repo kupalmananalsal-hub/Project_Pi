@@ -103,7 +103,7 @@ class InstallHeadlessTest(unittest.TestCase):
         git_calls = re.findall(r"repo_git\s+(\S+)|\bgit\s+(?:-C\s+\S+\s+)?(\S+)", commands)
         subcommands = {(a or b).rstrip(";") for a, b in git_calls}
         self.assertTrue(subcommands)
-        self.assertLessEqual(subcommands, {"rev-parse", '"$@"'}, subcommands)
+        self.assertLessEqual(subcommands, {"rev-parse", "hash-object", '"$@"'}, subcommands)
 
     def test_rollback_reports_verified_or_incomplete(self):
         rollback = self.code[self.code.index("rollback() {"):self.code.index("trap rollback ERR")]
@@ -250,7 +250,15 @@ class UpgradeDocTest(unittest.TestCase):
 
     def test_upgrade_doc_runs_the_dry_run_before_apply(self):
         step3 = read(UPGRADE_DOC).split("## 3.", 1)[1].split("## 4.", 1)[0]
-        self.assertLess(step3.index("install_headless.sh\n"), step3.index("--apply"))
+        block = re.search(r"<!-- runbook:3 -->\n```bash\n(.*?)```", step3, re.S).group(1)
+        commands = re.sub(r"#.*", "", block)
+        self.assertNotIn("--apply", commands)  # the documented block itself is the dry run
+        self.assertIn("# dry run; add --apply after review", block)
+        self.assertLess(step3.index("<!-- runbook:3 -->"),
+                        step3.index("Then run the same block with `--apply` added"))
+        # Root runs a copy it verified itself, never the checkout's installer.
+        self.assertIn('git hash-object --no-filters "$V/install_headless.sh"', block)
+        self.assertNotIn("sudo bash raspberry_pi/scripts/install_headless.sh", read(UPGRADE_DOC))
 
 
 if __name__ == "__main__":

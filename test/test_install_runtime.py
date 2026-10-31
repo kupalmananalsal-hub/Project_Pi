@@ -102,8 +102,17 @@ class InstallerRuntimeTest(unittest.TestCase):
         db.execute("CREATE TABLE alerts (id INTEGER PRIMARY KEY)")
         db.commit()
         db.close()
+        assets = {"alerts_db": "raspberry_pi/backend/alerts.db",
+                  "alerts_db_backup": "raspberry_pi/backend/alerts.db.backup",
+                  "thermal_model": "dataset/thermal/models/thermal_human_shape.tflite",
+                  "thermal_labels": "dataset/thermal/models/thermal_human_shape_labels.json"}
+        for role, path in assets.items():
+            if role != "alerts_db":
+                (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+                (self.repo / path).write_bytes(role.encode())
         manifest = base / "protected_assets.txt"
-        manifest.write_text("raspberry_pi/backend/alerts.db\n", encoding="utf-8", newline="\n")
+        manifest.write_text("".join(f"{r} {p}\n" for r, p in assets.items()),
+                            encoding="utf-8", newline="\n")
         self.preupgrade = base / "preupgrade-backup"
         self.git("checkout", "-q", self.before_sha)
         backup = subprocess.run(
@@ -197,9 +206,25 @@ class InstallerRuntimeTest(unittest.TestCase):
         self.assertIn("Refusing --apply", result.stderr)
         self.assertEqual(self.files(), [])
 
+    def test_installs_only_committed_bytes_even_if_the_checkout_changes(self):
+        # An edit hidden from git status (as a process writing as thesis could do) passes
+        # the inventory, but the installer compares each staged copy with HEAD's blob.
+        script = self.repo / "raspberry_pi/scripts/rotate_api_token.sh"
+        self.git("update-index", "--assume-unchanged", "raspberry_pi/scripts/rotate_api_token.sh")
+        script.write_text(script.read_text(encoding="utf-8") + "echo injected\n",
+                          encoding="utf-8", newline="\n")
+        result = self.run_installer("--apply")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("is not the committed raspberry_pi/scripts/rotate_api_token.sh", result.stderr)
+        self.assertEqual(self.files(), [])
+        self.assertEqual([c for c in self.calls() if not c.startswith(("cat ", "is-"))], [])
+
     def test_fresh_apply_installs_masks_legacy_and_restarts_nothing(self):
         result = self.run_installer("--apply")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # The token helper is installed from the reviewed commit, root-owned in sbin.
+        self.assertEqual((self.root / "usr/local/sbin/project-pi-rotate-token").read_bytes(),
+                         (self.repo / "raspberry_pi/scripts/rotate_api_token.sh").read_bytes())
         unit = self.root / "etc/systemd/system/kws-alert.service"
         self.assertEqual(unit.read_bytes(),
                          (self.repo / "raspberry_pi/systemd/kws-alert.service").read_bytes())
@@ -340,7 +365,7 @@ class InstallerRuntimeTest(unittest.TestCase):
         self.assertIn("LGPIO_CHIP=11", (self.root / "etc/systemd/system/thermal-backend.service"
                                         ).read_text(encoding="utf-8"))
         for created in ("etc/systemd/system/kws-alert.service", "usr/local/sbin/project-pi-boot",
-                        "etc/sudoers.d/project-pi-thesis",
+                        "usr/local/sbin/project-pi-rotate-token", "etc/sudoers.d/project-pi-thesis",
                         "etc/systemd/system/thermal-backend.service.d/10-local.conf"):
             self.assertFalse((self.root / created).exists(), created)
         self.assertTrue((self.root / "etc/systemd/system/kws-alert-vosk.service").exists())

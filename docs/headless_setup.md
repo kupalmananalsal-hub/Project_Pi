@@ -15,21 +15,24 @@ Power-on only operation: the Pi starts all services on its existing Wi-Fi profil
 
 ## One-Time Install (on the Pi)
 
-SSH in once, clone or pull the repo, then run:
+Install and every upgrade or reinstall follow
+[m1_m2_upgrade_and_rollback.md](m1_m2_upgrade_and_rollback.md), steps 0–3: back up
+the protected files, move the checkout only with `preupgrade_switch.sh`, then run the
+installer as root from a copy root extracted and verified itself (step 3 block), never
+`sudo bash raspberry_pi/scripts/install_headless.sh` from the thesis-writable
+checkout. Its options:
 
-```bash
-cd ~/Project_Pi
-sudo bash raspberry_pi/scripts/install_headless.sh            # dry run: review the report
-sudo bash raspberry_pi/scripts/install_headless.sh --apply --restart --api-auth=required \
-  --backup-dir="$B" --rollback-commit="$(git rev-parse HEAD)"   # the code that ran before
+```text
+(no option)                 dry run: review the report
+--apply --api-auth=required --backup-dir="$B" --rollback-commit="$(cat "$B/ROLLBACK_COMMIT")"
+--restart                   also restart thermal-backend and kws-alert
 ```
 
 `--backup-dir` is the pre-upgrade backup from `preupgrade_backup.sh`. The installer
 refuses `--apply` unless `preupgrade_switch.sh` recorded the checked-out commit there
-after a passing pre-switch inventory, and its own re-run of the inventory passes
-(procedure: [m1_m2_upgrade_and_rollback.md](m1_m2_upgrade_and_rollback.md), steps
-0–2; also for a reinstall). Rotate the API token only with
-`sudo bash raspberry_pi/scripts/rotate_api_token.sh`. Bearer tokens travel over plain HTTP: use a trusted isolated network (or
+after a passing pre-switch inventory, and its own re-run of the inventory passes; it
+installs only files equal to their committed blobs. Rotate the API token only with
+`sudo /usr/local/sbin/project-pi-rotate-token` (installed root-owned by `--apply`). Bearer tokens travel over plain HTTP: use a trusted isolated network (or
 encrypted transport, not provided here); see "Network and transport security" there.
 
 The default is a dry run that writes nothing: it reports package drift against
@@ -45,13 +48,9 @@ When updating code, pass the commit that ran before the update instead (see
 [m1_m2_upgrade_and_rollback.md](m1_m2_upgrade_and_rollback.md), steps 0–3).
 
 To have the boot script join the hotspot (a fresh Pi with no Wi-Fi profile), add
-`--configure-hotspot` with the password; no password is shipped:
-
-```bash
-sudo PROJECT_PI_HOTSPOT_SSID=Teddy PROJECT_PI_HOTSPOT_PASSWORD='<hotspot password>' \
-  bash raspberry_pi/scripts/install_headless.sh --apply --configure-hotspot --api-auth=required \
-  --backup-dir="$B" --rollback-commit="$(git rev-parse HEAD)"
-```
+`--configure-hotspot` to the step 3 installer command and pass the password in the
+`sudo` environment (`PROJECT_PI_HOTSPOT_PASSWORD=…`, optionally
+`PROJECT_PI_HOTSPOT_SSID=Teddy`); no password is shipped.
 
 That writes `/etc/project-pi/hotspot.env` (mode `600`, not in git) with
 `PROJECT_PI_FORCE_HOTSPOT=1`. Without that flag in the file, the boot script logs

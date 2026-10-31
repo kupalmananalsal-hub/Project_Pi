@@ -166,6 +166,7 @@ TARGETS=(
   "${SCRIPTS}/pi_refresh.sh|${ROOT}/usr/local/sbin/project-pi-refresh|755"
   "${SCRIPTS}/headless_boot.sh|${ROOT}/usr/local/sbin/project-pi-boot|755"
   "${SCRIPTS}/log_cleanup.sh|${ROOT}/usr/local/sbin/project-pi-log-cleanup|755"
+  "${SCRIPTS}/rotate_api_token.sh|${ROOT}/usr/local/sbin/project-pi-rotate-token|755"
   "${SUDOERS_SRC}|${ROOT}/etc/sudoers.d/project-pi-thesis|440"
 )
 UNITS=(
@@ -293,6 +294,27 @@ PROJECT_PI_HOTSPOT_STATIC_DNS="${PROJECT_PI_HOTSPOT_STATIC_DNS:-8.8.8.8 8.8.4.4}
 EOF
   TARGETS+=("${STAGE}/hotspot.env|${HOTSPOT_CONF}|600")
 fi
+
+# Install only reviewed bytes: every source from the checkout is first copied into the
+# root-only STAGE and must equal its committed blob at HEAD (the commit the pre-switch
+# gate verified), so a later edit of the thesis-writable checkout cannot reach the
+# root-owned helpers, sudoers or units.
+for i in "${!TARGETS[@]}"; do
+  IFS='|' read -r src dest mode <<<"${TARGETS[$i]}"
+  [[ "${src}" == "${REPO}/"* ]] || continue
+  rel="${src#"${REPO}/"}"
+  cat -- "${src}" >"${STAGE}/source.${i}"
+  if [[ "$(git hash-object --no-filters "${STAGE}/source.${i}")" \
+      != "$(repo_git rev-parse --verify --quiet "HEAD:${rel}")" ]]; then
+    echo "Refusing: ${src} is not the committed ${rel} at HEAD; only reviewed, committed" \
+      "files are installed. Nothing was changed." >&2
+    exit 2
+  fi
+  TARGETS[$i]="${STAGE}/source.${i}|${dest}|${mode}"
+  if [[ "${src}" == "${SUDOERS_SRC}" ]]; then
+    SUDOERS_SRC="${STAGE}/source.${i}"
+  fi
+done
 
 # 3. Report NEW / IDENTICAL / CHANGED with a unified diff.
 CHANGED=()

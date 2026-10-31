@@ -18,7 +18,8 @@ from test.test_install_runtime import bash_usable
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNBOOK = PROJECT_ROOT / "docs" / "m1_m2_upgrade_and_rollback.md"
 TOOLS = ["raspberry_pi/scripts/preupgrade_backup.sh", "raspberry_pi/scripts/preupgrade_inventory.sh",
-         "raspberry_pi/scripts/preupgrade_switch.sh", "raspberry_pi/config/protected_assets.txt"]
+         "raspberry_pi/scripts/preupgrade_manifest.sh", "raspberry_pi/scripts/preupgrade_switch.sh",
+         "raspberry_pi/config/protected_assets.txt"]
 PROTECTED = ["raspberry_pi/backend/alerts.db", "raspberry_pi/backend/alerts.db.backup",
              "dataset/thermal/models/thermal_human_shape.tflite",
              "dataset/thermal/models/thermal_human_shape_labels.json"]
@@ -125,21 +126,55 @@ class UpgradeProcedureTest(unittest.TestCase):
         (self.pi / PROTECTED[2]).unlink()
         result = self.run_block("0b")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(f"STOP: {PROTECTED[2]} not found", result.stderr)
+        self.assertIn(f"STOP: thermal_model {PROTECTED[2]} not found", result.stderr)
         self.assertNotEqual(self.run_block("0c").returncode, 0)  # backup refuses too
         self.assertNotEqual(self.run_block("2").returncode, 0)
         self.assertEqual(self.head(), self.baseline)
 
-    def test_tampered_tool_stops_the_switch(self):
-        for name in ("0a", "0b", "0c"):
-            self.assertEqual(self.run_block(name).returncode, 0)
-        tool = self.base / "preflight" / "raspberry_pi/scripts/preupgrade_inventory.sh"
-        tool.write_text(tool.read_text(encoding="utf-8").replace("exit 1", "exit 0"),
-                        encoding="utf-8", newline="\n")
-        result = self.run_block("2")
+    def test_only_a_fresh_verified_copy_of_each_tool_is_ever_run(self):
+        # A modified tool left anywhere on disk (here: the checkout and $T) is never run:
+        # every block extracts the reviewed blobs into a new directory and checks them.
+        marker = self.base / "tampered-tool-ran"
+        for where in (self.base / "preflight", self.pi):
+            tool = where / "raspberry_pi/scripts/preupgrade_switch.sh"
+            tool.parent.mkdir(parents=True, exist_ok=True)
+            tool.write_text(f"#!/usr/bin/env bash\ntouch '{marker.as_posix()}'\n",
+                            encoding="utf-8", newline="\n")
+        (self.pi / "raspberry_pi/scripts/preupgrade_switch.sh").unlink()  # keep tracked tree clean
+        failed, result = self.run_all()
+        self.assertIsNone(failed, result.stdout + result.stderr)
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.head(), self.reviewed)
+        # The switch script's own blob check stays as defense in depth.
+        v = self.base / "copy"
+        shutil.copytree(PROJECT_ROOT / "raspberry_pi" / "scripts", v / "raspberry_pi" / "scripts")
+        inv = v / "raspberry_pi/scripts/preupgrade_inventory.sh"
+        inv.write_text(inv.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8",
+                       newline="\n")
+        result = subprocess.run(
+            [shutil.which("bash"), (v / "raspberry_pi/scripts/preupgrade_switch.sh").as_posix(),
+             f"--repo={self.pi.as_posix()}", f"--target={self.reviewed}",
+             f"--backup-dir={(self.base / 'backup').as_posix()}"],
+            capture_output=True, text=True, timeout=60)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("differs from the reviewed preupgrade_inventory.sh", result.stderr)
-        self.assertEqual(self.head(), self.baseline)
+
+    def test_stale_backup_stops_the_switch(self):
+        for name in ("0a", "0b", "0c"):
+            self.assertEqual(self.run_block(name).returncode, 0)
+        # The Pi moves on after the backup (another reviewed commit reaches origin/main).
+        self.run_git(self.dev, "checkout", "-q", "main")
+        (self.dev / "later.txt").write_text("later\n", encoding="utf-8")
+        self.run_git(self.dev, "add", "-A")
+        self.run_git(self.dev, "commit", "-qm", "later reviewed commit")
+        later = self.run_git(self.dev, "rev-parse", "HEAD")
+        self.run_git(self.dev, "push", "-q", "origin", "HEAD:main")
+        self.run_git(self.pi, "fetch", "-q", "origin")
+        self.run_git(self.pi, "merge", "-q", "--ff-only", self.reviewed)
+        result = self.run_block("2", reviewed=later)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("was not made at the current HEAD", result.stderr)
+        self.assertEqual(self.head(), self.reviewed)
         self.assertFalse((self.base / "backup" / "PRESWITCH_VERIFIED").exists())
 
     def test_inventory_failure_stops_before_git_overwrites_a_local_file(self):

@@ -180,20 +180,23 @@ Every block below that guards the upgrade runs in its own `bash -euo pipefail`
 shell: any failed check prints `STOP:` and exits non-zero at once; nothing after it
 in that block runs. Do not continue to the next block after a non-zero exit. The
 code itself moves only in step 2, through `preupgrade_switch.sh`, which repeats the
-checks that matter and refuses on its own. Set the variables once (as `thesis`):
+checks that matter and refuses on its own. A script cannot vouch for itself once it is
+running, so every block that runs a preflight tool first extracts a fresh copy from
+git's object store into a new private directory and checks each file against the
+reviewed blob, then runs that copy. Set the variables once (as `thesis`):
 
 ```bash
 export PI_REPO=~/Project_Pi REVIEWED=<REVIEWED_COMMIT>
 export T=~/project-pi-preflight/$REVIEWED B=~/project-pi-backups/pre-m1m2-$(date +%Y%m%d-%H%M)
 ```
 
-### 0a. Get the reviewed preflight tools without changing the checkout
+### 0a. Fetch the reviewed commit without changing the checkout
 
 The preflight scripts are new in the reviewed commit and do not exist in the deployed
-`1a5c309` checkout. Extract them from git's object store into a separate directory;
-the working tree, branch and running services do not change (`git fetch` only adds
+`1a5c309` checkout; they are read from git's object store, never by switching. The
+working tree, branch and running services do not change (`git fetch` only adds
 objects under `.git`). This is itself part of the separately authorized upgrade, not
-a read-only step.
+a read-only step. The block also extracts the reviewed manifest for step 0b.
 
 <!-- runbook:0a -->
 ```bash
@@ -203,23 +206,23 @@ git fetch origin
 git merge-base --is-ancestor "$REVIEWED" origin/main \
   || { echo "STOP: $REVIEWED is not on origin/main" >&2; exit 1; }
 mkdir -p "$T"
-TOOLS="raspberry_pi/scripts/preupgrade_backup.sh raspberry_pi/scripts/preupgrade_inventory.sh
-  raspberry_pi/scripts/preupgrade_switch.sh raspberry_pi/config/protected_assets.txt"
-git archive "$REVIEWED" $TOOLS | tar -x -C "$T"
-for f in $TOOLS; do  # each extracted file must be byte-identical to the reviewed blob
-  [ "$(git rev-parse "$REVIEWED:$f")" = "$(git hash-object "$T/$f")" ] \
-    || { echo "STOP: $T/$f differs from the reviewed $f" >&2; exit 1; }
-done
-echo "TOOLS VERIFIED in $T"
+f=raspberry_pi/config/protected_assets.txt
+git -c core.autocrlf=false archive "$REVIEWED" "$f" | tar -x -C "$T"
+[ "$(git rev-parse "$REVIEWED:$f")" = "$(git hash-object --no-filters "$T/$f")" ] \
+  || { echo "STOP: $T/$f differs from the reviewed $f" >&2; exit 1; }
+echo "REVIEWED COMMIT FETCHED; manifest in $T"
 EOF
 ```
 
 ### 0b. Confirm the protected-file paths (read-only)
 
-`protected_assets.txt` marks the two thermal model paths `? ` (provisional): the
-audit gave only file names. Both scripts refuse a manifest with `? ` entries, so
-this step cannot be skipped. The block makes the confirmed copy once (the reviewed
-file stays unchanged) and stops at the first path that does not exist:
+`protected_assets.txt` lists `<role> <path>` for the four mandatory assets
+(`alerts_db`, `alerts_db_backup`, `thermal_model`, `thermal_labels`) and marks the two
+thermal model paths `? ` (provisional): the audit gave only file names. Both scripts
+refuse a manifest with a `? ` entry, a missing or duplicate role or path, an absolute
+or `..` path, or a path through a symlink, so this step cannot be skipped and no asset
+can be left out. The block makes the confirmed copy once (the reviewed file stays
+unchanged) and stops at the first path that does not exist:
 
 <!-- runbook:0b -->
 ```bash
@@ -227,15 +230,15 @@ bash -euo pipefail <<'EOF'
 cd "$PI_REPO"
 C="$T/protected_assets.confirmed.txt"
 [ -e "$C" ] || sed 's/^? //' "$T/raspberry_pi/config/protected_assets.txt" > "$C"
-grep -v -e '^#' -e '^$' "$C" | while read -r p; do
-  ls -la -- "$p" || { echo "STOP: $p not found; put its real path in $C" >&2; exit 1; }
+grep -v -e '^#' -e '^$' "$C" | while read -r role p; do
+  ls -la -- "$p" || { echo "STOP: $role $p not found; put its real path in $C" >&2; exit 1; }
 done
 echo "PATHS CONFIRMED in $C"
 EOF
 ```
 
-If a file is elsewhere, put its real path in the confirmed copy and run the block
-again; never move the file to fit the manifest.
+If a file is elsewhere, change only its path (keep the role) in the confirmed copy and
+run the block again; never move the file to fit the manifest.
 
 ### 0c. Back up, then run the gate
 
@@ -245,12 +248,23 @@ then run the read-only gate against the commit you will deploy:
 <!-- runbook:0c -->
 ```bash
 bash -euo pipefail <<'EOF'
-bash "$T/raspberry_pi/scripts/preupgrade_backup.sh" --repo="$PI_REPO" \
+V="$(mktemp -d)"; trap 'rm -rf "$V"' EXIT  # fresh, private; verified before any use
+TOOLS="raspberry_pi/scripts/preupgrade_backup.sh raspberry_pi/scripts/preupgrade_inventory.sh
+  raspberry_pi/scripts/preupgrade_manifest.sh raspberry_pi/scripts/preupgrade_switch.sh"
+git -C "$PI_REPO" -c core.autocrlf=false archive "$REVIEWED" $TOOLS | tar -x -C "$V"
+for f in $TOOLS; do
+  [ "$(git -C "$PI_REPO" rev-parse "$REVIEWED:$f")" = "$(git hash-object --no-filters "$V/$f")" ] \
+    || { echo "STOP: $V/$f differs from the reviewed $f" >&2; exit 1; }
+done
+bash "$V/raspberry_pi/scripts/preupgrade_backup.sh" --repo="$PI_REPO" \
   --manifest="$T/protected_assets.confirmed.txt" --backup-dir="$B"   # also writes $B/ROLLBACK_COMMIT
-bash "$T/raspberry_pi/scripts/preupgrade_inventory.sh" --repo="$PI_REPO" \
+bash "$V/raspberry_pi/scripts/preupgrade_inventory.sh" --repo="$PI_REPO" \
   --target="$REVIEWED" --backup-dir="$B"
 EOF
 ```
+
+The backup validates the manifest before it creates anything and writes only inside
+the new `$B` (every destination is checked to resolve there).
 
 The backup opens the live database read-only (SQLite URI `mode=ro`: a missing file is
 never created, the database file is never written), takes a consistent snapshot with
@@ -306,13 +320,25 @@ Move the checkout only with the reviewed switch script:
 
 <!-- runbook:2 -->
 ```bash
-bash "$T/raspberry_pi/scripts/preupgrade_switch.sh" --repo="$PI_REPO" \
+bash -euo pipefail <<'EOF'
+V="$(mktemp -d)"; trap 'rm -rf "$V"' EXIT  # fresh, private; verified before any use
+TOOLS="raspberry_pi/scripts/preupgrade_backup.sh raspberry_pi/scripts/preupgrade_inventory.sh
+  raspberry_pi/scripts/preupgrade_manifest.sh raspberry_pi/scripts/preupgrade_switch.sh"
+git -C "$PI_REPO" -c core.autocrlf=false archive "$REVIEWED" $TOOLS | tar -x -C "$V"
+for f in $TOOLS; do
+  [ "$(git -C "$PI_REPO" rev-parse "$REVIEWED:$f")" = "$(git hash-object --no-filters "$V/$f")" ] \
+    || { echo "STOP: $V/$f differs from the reviewed $f" >&2; exit 1; }
+done
+bash "$V/raspberry_pi/scripts/preupgrade_switch.sh" --repo="$PI_REPO" \
   --target="$REVIEWED" --backup-dir="$B"
+EOF
 ```
 
-Before git touches any file it checks, each fatally: that it and the inventory
-script are byte-identical to the reviewed blobs; that `$REVIEWED` is on
-`origin/main`; and that the inventory passes again for exactly `$REVIEWED`. It then
+The block verifies the fresh copy before running it. The switch script then checks,
+each fatally and before git touches any file: that its tools still match the reviewed
+blobs (defense in depth only); that `$REVIEWED` is on `origin/main`; that `$B` was
+made at the current `HEAD` (a stale backup would record the wrong rollback commit);
+and that the inventory passes again for exactly `$REVIEWED`. It then
 fast-forwards `main` (tracking `origin/main`) straight to `$REVIEWED`, with no
 intermediate checkout, and records `$REVIEWED` in `$B/PRESWITCH_VERIFIED`. The
 installer refuses `--apply` unless that record names the checked-out `HEAD`; its own
@@ -332,19 +358,39 @@ First the dry run. It writes nothing and prints the package drift against the lo
 files, every target file as NEW / IDENTICAL / CHANGED with a unified diff, the
 units it would enable and mask, and whether anything would restart:
 
+The installer runs as root, so root runs a copy it extracted and verified itself, in a
+root-owned private directory, never the script in the thesis-writable checkout. Pass
+`--apply` only on the second run:
+
+<!-- runbook:3 -->
 ```bash
-sudo bash raspberry_pi/scripts/install_headless.sh
+sudo PI_REPO="$PI_REPO" REVIEWED="$REVIEWED" B="$B" bash -euo pipefail <<'EOF'
+V="$(mktemp -d)"; trap 'rm -rf "$V"' EXIT                  # root-owned, 0700
+as_thesis() { runuser -u thesis -- git -C "$PI_REPO" "$@"; }
+[ "$(as_thesis rev-parse HEAD)" = "$REVIEWED" ] || { echo "STOP: HEAD is not $REVIEWED" >&2; exit 1; }
+f=raspberry_pi/scripts/install_headless.sh
+as_thesis show "$REVIEWED:$f" > "$V/install_headless.sh"
+[ "$(as_thesis rev-parse "$REVIEWED:$f")" = "$(git hash-object --no-filters "$V/install_headless.sh")" ] \
+  || { echo "STOP: the extracted installer differs from the reviewed $f" >&2; exit 1; }
+PROJECT_PI_REPO="$PI_REPO" bash "$V/install_headless.sh" --api-auth=required \
+  --backup-dir="$B" --rollback-commit="$(cat "$B/ROLLBACK_COMMIT")"   # dry run; add --apply after review
+EOF
 ```
 
-Review it. Stop if the drift section shows a package difference you cannot
+The installer in turn copies every file it installs from the checkout into its own
+root-only staging directory and refuses unless each copy equals the committed blob at
+`HEAD`, so a later edit of the checkout cannot reach the root-owned helpers, sudoers
+or units. Residual risk: git's object store under `~/Project_Pi/.git` is
+thesis-writable, and these checks trust it; a process that can already write as
+`thesis` and forge git objects is outside what they can detect.
+
+Review the dry run. Stop if the drift section shows a package difference you cannot
 explain, or if the seeded `10-local.conf` does not show this Pi's `LGPIO_CHIP=11`,
 the model, metadata and threshold settings recorded in step 0, and
-`THERMAL_REFRESH_HZ=4`. Then apply, on the Pi console:
+`THERMAL_REFRESH_HZ=4`. Then run the same block with `--apply` added (it installs and
+restarts nothing), and restart:
 
 ```bash
-sudo bash raspberry_pi/scripts/install_headless.sh --apply --api-auth=required \
-  --backup-dir="$B" --rollback-commit="$(cat "$B/ROLLBACK_COMMIT")"   # installs, restarts nothing
-# (sudo keeps none of thesis's variables: in a root shell, set B to the same path first)
 sudo systemctl restart thermal-backend.service kws-alert.service      # backend, then KWS, together
 ```
 
@@ -539,13 +585,14 @@ per-phone authentication in both modes.
 
 ## Token rotation, revocation and the APK server
 
-Rotate on the Pi console with the root helper, which generates the token in its own
+Rotate on the Pi console with the root-owned helper that `--apply` installs (never run
+`rotate_api_token.sh` from the thesis-writable checkout as root). It generates the token in its own
 memory and writes it with a shell builtin, so it never appears in any process's
 arguments, in output, logs, shell history or git; the file is replaced atomically,
 root-owned `0600`:
 
 ```bash
-sudo bash raspberry_pi/scripts/rotate_api_token.sh
+sudo /usr/local/sbin/project-pi-rotate-token
 sudo systemctl restart thermal-backend.service && sudo systemctl restart kws-alert.service
 ```
 

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # The only supported way to move the Pi checkout to a reviewed commit. Run as thesis,
-# from the tools extracted with git archive (docs/m1_m2_upgrade_and_rollback.md, step 2):
+# from a fresh copy that the runbook extracted with git archive and verified (step 2):
 #
-#   bash "$T/raspberry_pi/scripts/preupgrade_switch.sh" --repo="$PI_REPO" \
+#   bash "$V/raspberry_pi/scripts/preupgrade_switch.sh" --repo="$PI_REPO" \
 #     --target="$REVIEWED" --backup-dir="$B"
 #
 # Every check is fatal and runs before git touches the working tree:
-#   1. this script and preupgrade_inventory.sh are byte-identical to the target's blobs;
+#   1. this script, preupgrade_inventory.sh and preupgrade_manifest.sh match the target's
+#      blobs (defense in depth; the runbook verifies a fresh copy before running it);
+#   1b. the backup DIR was made at the current HEAD (ROLLBACK_COMMIT);
 #   2. the target is on origin/main (squash-merge repos: never deploy a PR-branch commit);
 #   3. preupgrade_inventory.sh passes for exactly this target (backup verified, no local
 #      file the target would overwrite or delete);
@@ -37,7 +39,9 @@ git_() { git -C "${REPO}" "$@"; }
 
 TARGET_SHA="$(git_ rev-parse --verify --quiet "${TARGET}^{commit}")" \
   || stop "${TARGET} is not a commit in ${REPO} (git fetch origin first)"
-for tool in preupgrade_switch.sh preupgrade_inventory.sh; do
+# Defense in depth only: a script cannot vouch for itself once running. The runbook
+# extracts and verifies a fresh copy BEFORE invoking it (step 2).
+for tool in preupgrade_switch.sh preupgrade_inventory.sh preupgrade_manifest.sh; do
   reviewed="$(git_ rev-parse --verify --quiet "${TARGET_SHA}:raspberry_pi/scripts/${tool}")" \
     || stop "${tool} is not in ${TARGET_SHA}"
   [[ "$(git_ hash-object "${HERE}/${tool}")" == "${reviewed}" ]] \
@@ -45,6 +49,10 @@ for tool in preupgrade_switch.sh preupgrade_inventory.sh; do
 done
 git_ merge-base --is-ancestor "${TARGET_SHA}" origin/main \
   || stop "${TARGET_SHA} is not on origin/main"
+# The backup must be of what runs now: an older backup records the wrong rollback commit.
+head_now="$(git_ rev-parse HEAD)"
+[[ "$(cat "${BACKUP_DIR}/ROLLBACK_COMMIT" 2>/dev/null)" == "${head_now}" ]] \
+  || stop "${BACKUP_DIR} was not made at the current HEAD ${head_now}; make a new backup"
 bash "${HERE}/preupgrade_inventory.sh" --repo="${REPO}" --target="${TARGET_SHA}" \
   --backup-dir="${BACKUP_DIR}" || stop "the pre-upgrade inventory did not pass"
 
