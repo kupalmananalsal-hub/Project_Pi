@@ -980,6 +980,12 @@ class TrainingApiTest(unittest.TestCase):
                 outbox["critical_evictions"] = 2
                 self.assertIn("alert outbox overflow",
                               module.health_monitor.failing_components())
+                outbox.update(critical_evictions=0, quarantined=1,
+                              quarantined_possibly_critical=0)
+                self.assertEqual(module.health_monitor.failing_components(), {})
+                outbox["quarantined_possibly_critical"] = 1
+                self.assertIn("alert rejected by backend",
+                              module.health_monitor.failing_components())
             finally:
                 self.cleanup(module, previous)
 

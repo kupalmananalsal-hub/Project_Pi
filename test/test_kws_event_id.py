@@ -188,33 +188,88 @@ class KwsEventIdTest(unittest.TestCase):
             finally:
                 restore_modules(previous)
 
-    def test_non_retryable_rejection_is_dropped_so_queue_keeps_moving(self):
+    class StatusSession(FakeSession):
+        def __init__(self, codes):
+            super().__init__()
+            self.codes = list(codes)
+
+        def post(self, url, json, timeout):
+            self.posts.append(dict(json))
+            code = self.codes.pop(0)
+
+            def raise_for_status():
+                if code >= 400:
+                    raise RuntimeError(f"HTTP {code}")
+            return types.SimpleNamespace(status_code=code, text=f"detail {code}",
+                                         raise_for_status=raise_for_status)
+
+    def test_non_retryable_rejection_is_quarantined_so_queue_keeps_moving(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module, previous = load_kws_module()
             try:
                 poster = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
-
-                class StatusSession(FakeSession):
-                    def __init__(self, codes):
-                        super().__init__()
-                        self.codes = list(codes)
-
-                    def post(self, url, json, timeout):
-                        self.posts.append(dict(json))
-                        code = self.codes.pop(0)
-
-                        def raise_for_status():
-                            if code >= 400:
-                                raise RuntimeError(f"HTTP {code}")
-                        return types.SimpleNamespace(status_code=code, raise_for_status=raise_for_status)
-
-                # 409 conflict is dropped; 503 and 401 stay queued for retry.
-                poster.session = StatusSession([409, 503, 401])
+                # 409 conflict is quarantined; 503 and 401 stay queued for retry.
+                poster.session = self.StatusSession([409, 503, 401])
                 poster.publish("help", 0.9, "openwakeword")
                 poster.publish("tulong", 0.9, "openwakeword")
                 poster.flush()
                 poster.flush()
                 self.assertEqual([event["keyword"] for event in poster.pending], ["tulong"])
+                self.assertEqual([event["keyword"] for event in poster.quarantined], ["help"])
+            finally:
+                restore_modules(previous)
+
+    def test_permanent_rejections_are_quarantined_once_and_never_silently_lost(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_kws_module()
+            try:
+                queue_path = Path(temp_dir) / "alerts.jsonl"
+                poster = self.make_poster(module, queue_path)
+                poster.flush = lambda: None
+                poster.publish("crit", 0.95, "vosk")   # certain_critical
+                poster.publish("poss", 0.50, "vosk")   # possible_critical
+                poster.publish("low", 0.10, "vosk")    # certain_suppressed
+                poster.publish("ok", 0.95, "vosk")
+                del poster.flush
+                traces = []
+                module.trace_alert = lambda *args, **kwargs: traces.append((args, kwargs))
+                poster.session = self.StatusSession([409, 422, 400, 200])
+                for _ in range(3):  # repeated flushes must not re-post rejected events
+                    poster.flush()
+
+                self.assertEqual(len(poster.session.posts), 4)
+                self.assertEqual(poster.pending, [])  # later alert was not blocked
+                rejected = [json.loads(line) for line in
+                            (Path(temp_dir) / "alerts.rejected.jsonl").read_text(
+                                encoding="utf-8").splitlines()]
+                self.assertEqual([(r["keyword"], r["rejected_status"], r["retention_tier"])
+                                  for r in rejected],
+                                 [("crit", 409, 3), ("poss", 422, 2), ("low", 400, 1)])
+                self.assertTrue(all(r["rejected_at"] and r["event_id"] for r in rejected))
+                status = poster.outbox_status()
+                self.assertEqual((status["quarantined"], status["quarantined_possibly_critical"]),
+                                 (3, 2))
+                outcomes = [(args[2], kwargs.get("status_code")) for args, kwargs in traces
+                            if args[0] == "http_post"]
+                self.assertEqual(outcomes, [("quarantined", 409), ("quarantined", 422),
+                                            ("quarantined", 400), ("succeeded", 200)])
+
+                # Survives a KWS restart, so the health fault persists until reviewed.
+                restarted = self.make_poster(module, queue_path)
+                self.assertEqual(restarted.outbox_status()["quarantined_possibly_critical"], 2)
+            finally:
+                restore_modules(previous)
+
+    def test_quarantine_is_bounded(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_kws_module()
+            try:
+                module.MAX_QUARANTINED_ALERTS = 2
+                poster = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
+                poster.session = self.StatusSession([422] * 3)
+                for index in range(3):
+                    poster.publish(f"kw{index}", 0.9, "vosk")
+                self.assertEqual([e["keyword"] for e in poster.quarantined], ["kw1", "kw2"])
             finally:
                 restore_modules(previous)
 

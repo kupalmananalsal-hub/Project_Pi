@@ -45,6 +45,8 @@ MAX_PENDING_ALERTS = 500
 # Hard limits: only here are certain_critical events evicted (error + health fault).
 HARD_MAX_PENDING_ALERTS = 5000
 HARD_MAX_PENDING_BYTES = 5 * 1024 * 1024
+# Permanently rejected (4xx) events kept for review; oldest dropped beyond this, with an error.
+MAX_QUARANTINED_ALERTS = 500
 # Pre-PR #9 outbox location (tmpfs); merged into the durable outbox on startup.
 LEGACY_ALERT_QUEUE_PATH = Path("/tmp/project_pi_alerts.jsonl")
 # Retention hints only: the backend classifies with thermal evidence at delivery time.
@@ -180,6 +182,9 @@ class AlertPoster:
         self._worker_thread: threading.Thread | None = None
         self.evictions = 0
         self.critical_evictions = 0
+        # Events the backend permanently rejected (4xx); kept for review, never retried.
+        self.quarantine_path = queue_path.with_name(f"{queue_path.stem}.rejected.jsonl")
+        self.quarantined, _ = self._read_events(self.quarantine_path)
         self.pending, changed = self._read_events(self.queue_path)
         with self.lock:
             migrated_from = self._merge_legacy_locked(legacy_queue_path)
@@ -266,8 +271,10 @@ class AlertPoster:
                 payload = {k: v for k, v in event.items() if k != "retention_tier"}
                 response = self.session.post(self.backend_url, json=payload, timeout=1.0)
                 status_code = int(getattr(response, "status_code", 200))
-                # Other 4xx (409 conflict, 422) never succeed on retry and would block the queue head forever.
-                if not 400 <= status_code < 500 or status_code in (401, 408, 429):
+                # Other 4xx (400, 409 conflict, 422) never succeed on retry and would block the
+                # queue head forever: they are quarantined, not retried and not discarded.
+                rejected = 400 <= status_code < 500 and status_code not in (401, 408, 429)
+                if not rejected:
                     response.raise_for_status()
             except Exception as exc:  # pragma: no cover - network side effect
                 trace_alert("http_post", event.get("event_id"), "failed",
@@ -282,12 +289,16 @@ class AlertPoster:
             with self.lock:
                 if self.pending and self.pending[0].get("event_id") == event.get("event_id"):
                     sent = self.pending.pop(0)
+                    if rejected:
+                        # Durable in quarantine before it leaves the outbox.
+                        self._quarantine_locked(sent, status_code,
+                                                str(getattr(response, "text", ""))[:500])
                     self._persist_pending_locked()
                 else:
                     continue
-            trace_alert("http_post", sent.get("event_id"),
-                        "dropped" if 400 <= status_code < 500 else "succeeded",
-                        keyword=sent["keyword"], status_code=status_code)
+            if not rejected:
+                trace_alert("http_post", sent.get("event_id"), "succeeded",
+                            keyword=sent["keyword"], status_code=status_code)
 
     def outbox_status(self) -> dict[str, object]:
         with self.lock:
@@ -300,7 +311,38 @@ class AlertPoster:
                 "soft_limit": MAX_PENDING_ALERTS,
                 "hard_limit": HARD_MAX_PENDING_ALERTS,
                 "hard_limit_bytes": HARD_MAX_PENDING_BYTES,
+                "quarantined": len(self.quarantined),
+                "quarantined_possibly_critical": sum(
+                    1 for e in self.quarantined if e.get("retention_tier", 2) >= 2),
+                "quarantine_path": str(self.quarantine_path),
             }
+
+    def _quarantine_locked(self, event: dict[str, object], status_code: int, detail: str) -> None:
+        tier = event.get("retention_tier", 2)
+        self.quarantined.append({
+            **event,
+            "rejected_status": status_code,
+            "rejected_detail": detail,
+            "rejected_at": datetime.now(timezone.utc).isoformat(),
+        })
+        while len(self.quarantined) > MAX_QUARANTINED_ALERTS:
+            dropped = self.quarantined.pop(0)
+            trace_alert("outbox", dropped.get("event_id"), "quarantine_evicted",
+                        retention_tier=RETENTION_TIER_NAMES.get(dropped.get("retention_tier"), "unknown"))
+            print(f"ERROR: alert quarantine full; oldest rejected event {dropped.get('event_id')} "
+                  "evicted", file=sys.stderr, flush=True)
+        self._write_jsonl(self.quarantine_path, self.quarantined)
+        trace_alert("http_post", event.get("event_id"), "quarantined",
+                    keyword=event.get("keyword"), status_code=status_code,
+                    retention_tier=RETENTION_TIER_NAMES.get(tier, "unknown"))
+        print(
+            f"{'ERROR' if tier >= 2 else 'WARNING'}: backend rejected alert "
+            f"{event.get('event_id')} ({event.get('keyword')!r}, "
+            f"{RETENTION_TIER_NAMES.get(tier, 'unknown')}) with HTTP {status_code}; "
+            f"quarantined in {self.quarantine_path}, not retried: {detail}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def _enforce_bounds_locked(self) -> bool:
         evicted = False
@@ -395,21 +437,25 @@ class AlertPoster:
         return pending, upgraded_pending
 
     def _persist_pending_locked(self) -> None:
-        if not self.pending:
+        self._write_jsonl(self.queue_path, self.pending)
+
+    @staticmethod
+    def _write_jsonl(path: Path, events: list[dict[str, object]]) -> None:
+        if not events:
             try:
-                self.queue_path.unlink()
+                path.unlink()
             except FileNotFoundError:
                 pass
             return
 
-        self.queue_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = self.queue_path.with_name(f"{self.queue_path.name}.tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f"{path.name}.tmp")
         with temp_path.open("w", encoding="utf-8") as handle:
-            for event in self.pending:
+            for event in events:
                 handle.write(json.dumps(event) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_path, self.queue_path)
+        os.replace(temp_path, path)
 
     @staticmethod
     def _has_event_id(event: dict[str, object]) -> bool:

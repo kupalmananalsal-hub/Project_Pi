@@ -1761,6 +1761,12 @@ class HealthMonitor:
                     f"{outbox['critical_evictions']} undelivered certain_critical alert(s) "
                     "evicted at the KWS outbox hard limit"
                 )
+            # Stays faulted until an operator reviews and clears the quarantine file.
+            if outbox.get("quarantined_possibly_critical"):
+                failing["alert rejected by backend"] = (
+                    f"{outbox['quarantined_possibly_critical']} possibly-critical alert(s) "
+                    f"rejected by the backend; review {outbox.get('quarantine_path')}"
+                )
         if thermal.mlx is None and thermal.error:
             failing["thermal camera offline"] = str(thermal.error)
         return failing

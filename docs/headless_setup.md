@@ -6,11 +6,11 @@ Power-on only operation: the Pi starts all services on its existing Wi-Fi profil
 
 | Component | Purpose |
 |:---|:---|
-| `project-pi-boot.service` | Logs the current Wi-Fi (hotspot connect only with `PROJECT_PI_FORCE_HOTSPOT=1`), apt metadata update (≤1×/24h, no installs), log cleanup (runs the root-owned `/usr/local/sbin/project-pi-boot`; unit files are only installed by `install_headless.sh --apply`) |
+| `project-pi-boot.service` | Logs the current Wi-Fi (network wait and hotspot connect only with `PROJECT_PI_FORCE_HOTSPOT=1`), log cleanup (runs the root-owned `/usr/local/sbin/project-pi-boot`; unit files are only installed by `install_headless.sh --apply`). Detection services do not wait for it |
 | `thermal-backend.service` | FastAPI on port **8765** (`~/thermal-env-sys`) |
 | `kws-alert.service` | Triple-engine KWS (`~/kws-env`) |
 | `apk-server.service` | APK HTTP server on port **8080** |
-| `project-pi-apt-update.timer` | Daily `apt-get update` |
+| `project-pi-apt-update.timer` | Daily `apt-get update` (package index only; first run 15 min after boot, never before detection starts) |
 | `project-pi-log-cleanup.timer` | Daily journal vacuum + temp log trim |
 
 ## One-Time Install (on the Pi)
@@ -66,17 +66,17 @@ Upgrading an existing Pi from before this change: follow
 ## After Install — Normal Use
 
 1. Power on the Pi (no monitor/keyboard).
-2. Wait ~1–2 minutes for hotspot association and services.
+2. Wait for the services (they start without waiting for Wi-Fi; the phone needs the Pi on its network).
 3. Open the Flutter app (Controls tab shows connection; Monitor shows thermal/audio).
 4. Use **Refresh KWS Service** on the Controls tab instead of manual `systemctl`/`cp` commands.
 
 ## Service Order
 
 ```text
-boot → project-pi-boot (oneshot)
-     → thermal-backend
-     → kws-alert
+boot → thermal-backend → kws-alert     (sound.target only; no network wait)
+     → project-pi-boot (oneshot, after network-online; independent)
      → apk-server
+     → project-pi-apt-update.timer (15 min after boot)
 ```
 
 All application services use `Restart=always` and restart limits for crash recovery.
@@ -236,6 +236,6 @@ seeds from the previously installed unit and never overwrites.
 /etc/systemd/system/thermal-backend.service.d/10-local.conf  # device-specific thermal/GPIO settings (never overwritten)
 /var/lib/project-pi/install-backups/                 # installer backups of replaced files (root, 700)
 /var/lib/project-pi/backend/alerts.jsonl             # KWS outbox of undelivered alerts (thesis, 700 dir)
+/var/lib/project-pi/backend/alerts.rejected.jsonl    # alerts the backend rejected (4xx), kept for review
 /var/lib/project-pi/backend/caregivers.json          # caregiver phone verifiers
-/var/lib/project-pi/last-apt-update                  # apt throttle stamp
 ```

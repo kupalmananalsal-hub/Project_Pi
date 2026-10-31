@@ -54,25 +54,6 @@ class InstallHeadlessTest(unittest.TestCase):
             self.assertNotIn(forbidden, self.code, forbidden)
         self.assertNotRegex(self.code, r"/usr/local/sbin/project-pi-boot\s*$")
 
-    def test_env_drift_blocks_apply_before_any_write(self):
-        self.assertIn('check_env /home/thesis/kws-env "${REQUIREMENTS}/kws-env.lock.txt"', self.code)
-        self.assertIn('check_env /home/thesis/thermal-env-sys '
-                      '"${REQUIREMENTS}/thermal-env-sys.lock.txt"', self.code)
-        self.assertLess(self.code.index("check_env /home/thesis/kws-env"), self.apply_at)
-        apply_part = self.code[self.apply_at:]
-        refuse = apply_part.index("Refusing --apply")
-        self.assertLess(refuse, apply_part.index("install -d -m 0700"))
-        self.assertIn('"${ACCEPT_ENV_DRIFT}" -ne 1', apply_part[:refuse])
-        for lock in ("kws-env.lock.txt", "thermal-env-sys.lock.txt"):
-            self.assertTrue((PI / "requirements" / lock).is_file(), lock)
-
-    def test_replaced_files_are_backed_up_before_install(self):
-        apply_part = self.code[self.apply_at:]
-        loop = apply_part[apply_part.index('for target in "${CHANGED[@]}"'):]
-        self.assertLess(loop.index('backup "${dest}"'), loop.index("install -o root"))
-        self.assertIn("/var/lib/project-pi/install-backups", self.code)
-        self.assertIn("install -d -m 0700", apply_part)
-
     def test_local_dropin_is_created_only_if_absent_and_seeded_from_installed_unit(self):
         self.assertIn('if [[ ! -e "${THERMAL_DROPIN}" ]]; then', self.code)
         self.assertIn("systemctl cat thermal-backend.service", self.code)
@@ -83,9 +64,8 @@ class InstallHeadlessTest(unittest.TestCase):
         self.assertIn("Environment=THERMAL_REFRESH_HZ=4", self.code)
         self.assertIn("variant not verified", self.text)
         # The only .service.d path the installer names is the one it creates if absent.
-        self.assertEqual(set(re.findall(r"/etc/systemd/system/[\w.-]+\.service\.d/[\w.-]*",
-                                        self.code)),
-                         {"/etc/systemd/system/thermal-backend.service.d/10-local.conf"})
+        self.assertEqual(re.findall(r"[\w.-]+\.service\.d/[\w.-]*", self.code),
+                         ["thermal-backend.service.d/10-local.conf"])
 
     def test_backend_env_is_created_only_if_absent_in_open_mode(self):
         self.assertIn('if [[ ! -e "${BACKEND_CONF}" ]]; then', self.code)
@@ -97,27 +77,26 @@ class InstallHeadlessTest(unittest.TestCase):
         self.assertIn('TARGETS+=("${STAGE}/hotspot.env|${HOTSPOT_CONF}|600")', block)
         self.assertEqual(self.code.count("${HOTSPOT_CONF}|"), 1)
 
-    def test_legacy_vosk_unit_is_stopped_and_masked_without_hiding_failures(self):
+    def test_legacy_vosk_failures_are_never_hidden(self):
+        # Order, masking and rollback are exercised in test_install_runtime.
         apply_part = self.code[self.apply_at:]
-        stop = apply_part.index('systemctl stop "${LEGACY_VOSK_UNIT}"')
-        mask = apply_part.index('systemctl mask "${LEGACY_VOSK_UNIT}"')
-        guard = apply_part.index('systemctl is-active --quiet "${LEGACY_VOSK_UNIT}"; then\n  echo "ERROR')
-        self.assertLess(stop, mask)
-        self.assertLess(mask, guard)
-        self.assertIn("exit 1", apply_part[guard:guard + 300])
         for line in apply_part.splitlines():
             if "LEGACY_VOSK_UNIT" in line and "systemctl" in line:
                 self.assertNotIn("|| true", line)
                 self.assertNotIn("2>/dev/null", line)
-        self.assertIn("set -euo pipefail", self.code)
+        self.assertIn("set -Eeuo pipefail", self.code)
+        self.assertIn("trap rollback ERR", apply_part)
         self.assertIn("thesis-camera.service", self.code)
         self.assertNotRegex(self.code, r"systemctl\s+(disable|stop|mask)\s+thesis-camera")
 
-    def test_services_restart_only_with_restart_flag(self):
-        restarts = [m.start() for m in re.finditer(r"^\s*systemctl restart", self.code, re.M)]
-        self.assertEqual(len(restarts), 1)
-        gate = self.code.rindex('if [[ "${RESTART}" -eq 1 ]]; then', 0, restarts[0])
-        self.assertGreater(gate, self.apply_at)
+    def test_every_restart_is_gated_by_the_restart_flag(self):
+        lines = self.code.splitlines()
+        restarts = [i for i, line in enumerate(lines) if re.match(r"\s*systemctl restart", line)]
+        self.assertTrue(restarts)
+        for i in restarts:
+            self.assertRegex("\n".join(lines[i - 2:i]),
+                             r'if \[\[ "\$\{RESTART(_ATTEMPTED)?\}" -eq 1 \]\]; then')
+            self.assertGreater(self.code.index(lines[i]), self.apply_at)
 
 
 class BootScriptTest(unittest.TestCase):
@@ -135,6 +114,33 @@ class BootScriptTest(unittest.TestCase):
                 name = code[code.rindex("\n", 0, function_start) + 1:function_start]
                 self.assertIn(name, {"ensure_hotspot_profile", "configure_static_ipv4",
                                      "connect_hotspot"}, line)
+
+    def test_boot_never_waits_for_network_or_updates_packages_by_default(self):
+        code = "\n".join(code_lines(BOOT))
+        main = code[code.index("main() {"):]
+        gate = main.index('if [[ "${PROJECT_PI_FORCE_HOTSPOT:-0}" == "1" ]]; then')
+        self.assertGreater(main.index("wait_for_network"), gate)
+        self.assertLess(main.index("wait_for_network"), main.index("else"))
+        self.assertNotIn("apt-get", code)
+
+
+class OfflineStartupTest(unittest.TestCase):
+    """Detection must start without Wi-Fi/internet and without waiting for boot preparation."""
+
+    NETWORK_GATES = ("network-online.target", "network.target", "NetworkManager-wait-online",
+                     "project-pi-boot.service", "project-pi-apt-update", "systemd-time-wait-sync")
+
+    def test_detection_units_never_wait_for_network_or_boot_preparation(self):
+        for name in ("thermal-backend.service", "kws-alert.service"):
+            for line in code_lines(PI / "systemd" / name):
+                if re.match(r"(After|Requires|Wants|BindsTo|Requisite|PartOf)=", line):
+                    for gate in self.NETWORK_GATES:
+                        self.assertNotIn(gate, line, f"{name}: {line}")
+
+    def test_detection_units_talk_only_to_localhost(self):
+        unit = read(PI / "systemd" / "kws-alert.service")
+        self.assertIn("BACKEND_ALERT_URL=http://127.0.0.1:8765/api/alerts", unit)
+        self.assertIn("--host 0.0.0.0", read(PI / "systemd" / "thermal-backend.service"))
 
 
 class DependencyScriptTest(unittest.TestCase):

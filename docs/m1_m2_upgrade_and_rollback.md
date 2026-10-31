@@ -26,14 +26,16 @@ detector model `thermal_human_detector.tflite` with its metadata threshold (0.05
 | Root-run scripts | `pi_refresh.sh`, `headless_boot.sh`, `log_cleanup.sh` run from the thesis-writable repo | Root-owned copies `/usr/local/sbin/project-pi-{refresh,boot,log-cleanup}`, installed only by `install_headless.sh --apply` |
 | sudoers | thesis may run repo scripts as root | Exact commands only (see `raspberry_pi/sudoers/project-pi-thesis`); no repo paths |
 | Unit files | Re-copied from the repo by the boot service on every boot | Installed only by `install_headless.sh --apply` |
-| Installer | Writes immediately, upgrades packages, runs nmcli, restarts services | Dry run by default (NEW / IDENTICAL / CHANGED with diffs, package drift report); `--apply` backs up every replaced file first; restarts only with `--restart`; never installs packages; never touches NetworkManager |
+| Installer | Writes immediately, upgrades packages, runs nmcli, restarts services | Dry run by default (NEW / IDENTICAL / CHANGED with diffs, package drift report); `--apply` backs up every replaced file first and rolls back every file and unit change if any step fails; restarts only with `--restart`; never installs packages; never touches NetworkManager |
+| Startup | Detection units waited for `network-online.target` and the boot script (up to 120 s network wait plus `apt-get update`) | `thermal-backend` and `kws-alert` depend only on `sound.target` (KWS also on the backend): they start without Wi-Fi or internet. The boot script waits for the network only when managing the hotspot and no longer runs `apt-get`; `project-pi-apt-update.timer` does that 15 min after boot, off the critical path |
 | `/api/refresh` | Root script does `git pull` and reinstalls units | `git_pull` refused (409) unless the root-owned `/etc/project-pi/allow-app-git-deploy` exists; restart without pull always works |
 | Wi-Fi | Boot script could create/modify/activate the hotspot profile | Changed only when `hotspot.env` sets `PROJECT_PI_FORCE_HOTSPOT=1`; otherwise the boot logs the current SSID/IPv4 and changes nothing |
 | Microphone | Backend and KWS could both open the ReSpeaker | KWS is the single capture owner (`Conflicts=kws-alert-vosk.service`, legacy unit masked); backend reads KWS's published audio status |
 | KWS outbox | `/tmp/project_pi_alerts.jsonl` (tmpfs), truncated by log cleanup | `/var/lib/project-pi/backend/alerts.jsonl`, fsynced; the legacy file is merged in on first start and renamed `*.migrated`; bounded by retention tier (below) |
 | Thermal | Hard-coded 4 Hz; installed unit differs from the repo | Generic unit: detector model + metadata, no threshold override, no rate. Rate, variant and `LGPIO_CHIP` live in the local drop-in `thermal-backend.service.d/10-local.conf`, created once from the installed unit |
 | Caregiver credentials | `PROJECT_PI_CAREGIVER_CREDENTIALS` unset | Set in `backend.env` to `/var/lib/project-pi/backend/caregivers.json` |
-| Health | Silent | One `system_fault` event (never critical/siren) per outage of KWS, thermal, or a `certain_critical` outbox eviction |
+| Backend-rejected alerts | HTTP 4xx (except 401/408/429) silently dropped as "delivered" | Moved, fsynced, to `alerts.rejected.jsonl` (kept for review, max 500, never retried, never blocking later alerts); a possibly-critical rejection raises a health fault until reviewed |
+| Health | Silent | One `system_fault` event (never critical/siren) per outage of KWS, thermal, a `certain_critical` outbox eviction, or a possibly-critical backend rejection |
 
 Unchanged and untouched by upgrade and rollback: `raspberry_pi/backend/alerts.db`
 (no schema change), `dataset/`, `~/thesis_dataset`, `~/voice_samples`,
@@ -69,6 +71,21 @@ Above 500 events the oldest tier 1, then tier 2 events are evicted (each logged,
 `outbox_pressure` published in the KWS audio status and `/api/status`). Tier 3 is
 evicted only at the hard limit (5,000 events or 5 MB), oldest first, with an
 error log and a health fault. Disk use is bounded and evictions are never silent.
+
+### Alerts the backend rejects
+
+HTTP 401, 408, 429, 5xx and network errors are retried. Any other 4xx (400 bad
+`event_id`, 409 the backend already holds a *different* event under this
+`event_id`, 422 invalid payload) can never succeed on retry, so the event is moved
+to `/var/lib/project-pi/backend/alerts.rejected.jsonl` with `rejected_status`,
+`rejected_detail` and `rejected_at`, written and fsynced before it leaves the
+outbox. It is never retried automatically (no retry loop) and never blocks later
+alerts. Each rejection is traced (`quarantined`) and logged; a `certain_critical`
+or `possible_critical` rejection is logged as an error and raises the health fault
+"alert rejected by backend", which stays raised (also across KWS restarts) until
+the file is reviewed. The file keeps the newest 500 rejections. To review: read
+the file; to re-send after fixing the cause, stop `kws-alert`, move the lines back
+into `alerts.jsonl`, delete `alerts.rejected.jsonl`, start `kws-alert`.
 
 ## Compatibility rules that set the order
 
@@ -186,6 +203,14 @@ after review. It backs up every replaced file to
 in `/etc/systemd/system/*.service.d/`, and stops then masks
 `kws-alert-vosk.service` (its unit file is kept in the backup); it aborts rather
 than leave a second microphone owner. `thesis-camera.service` is only reported.
+If any step of `--apply` fails (including the stop, the mask, enabling units or
+`--restart`), it rolls back: replaced files are restored from the backup, files it
+created are removed, units it newly enabled are disabled, and the legacy unit's
+file, mask, enabled and active state are restored; with `--restart` the old
+configuration is restarted. The backup is kept. It also warns, without changing
+anything, if `hotspot.env` or `backend.env` is not root-owned `600` (the boot
+script refuses to source a `hotspot.env` that is not root-owned or is
+group/world-writable).
 `/etc/project-pi/hotspot.env` changes only with `--configure-hotspot` (needs
 `PROJECT_PI_HOTSPOT_PASSWORD`), which also lets the boot script manage the hotspot.
 
@@ -327,7 +352,8 @@ sudo systemctl restart thermal-backend.service kws-alert.service
 None of these is claimed as an improvement until tested on the Pi: single
 microphone owner; durable outbox and its migration; worker-thread alert posting;
 engine fail-fast; MLX90640 I2C recovery and re-init backoff; health-monitor
-`system_fault` alerts; the 5 s heartbeat (old-APK churn risk).
+`system_fault` alerts; the 5 s heartbeat (old-APK churn risk); offline startup;
+installer rollback on a real systemd.
 
 ## Remaining physical tests (not covered by software tests)
 
@@ -350,3 +376,9 @@ engine fail-fast; MLX90640 I2C recovery and re-init backoff; health-monitor
    duplicates.
 8. Reboot with `hotspot.env` lacking `PROJECT_PI_FORCE_HOTSPOT`: the Pi stays on
    its current Wi-Fi profile.
+9. Offline boot: power on with Wi-Fi off (or the access point down); thermal and
+   KWS must be active and a spoken keyword must reach the backend
+   (`journalctl -u thermal-backend`) within the normal start time, with no wait
+   for the network.
+10. `--apply` failure on the Pi (for example a deliberately invalid unit): the
+    rollback must restore the previous units and services.

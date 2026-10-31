@@ -14,10 +14,11 @@
 #                         raspberry_pi/requirements/*.lock.txt
 #
 # It never installs or upgrades packages and never runs nmcli. Every replaced file is
-# backed up to /var/lib/project-pi/install-backups/<UTC timestamp>/ first. It never
-# overwrites anything in /etc/systemd/system/*.service.d/ and never touches dataset/,
-# models, alerts.db, recordings, caregiver credentials or other /etc/project-pi/*.env.
-set -euo pipefail
+# backed up to /var/lib/project-pi/install-backups/<UTC timestamp>/ first, and a failure
+# during --apply rolls back every file and unit change it made. It never overwrites
+# anything in /etc/systemd/system/*.service.d/ and never touches dataset/, models,
+# alerts.db, recordings, caregiver credentials or other /etc/project-pi/*.env.
+set -Eeuo pipefail
 
 MODE=dry-run
 RESTART=0
@@ -39,17 +40,26 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
+# Tests only: install into a scratch directory instead of /. Ownership is then left alone.
+ROOT="${PROJECT_PI_INSTALL_ROOT:-}"
+OWN=(-o root -g root)
+if [[ -n "${ROOT}" ]]; then
+  OWN=()
+fi
+
 REPO="${PROJECT_PI_REPO:-/home/thesis/Project_Pi}"
 SCRIPTS="${REPO}/raspberry_pi/scripts"
 SYSTEMD_SRC="${REPO}/raspberry_pi/systemd"
 REQUIREMENTS="${REPO}/raspberry_pi/requirements"
 SUDOERS_SRC="${REPO}/raspberry_pi/sudoers/project-pi-thesis"
-HOTSPOT_CONF=/etc/project-pi/hotspot.env
-BACKEND_CONF=/etc/project-pi/backend.env
-THERMAL_DROPIN=/etc/systemd/system/thermal-backend.service.d/10-local.conf
+UNIT_DIR="${ROOT}/etc/systemd/system"
+HOTSPOT_CONF="${ROOT}/etc/project-pi/hotspot.env"
+BACKEND_CONF="${ROOT}/etc/project-pi/backend.env"
+THERMAL_DROPIN="${UNIT_DIR}/thermal-backend.service.d/10-local.conf"
 LEGACY_VOSK_UNIT=kws-alert-vosk.service
 LEGACY_TOKEN=project-pi-local-token
-BACKUP_DIR="/var/lib/project-pi/install-backups/$(date -u +%Y%m%dT%H%M%SZ)"
+BACKUP_ROOT="${ROOT}/var/lib/project-pi/install-backups"
+BACKUP_DIR="${BACKUP_ROOT}/$(date -u +%Y%m%dT%H%M%SZ)"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "${STAGE}"' EXIT
 
@@ -72,15 +82,15 @@ check_env() {
     ENV_DRIFT=1
   fi
 }
-check_env /home/thesis/kws-env "${REQUIREMENTS}/kws-env.lock.txt"
-check_env /home/thesis/thermal-env-sys "${REQUIREMENTS}/thermal-env-sys.lock.txt"
+check_env "${ROOT}/home/thesis/kws-env" "${REQUIREMENTS}/kws-env.lock.txt"
+check_env "${ROOT}/home/thesis/thermal-env-sys" "${REQUIREMENTS}/thermal-env-sys.lock.txt"
 
 # 2. Files to install: "source|destination|mode".
 TARGETS=(
-  "${SCRIPTS}/pi_refresh.sh|/usr/local/sbin/project-pi-refresh|755"
-  "${SCRIPTS}/headless_boot.sh|/usr/local/sbin/project-pi-boot|755"
-  "${SCRIPTS}/log_cleanup.sh|/usr/local/sbin/project-pi-log-cleanup|755"
-  "${SUDOERS_SRC}|/etc/sudoers.d/project-pi-thesis|440"
+  "${SCRIPTS}/pi_refresh.sh|${ROOT}/usr/local/sbin/project-pi-refresh|755"
+  "${SCRIPTS}/headless_boot.sh|${ROOT}/usr/local/sbin/project-pi-boot|755"
+  "${SCRIPTS}/log_cleanup.sh|${ROOT}/usr/local/sbin/project-pi-log-cleanup|755"
+  "${SUDOERS_SRC}|${ROOT}/etc/sudoers.d/project-pi-thesis|440"
 )
 UNITS=(
   project-pi-boot.service
@@ -94,7 +104,7 @@ UNITS=(
   apk-server.service
 )
 for unit in "${UNITS[@]}"; do
-  TARGETS+=("${SYSTEMD_SRC}/${unit}|/etc/systemd/system/${unit}|644")
+  TARGETS+=("${SYSTEMD_SRC}/${unit}|${UNIT_DIR}/${unit}|644")
 done
 
 # Created once, never overwritten: it holds the admin's choice of API auth mode.
@@ -197,6 +207,17 @@ else
   echo "RESTART    none (pass --restart to restart thermal-backend and kws-alert)"
 fi
 
+# Root sources hotspot.env; both files hold secrets. Reported, never changed here.
+for conf in "${HOTSPOT_CONF}" "${BACKEND_CONF}"; do
+  if [[ -e "${conf}" ]]; then
+    read -r conf_owner conf_mode < <(stat -c '%U %a' "${conf}")
+    if [[ "${conf_owner}" != root ]] || (( (8#${conf_mode} & 8#077) != 0 )); then
+      echo "WARNING: ${conf} is ${conf_owner}:${conf_mode}; expected root-owned 600" \
+        "(fix: sudo chown root:root ${conf} && sudo chmod 600 ${conf})." >&2
+    fi
+  fi
+done
+
 visudo -cf "${SUDOERS_SRC}"
 if grep -qs "^PROJECT_PI_API_TOKEN=${LEGACY_TOKEN}\$" "${BACKEND_CONF}"; then
   echo "WARNING: ${BACKEND_CONF} sets the public legacy token; it is never accepted as authentication." >&2
@@ -215,46 +236,110 @@ if [[ "${ENV_DRIFT}" -eq 1 && "${ACCEPT_ENV_DRIFT}" -ne 1 ]]; then
   exit 1
 fi
 
-install -d -m 0700 -o root -g root /var/lib/project-pi/install-backups "${BACKUP_DIR}"
+# Journal of every change, so a failure part-way through can undo them all.
+CREATED=()
+REPLACED=()
+NEWLY_ENABLED=()
+VOSK_WAS_ACTIVE=0
+VOSK_WAS_ENABLED=0
+VOSK_FILE_REMOVED=0
+VOSK_MASKED=0
+RESTART_ATTEMPTED=0
+
 backup() {
   [[ -e "$1" ]] || return 0
-  mkdir -p "${BACKUP_DIR}$(dirname "$1")"
-  cp -a "$1" "${BACKUP_DIR}$1"
+  mkdir -p "${BACKUP_DIR}$(dirname "${1#"${ROOT}"}")"
+  cp -a "$1" "${BACKUP_DIR}${1#"${ROOT}"}"
 }
 
-install -d -m 0755 /etc/project-pi /var/lib/project-pi "$(dirname "${THERMAL_DROPIN}")"
+rollback() {
+  local status=$?
+  trap - ERR
+  set +e
+  echo "ERROR: --apply failed (exit ${status}); rolling back every change it made." >&2
+  for unit in "${NEWLY_ENABLED[@]}"; do
+    systemctl disable "${unit}"
+  done
+  for dest in "${REPLACED[@]}"; do
+    cp -a "${BACKUP_DIR}${dest#"${ROOT}"}" "${dest}"
+  done
+  for dest in "${CREATED[@]}"; do
+    rm -f "${dest}"
+  done
+  if [[ "${VOSK_MASKED}" -eq 1 ]]; then
+    systemctl unmask "${LEGACY_VOSK_UNIT}"
+  fi
+  if [[ "${VOSK_FILE_REMOVED}" -eq 1 ]]; then
+    cp -a "${BACKUP_DIR}/etc/systemd/system/${LEGACY_VOSK_UNIT}" "${UNIT_DIR}/${LEGACY_VOSK_UNIT}"
+  fi
+  systemctl daemon-reload
+  if [[ "${VOSK_WAS_ENABLED}" -eq 1 ]]; then
+    systemctl enable "${LEGACY_VOSK_UNIT}"
+  fi
+  if [[ "${VOSK_WAS_ACTIVE}" -eq 1 ]]; then
+    systemctl start "${LEGACY_VOSK_UNIT}"
+  fi
+  if [[ "${RESTART_ATTEMPTED}" -eq 1 ]]; then
+    systemctl restart thermal-backend.service kws-alert.service
+  fi
+  echo "Rolled back. Replaced files were restored from ${BACKUP_DIR}; the backup is kept." >&2
+  exit 1
+}
+trap rollback ERR
+
+install -d -m 0700 "${OWN[@]}" "${BACKUP_ROOT}" "${BACKUP_DIR}"
+install -d -m 0755 "${OWN[@]}" "${ROOT}/etc/project-pi" "${ROOT}/var/lib/project-pi" \
+  "$(dirname "${THERMAL_DROPIN}")" "${ROOT}/etc/sudoers.d" "${ROOT}/usr/local/sbin"
 for target in "${CHANGED[@]}"; do
   IFS='|' read -r src dest mode <<<"${target}"
-  backup "${dest}"
-  install -o root -g root -m "0${mode}" "${src}" "${dest}"
+  if [[ -e "${dest}" ]]; then
+    backup "${dest}"
+    REPLACED+=("${dest}")
+  else
+    CREATED+=("${dest}")
+  fi
+  install "${OWN[@]}" -m "0${mode}" "${src}" "${dest}"
 done
 echo "Backups of replaced files: ${BACKUP_DIR}"
 
-# Single microphone owner. A failed stop aborts the install (set -e) instead of being hidden.
+# Single microphone owner. A failed stop aborts and rolls back instead of being hidden.
+if systemctl is-enabled --quiet "${LEGACY_VOSK_UNIT}"; then
+  VOSK_WAS_ENABLED=1
+fi
 if systemctl is-active --quiet "${LEGACY_VOSK_UNIT}"; then
+  VOSK_WAS_ACTIVE=1
   systemctl stop "${LEGACY_VOSK_UNIT}"
 fi
-legacy_unit_file="/etc/systemd/system/${LEGACY_VOSK_UNIT}"
+legacy_unit_file="${UNIT_DIR}/${LEGACY_VOSK_UNIT}"
 if [[ -f "${legacy_unit_file}" && ! -L "${legacy_unit_file}" ]]; then
   # mask cannot replace a real unit file; it is kept in the backup.
   systemctl disable "${LEGACY_VOSK_UNIT}"
   backup "${legacy_unit_file}"
   rm "${legacy_unit_file}"
+  VOSK_FILE_REMOVED=1
 fi
 systemctl daemon-reload
 systemctl mask "${LEGACY_VOSK_UNIT}"
+VOSK_MASKED=1
 if systemctl is-active --quiet "${LEGACY_VOSK_UNIT}"; then
   echo "ERROR: ${LEGACY_VOSK_UNIT} is still active; refusing to leave a second microphone owner." >&2
-  exit 1
+  false
 fi
 
+for unit in "${ENABLE_UNITS[@]}"; do
+  if ! systemctl is-enabled --quiet "${unit}"; then
+    NEWLY_ENABLED+=("${unit}")
+  fi
+done
 systemctl enable "${ENABLE_UNITS[@]}"
 
 if [[ "${RESTART}" -eq 1 ]]; then
+  RESTART_ATTEMPTED=1
   systemctl restart thermal-backend.service kws-alert.service
 else
   echo "No service was restarted. To activate: sudo systemctl restart thermal-backend.service kws-alert.service"
 fi
+trap - ERR
 
 echo ""
 echo "Headless install applied."

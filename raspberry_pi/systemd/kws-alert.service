@@ -1,7 +1,8 @@
 [Unit]
 Description=Project Pi Vosk, Snowboy, and openWakeWord alert service
-After=sound.target network-online.target project-pi-boot.service thermal-backend.service
-Wants=network-online.target thermal-backend.service
+# Offline-safe: posts only to 127.0.0.1, so it never waits for Wi-Fi or the boot preparation.
+After=sound.target thermal-backend.service
+Wants=thermal-backend.service
 # The legacy unit opens the same ReSpeaker; only one capture owner may run.
 Conflicts=kws-alert-vosk.service
 StartLimitIntervalSec=120

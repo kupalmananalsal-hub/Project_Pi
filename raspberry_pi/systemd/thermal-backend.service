@@ -1,7 +1,8 @@
 [Unit]
 Description=Project Pi thermal/audio FastAPI backend
-After=network-online.target sound.target project-pi-boot.service
-Wants=network-online.target
+# Offline-safe: detection must start without Wi-Fi/internet and without waiting for the
+# boot preparation (network wait, hotspot). It binds 0.0.0.0 and needs no network.
+After=sound.target
 StartLimitIntervalSec=120
 StartLimitBurst=10
 
