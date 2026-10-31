@@ -323,6 +323,8 @@ def load_backend_module(temp_dir, real_http=False):
         sys.modules[spec.name] = module
         assert spec.loader is not None
         spec.loader.exec_module(module)
+        # Tests run without backend.env (which would mean "locked"); auth tests set it.
+        module.API_AUTH_MODE, module.OPEN_MODE_ACK = "open", module.OPEN_MODE_ACK_VALUE
         return module, previous
     except Exception:
         restore_modules(previous)

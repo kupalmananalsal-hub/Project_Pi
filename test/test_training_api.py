@@ -1,5 +1,7 @@
 import asyncio
+import contextlib
 import csv
+import io
 import os
 import subprocess
 import tempfile
@@ -677,6 +679,7 @@ class TrainingApiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             module, previous = self.load_module(temp_dir)
             try:
+                module.OPEN_MODE_ACK = module.OPEN_MODE_ACK_VALUE
                 for token in ("", "a-configured-but-ignored-token-0123"):
                     module.API_AUTH_MODE, module.API_TOKEN = "open", token
                     self.assertFalse(module.api_auth_enabled())
@@ -701,9 +704,11 @@ class TrainingApiTest(unittest.TestCase):
             module, previous = self.load_module(temp_dir)
             try:
                 # Open mode starts even with the legacy token configured: it is ignored.
+                module.OPEN_MODE_ACK = module.OPEN_MODE_ACK_VALUE
                 for token in ("", "project-pi-local-token", "short"):
                     module.API_AUTH_MODE, module.API_TOKEN = "open", token
                     module.check_security_config()
+                    self.assertEqual(module.effective_auth_mode(), "open")
             finally:
                 self.cleanup(module, previous)
 
@@ -775,21 +780,86 @@ class TrainingApiTest(unittest.TestCase):
             finally:
                 self.cleanup(module, previous)
 
-    def test_required_mode_startup_refuses_missing_short_or_legacy_token(self):
+    # Group 3: missing or incomplete configuration fails closed ("locked"), never open.
+    LOCKED_CONFIGS = [
+        ("", "", "", "not set"),  # backend.env missing
+        ("", "a-real-secret-0123456789", "", "not set"),
+        ("requird", "a-real-secret-0123456789", "", "is not one of"),
+        ("required", "", "", "PROJECT_PI_API_TOKEN"),
+        ("required", "short", "", "PROJECT_PI_API_TOKEN"),
+        ("required", "project-pi-local-token", "", "PROJECT_PI_API_TOKEN"),
+        ("open", "", "", "PROJECT_PI_OPEN_MODE_ACK"),
+        ("open", "", "yes", "PROJECT_PI_OPEN_MODE_ACK"),
+    ]
+
+    def test_missing_or_invalid_config_locks_every_route_without_stopping(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             module, previous = self.load_module(temp_dir)
             try:
-                for token in ("", "short", "project-pi-local-token"):
-                    module.API_AUTH_MODE, module.API_TOKEN = "required", token
-                    with self.assertRaisesRegex(RuntimeError, "PROJECT_PI_API_TOKEN"):
-                        module.check_security_config()
+                for mode, token, ack, reason in self.LOCKED_CONFIGS:
+                    module.API_AUTH_MODE, module.API_TOKEN, module.OPEN_MODE_ACK = mode, token, ack
+                    self.assertEqual(module.effective_auth_mode(), "locked", (mode, token, ack))
+                    self.assertIn(reason, module.api_auth_fault())
+                    module.check_security_config()  # starts: detection keeps running
+                    for headers in self.OLD_APK_HEADER_VARIANTS + [
+                            [(b"authorization", b"Bearer a-real-secret-0123456789")]]:
+                        for method, path in self.OLD_APK_HTTP_ROUTES + [("POST", "/api/training/deploy")]:
+                            reached, sent = self.run_through_auth(module, {
+                                "type": "http", "method": method, "path": path,
+                                "headers": headers})
+                            self.assertEqual(reached, [], (mode, path, headers))
+                            self.assertEqual(sent[0]["status"], 401)
+                        # Includes caregiver protocol v2: no access path while locked.
+                        for path, query in (("/ws/alerts", b""), ("/ws/thermal", b""),
+                                            ("/ws/audio", b""), ("/ws/alerts", b"protocol=2")):
+                            reached, sent = self.run_through_auth(module, {
+                                "type": "websocket", "path": path, "query_string": query,
+                                "headers": headers})
+                            self.assertEqual(reached, [], (mode, path, query))
+                            self.assertEqual(sent, [{"type": "websocket.close", "code": 1008}])
+            finally:
+                self.cleanup(module, previous)
+
+    def test_locked_mode_is_reported_locally_and_as_a_health_fault(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            old_state = os.environ.get("STATE_DIRECTORY")
+            os.environ["STATE_DIRECTORY"] = temp_dir
+            try:
+                module.API_AUTH_MODE, module.API_TOKEN, module.OPEN_MODE_ACK = "", "", ""
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    module.check_security_config()
+                self.assertIn("api_auth_mode=locked", stderr.getvalue())
+                self.assertIn("ERROR: API LOCKED", stderr.getvalue())
+                fault_file = Path(temp_dir) / "auth_fault"
+                self.assertIn("not set", fault_file.read_text(encoding="utf-8"))
+                module.read_shared_audio_status = lambda max_age_seconds: None
+                self.assertIn("API authentication locked",
+                              module.health_monitor.failing_components())
+                # A valid configuration clears the local diagnostic and the fault.
                 module.API_AUTH_MODE, module.API_TOKEN = "required", "a-real-secret-0123456789"
                 module.check_security_config()
-                # A typo in the mode must not silently mean "open".
-                module.API_AUTH_MODE = "requird"
-                self.assertTrue(module.api_auth_enabled())
-                with self.assertRaisesRegex(RuntimeError, "PROJECT_PI_API_AUTH"):
-                    module.check_security_config()
+                self.assertFalse(fault_file.exists())
+                self.assertNotIn("API authentication locked",
+                                 module.health_monitor.failing_components())
+            finally:
+                if old_state is None:
+                    os.environ.pop("STATE_DIRECTORY", None)
+                else:
+                    os.environ["STATE_DIRECTORY"] = old_state
+                self.cleanup(module, previous)
+
+    def test_kws_401_is_a_health_fault(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                module.API_AUTH_MODE, module.API_TOKEN = "required", "a-real-secret-0123456789"
+                module.read_shared_audio_status = lambda max_age_seconds: {"outbox": {
+                    "pending": 3, "auth_rejected_since": "2026-11-01T00:00:00+00:00"}}
+                failing = module.health_monitor.failing_components()
+                self.assertIn("HTTP 401", failing["alert delivery unauthorized"])
+                self.assertIn("3 alert(s) held", failing["alert delivery unauthorized"])
             finally:
                 self.cleanup(module, previous)
 
@@ -802,7 +872,7 @@ class TrainingApiTest(unittest.TestCase):
                 module.cpu_temp_c = lambda: None
                 module.i2c_devices = lambda: {"devices": []}
                 status = asyncio.run(module.api_status())
-                self.assertEqual(status["api_auth_mode"], module.API_AUTH_MODE)
+                self.assertEqual(status["api_auth_mode"], module.effective_auth_mode())
                 self.assertIn(status["thermal"]["thermal_refresh_source"],
                               ("env", "legacy_default"))
                 self.assertIn("alert_outbox", status)

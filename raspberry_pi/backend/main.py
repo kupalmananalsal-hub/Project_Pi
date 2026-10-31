@@ -109,9 +109,12 @@ KEYWORD_METADATA_PATH = KEYWORD_DATASET_DIR / "metadata.csv"
 OPENWAKEWORD_MODEL_DIR = DATASET_DIR / "audio" / "openwakeword_models"
 DATASET_ARCHIVES_DIR = DATASET_DIR / "archives"
 API_TOKEN = os.getenv("PROJECT_PI_API_TOKEN", "").strip()
-# "open" (default): no authentication, isolated network only. "required": bearer token.
-API_AUTH_MODE = os.getenv("PROJECT_PI_API_AUTH", "").strip().lower() or "open"
+# Requested mode: "required" (bearer token) or "open" (no authentication, only with the
+# isolated-network acknowledgment). Anything missing or invalid runs "locked" (fail closed).
+API_AUTH_MODE = os.getenv("PROJECT_PI_API_AUTH", "").strip().lower()
 API_AUTH_MODES = ("open", "required")
+OPEN_MODE_ACK_VALUE = "isolated-network-verified"
+OPEN_MODE_ACK = os.getenv("PROJECT_PI_OPEN_MODE_ACK", "").strip()
 LEGACY_DEFAULT_API_TOKEN = "project-pi-local-token"
 MIN_API_TOKEN_LENGTH = 16
 REFRESH_HELPER = Path("/usr/local/sbin/project-pi-refresh")
@@ -165,16 +168,38 @@ app.add_middleware(
 )
 
 
+def api_auth_fault() -> str | None:
+    """Why the API is locked, or None when the configured mode is complete."""
+    if API_AUTH_MODE == "open":
+        if OPEN_MODE_ACK == OPEN_MODE_ACK_VALUE:
+            return None
+        return (f"PROJECT_PI_API_AUTH=open without "
+                f"PROJECT_PI_OPEN_MODE_ACK={OPEN_MODE_ACK_VALUE}")
+    if API_AUTH_MODE == "required":
+        if (not API_TOKEN or API_TOKEN == LEGACY_DEFAULT_API_TOKEN
+                or len(API_TOKEN) < MIN_API_TOKEN_LENGTH):
+            return ("PROJECT_PI_API_AUTH=required but PROJECT_PI_API_TOKEN is missing, "
+                    f"shorter than {MIN_API_TOKEN_LENGTH} characters, or the public default")
+        return None
+    if not API_AUTH_MODE:
+        return "PROJECT_PI_API_AUTH is not set (is /etc/project-pi/backend.env missing?)"
+    return f"PROJECT_PI_API_AUTH={API_AUTH_MODE!r} is not one of {API_AUTH_MODES}"
+
+
+def effective_auth_mode() -> str:
+    return "locked" if api_auth_fault() else API_AUTH_MODE
+
+
 def api_auth_enabled() -> bool:
-    # Any value other than "open" fails closed; startup refuses unknown modes anyway.
-    return API_AUTH_MODE != "open"
+    return effective_auth_mode() != "open"
 
 
 def api_token_valid(authorization: str) -> bool:
     scheme, _, token = authorization.partition(" ")
     token = token.strip()
     return (
-        bool(API_TOKEN)
+        effective_auth_mode() == "required"
+        and bool(API_TOKEN)
         and API_TOKEN != LEGACY_DEFAULT_API_TOKEN
         and token != LEGACY_DEFAULT_API_TOKEN
         and scheme.lower() == "bearer"
@@ -187,15 +212,14 @@ def api_token_required(scope: dict[str, Any]) -> bool:
         return False
     path = scope.get("path", "")
     query = scope.get("query_string", b"").split(b"&")
-    if path == "/ws/alerts" and b"protocol=2" in query:
+    if path == "/ws/alerts" and b"protocol=2" in query and effective_auth_mode() != "locked":
         return False  # caregiver delivery authenticates with its own per-phone secret
     return path.startswith(("/api/", "/ws/"))
 
 
 class ApiTokenMiddleware:
-    """When auth is enabled, require the bearer token on every /api and /ws route,
-    so no handler can forget it. With auth enabled but no usable token, every guarded
-    request is refused (fail closed); startup refuses that configuration anyway."""
+    """Unless in acknowledged open mode, require the bearer token on every /api and /ws
+    route, so no handler can forget it. Locked mode accepts no token at all."""
 
     def __init__(self, app):
         self.app = app
@@ -1692,31 +1716,43 @@ def current_noise_settings() -> dict[str, Any]:
     }
 
 
+def auth_locked_message(fault: str) -> str:
+    return (
+        f"ERROR: API LOCKED: {fault}. Every /api and /ws request is refused: the app, "
+        "caregiver phones and KWS alert posts (kept in the KWS outbox, not delivered). "
+        "Thermal and keyword detection keep running. Fix /etc/project-pi/backend.env, then "
+        "restart thermal-backend and kws-alert. Never switch to open on a shared network."
+    )
+
+
+def write_auth_fault_file(fault: str | None) -> None:
+    # Local diagnostic readable on the Pi without the API (systemd StateDirectory).
+    state_dir = os.getenv("STATE_DIRECTORY")
+    if not state_dir:
+        return
+    path = Path(state_dir.split(os.pathsep)[0]) / "auth_fault"
+    try:
+        if fault:
+            path.write_text(fault + "\n", encoding="utf-8")
+        else:
+            path.unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"WARNING: could not update {path}: {exc}", file=sys.stderr, flush=True)
+
+
 def check_security_config() -> None:
-    if API_AUTH_MODE not in API_AUTH_MODES:
-        raise RuntimeError(
-            f"PROJECT_PI_API_AUTH={API_AUTH_MODE!r} is not one of {API_AUTH_MODES}."
-        )
-    print(f"api_auth_mode={API_AUTH_MODE}", file=sys.stderr, flush=True)
-    if api_auth_enabled():
-        # Explicitly enabled auth with an unusable token must not quietly turn auth off.
-        if (
-            not API_TOKEN
-            or API_TOKEN == LEGACY_DEFAULT_API_TOKEN
-            or len(API_TOKEN) < MIN_API_TOKEN_LENGTH
-        ):
-            raise RuntimeError(
-                "PROJECT_PI_API_AUTH=required but PROJECT_PI_API_TOKEN is missing, "
-                f"shorter than {MIN_API_TOKEN_LENGTH} characters, or the public default. "
-                "Set a random token in /etc/project-pi/backend.env, or set "
-                "PROJECT_PI_API_AUTH=open for the isolated-network mode."
-            )
-    else:
+    # Never raises: refusing to start would also stop thermal detection.
+    fault = api_auth_fault()
+    print(f"api_auth_mode={effective_auth_mode()}", file=sys.stderr, flush=True)
+    write_auth_fault_file(fault)
+    if fault:
+        print(auth_locked_message(fault), file=sys.stderr, flush=True)
+    elif not api_auth_enabled():
         print(
-            "WARNING: PROJECT_PI_API_AUTH=open: NO authentication. Every /api and /ws "
-            "route, including refresh, reboot, shutdown, model deploy and alerts, is open "
-            "to anyone on this network; the legacy app token is not security. Use only "
-            "on an isolated hotspot.",
+            "WARNING: PROJECT_PI_API_AUTH=open (acknowledged as an isolated network): NO "
+            "authentication. Every /api and /ws route, including refresh, reboot, shutdown, "
+            "model deploy and alerts, is open to anyone on this network; the legacy app "
+            "token is not security.",
             file=sys.stderr,
             flush=True,
         )
@@ -1740,6 +1776,7 @@ def check_security_config() -> None:
 
 HEALTH_CHECK_INTERVAL_SECONDS = 15.0
 HEALTH_STARTUP_GRACE_SECONDS = 60.0  # KWS loads its models before publishing audio status
+AUTH_LOCKED_LOG_SECONDS = 60.0
 
 
 class HealthMonitor:
@@ -1748,6 +1785,7 @@ class HealthMonitor:
     def __init__(self) -> None:
         self.suspect: set[str] = set()
         self.faulted: set[str] = set()
+        self.next_locked_log = 0.0
 
     def failing_components(self) -> dict[str, str]:
         failing = {}
@@ -1757,11 +1795,13 @@ class HealthMonitor:
         else:
             outbox = audio_status.get("outbox") or {}
             # Counts come from KWS's durable loss ledger: they survive restarts until an
-            # operator reviews and deletes it.
-            if outbox.get("critical_evictions") or outbox.get("loss_ledger_unreadable"):
+            # operator reviews and acknowledges it.
+            if (outbox.get("critical_evictions") or outbox.get("soft_limit_evictions")
+                    or outbox.get("loss_ledger_unreadable")):
                 failing["alert outbox overflow"] = (
-                    f"{outbox.get('critical_evictions', 0)} undelivered certain_critical "
-                    "alert(s) evicted at the KWS outbox hard limit"
+                    f"{outbox.get('critical_evictions', 0)} undelivered possibly-critical "
+                    "alert(s) evicted at the KWS outbox hard limit, "
+                    f"{outbox.get('soft_limit_evictions', 0)} possible_critical at the soft limit"
                     + (", loss ledger was unreadable" if outbox.get("loss_ledger_unreadable")
                        else "")
                     + f"; review {outbox.get('loss_ledger_path')}"
@@ -1774,12 +1814,26 @@ class HealthMonitor:
                     f"rejected by the backend, {outbox.get('quarantine_critical_evictions', 0)} "
                     f"evicted at the hard limit; review {outbox.get('quarantine_path')}"
                 )
+            if outbox.get("auth_rejected_since"):
+                failing["alert delivery unauthorized"] = (
+                    f"the backend has refused KWS alerts (HTTP 401) since "
+                    f"{outbox['auth_rejected_since']}; {outbox.get('pending', 0)} alert(s) held "
+                    "in the KWS outbox; check /etc/project-pi/backend.env"
+                )
         if thermal.mlx is None and thermal.error:
             failing["thermal camera offline"] = str(thermal.error)
+        fault = api_auth_fault()
+        if fault:
+            failing["API authentication locked"] = fault
         return failing
 
     async def check_once(self) -> None:
         failing = await asyncio.to_thread(self.failing_components)
+        fault = failing.get("API authentication locked")
+        if fault and time.monotonic() >= self.next_locked_log:
+            # Repeated, not once per outage: nothing reaches the app while locked.
+            self.next_locked_log = time.monotonic() + AUTH_LOCKED_LOG_SECONDS
+            print(auth_locked_message(fault), file=sys.stderr, flush=True)
         # Two consecutive failed checks, so a service restart does not page anyone.
         confirmed = set(failing) & self.suspect
         self.suspect = set(failing)
@@ -1951,7 +2005,7 @@ async def api_status():
             "mlx90640_variant": MLX90640_VARIANT,
             **thermal_model_status,
         },
-        "api_auth_mode": API_AUTH_MODE,
+        "api_auth_mode": effective_auth_mode(),
         "alert_outbox": (read_shared_audio_status(max_age_seconds=10.0) or {}).get("outbox"),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

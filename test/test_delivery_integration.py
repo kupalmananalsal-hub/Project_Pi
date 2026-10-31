@@ -76,6 +76,7 @@ class DeliveryIntegrationTest(unittest.TestCase):
     def test_open_mode_legacy_client_compat_over_real_http(self):
         """Compatibility only: open mode has no authentication."""
         self.module.API_AUTH_MODE = "open"
+        self.module.OPEN_MODE_ACK = self.module.OPEN_MODE_ACK_VALUE
         self.module.API_TOKEN = ""
         anonymous = TestClient(self.module.app)
         self.addCleanup(anonymous.close)
