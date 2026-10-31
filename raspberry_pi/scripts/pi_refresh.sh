@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Refresh KWS stack from the mobile app (runs as root via sudo).
+# Root helper behind /api/refresh. install_headless.sh installs it root-owned as
+# /usr/local/sbin/project-pi-refresh; sudoers allows only that copy.
+# It must never run anything from the thesis-writable repo: the backend does
+# `git pull` itself as thesis, and unit files change only via install_headless.sh.
 set -euo pipefail
 
-REPO="${PROJECT_PI_REPO:-/home/thesis/Project_Pi}"
-SYSTEMD_SRC="${REPO}/raspberry_pi/systemd"
-GIT_PULL=0
 RESTART_BACKEND=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --git-pull) GIT_PULL=1 ;;
     --restart-backend) RESTART_BACKEND=1 ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
   shift
 done
@@ -19,20 +19,6 @@ log() {
   echo "$*"
   logger -t project-pi-refresh "$*"
 }
-
-if [[ "${GIT_PULL}" -eq 1 ]]; then
-  if [[ -d "${REPO}/.git" ]]; then
-    log "Pulling latest code"
-    sudo -u thesis git -C "${REPO}" pull --ff-only
-  else
-    log "Skipping git pull (no git repository at ${REPO})"
-  fi
-fi
-
-log "Installing kws-alert.service unit"
-install -m 0644 "${SYSTEMD_SRC}/kws-alert.service" /etc/systemd/system/kws-alert.service
-systemctl daemon-reload
-systemctl enable kws-alert.service
 
 log "Restarting kws-alert.service"
 systemctl reset-failed kws-alert.service 2>/dev/null || true

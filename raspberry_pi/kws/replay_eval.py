@@ -205,9 +205,12 @@ class EventRecorder:
         self.events: list[dict[str, object]] = []
         self.scores: list[tuple[float, str, float]] = []
 
-    def __call__(self, backend_url, queue_path):  # used in place of the AlertPoster class
-        del backend_url, queue_path
+    def __call__(self, backend_url, queue_path, **kwargs):  # used in place of the AlertPoster class
+        del backend_url, queue_path, kwargs
         return self
+
+    def outbox_status(self) -> None:
+        return None
 
     def start_worker(self) -> None:
         pass

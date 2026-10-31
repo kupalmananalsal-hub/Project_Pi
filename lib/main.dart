@@ -4,9 +4,16 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'providers/app_services_provider.dart';
 import 'providers/settings_provider.dart';
 import 'screens/app_shell.dart';
+import 'services/api_token.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Before runApp: the auto-connect on first build needs the token.
+  try {
+    await ApiToken.load();
+  } catch (_) {
+    // Unreadable secure storage: the Pi will reject requests and Settings asks for the token.
+  }
   runApp(const ProviderScope(child: ThermalAudioMonitorApp()));
 }
 

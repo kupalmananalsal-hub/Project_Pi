@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
+# Runs as root from the root-owned copy /usr/local/sbin/project-pi-log-cleanup.
 set -euo pipefail
 
 LOG_TAG="project-pi-log-cleanup"
 STATE_DIR="/var/lib/project-pi"
-REPO="${PROJECT_PI_REPO:-/home/thesis/Project_Pi}"
 
 log() {
   echo "[${LOG_TAG}] $*"
@@ -28,16 +28,13 @@ for pattern in '*.log' '*.log.*'; do
   find /tmp -maxdepth 1 -type f -name "${pattern}" -mtime +3 -delete 2>/dev/null || true
 done
 
-if [[ -f /tmp/project_pi_alerts.jsonl ]] && [[ "$(wc -c </tmp/project_pi_alerts.jsonl)" -gt 5242880 ]]; then
-  log "Truncating large alert queue log"
-  : >/tmp/project_pi_alerts.jsonl
-fi
+# The KWS alert outbox (/var/lib/project-pi/backend/alerts.jsonl) is never truncated here:
+# it holds undelivered distress alerts and bounds itself (500 soft, 5,000 / 5 MB hard).
 
 usage="$(disk_use_percent)"
 if [[ "${usage}" -ge 85 ]]; then
   log "Disk usage ${usage}% — aggressive cleanup"
   apt-get clean -qq || true
-  find "${REPO}" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
   journalctl --vacuum-size=100M >/dev/null 2>&1 || true
 fi
 

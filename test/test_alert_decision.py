@@ -124,6 +124,15 @@ class AlertDecisionEngineTest(unittest.TestCase):
         self.assertEqual(second["decision_state"], "advisory")
         self.assertEqual(second["decision_factors"]["repeat_count"], 0)
 
+    def test_old_detection_timestamp_does_not_downgrade_critical(self):
+        # A detection replayed from the KWS outbox after a backend outage keeps its
+        # classification; any age-based downgrade needs separate safety review.
+        result = self.evaluate(
+            0.95, self.positive_thermal(), timestamp="2020-01-01T00:00:00+00:00"
+        )
+        self.assertEqual(result["decision_state"], "critical")
+        self.assertEqual(result["decision_reason"], "voice_confirmed_by_thermal")
+
     def test_low_confidence_thermal_positive_escalates_to_critical(self):
         result = self.evaluate(0.35, self.positive_thermal(), keyword="tulong")
         self.assert_decision(

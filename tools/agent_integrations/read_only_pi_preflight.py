@@ -25,9 +25,44 @@ PROBES = {
     'interfaces': ('find', '/dev', '-maxdepth', '1', '-name', 'i2c-*', '-o', '-name', 'spidev*', '-o', '-name', 'gpiochip*'),
     'overlays': ('grep', '-E', '^[[:space:]]*(dtoverlay|dtparam)=', '/boot/firmware/config.txt'),
     'models': ('find', '/home/thesis/Project_Pi/dataset/audio/openwakeword_models', '-maxdepth', '1', '-type', 'f', '-printf', '%f\n'),
-    'backend': ('curl', '--noproxy', '*', '--fail', '--silent', '--show-error', '--max-time', '3', '--max-filesize', '16384', 'http://127.0.0.1:8765/api/status'),
+    # Status code only: when API auth is enabled the backend requires a bearer token, which
+    # this probe never reads or sends, so the body is discarded and 401 is the expected answer.
+    'backend': ('curl', '--noproxy', '*', '--silent', '--show-error', '--max-time', '3', '--output', '/dev/null', '--write-out', '%{http_code}', 'http://127.0.0.1:8765/api/status'),
+    # Single microphone owner: the process holding each open ALSA PCM, and the KWS service PID.
+    'capture_owner': ('grep', '-rsH', '--include=status', 'owner_pid', '/proc/asound'),
+    'kws_main_pid': ('systemctl', 'show', '--property=MainPID', '--value', 'kws-alert.service'),
 }
 LIMIT = 16384
+
+
+def classify_mic_owner(capture, kws_pid):
+    """Compare capture-PCM owner PIDs with kws-alert's MainPID (playback PCMs are ignored)."""
+    if 'error' in capture or 'error' in kws_pid:
+        return 'MIC_OWNER_UNKNOWN'
+    owners = {int(pid) for pid in re.findall(
+        r'/pcm\d+c/sub\d+/status:\s*owner_pid\s*:\s*(\d+)', capture.get('output') or '')}
+    main_pid = (kws_pid.get('output') or '').strip()
+    if not main_pid.isdigit():
+        return 'MIC_OWNER_UNKNOWN'
+    if not owners:
+        return 'MIC_NOT_CAPTURING'
+    if owners == {int(main_pid)}:
+        return 'MIC_OWNER_KWS_ONLY'
+    return 'MIC_MULTIPLE_OWNERS' if int(main_pid) in owners else 'MIC_OWNER_NOT_KWS'
+
+
+def classify_backend(result):
+    """Name what an unauthenticated /api/status request proves, and no more."""
+    code = (result.get('output') or '').strip()[-3:]
+    if result.get('exit_code') != 0 or not code.isdigit() or code == '000':
+        return 'BACKEND_UNREACHABLE'
+    if code == '401':
+        # Listening and enforcing auth; authenticated application health is still unverified.
+        return 'BACKEND_REACHABLE_AUTH_REQUIRED'
+    if code == '200':
+        # Answered without a token: open mode (the default) or a pre-Milestone-1 backend.
+        return 'BACKEND_REACHABLE_AUTH_NOT_ENFORCED'
+    return 'BACKEND_HTTP_' + code
 
 
 def bounded_run(argv, timeout=8, limit=LIMIT):
@@ -99,14 +134,20 @@ def run_probes(names, config=None, alias=None, approved=False, local=False, runn
         else:
             try: result=runner(argv)
             except OSError as exc: result={'exit_code':None,'error':type(exc).__name__}
+        if name == 'backend' and 'error' not in result:
+            result['classification'] = classify_backend(result)
         results[name]=result
         if log:
             # No raw command output, host address, credential path or environment in audit log.
             entry={'probe':name,'mode':'ssh' if config else 'local','exit_code':result.get('exit_code'),
                    'timeout':result.get('timeout',False),'truncated':result.get('truncated',False),
-                   'elapsed_ms':round((time.monotonic()-started)*1000),'error':result.get('error')}
+                   'elapsed_ms':round((time.monotonic()-started)*1000),'error':result.get('error'),
+                   'classification':result.get('classification')}
             log.parent.mkdir(parents=True,exist_ok=True)
             with log.open('a',encoding='utf-8') as f: f.write(json.dumps(entry)+'\n')
+    if 'capture_owner' in results and 'kws_main_pid' in results:
+        results['capture_owner']['classification'] = classify_mic_owner(
+            results['capture_owner'], results['kws_main_pid'])
     return {'mode':'SSH_READ_ONLY' if config else 'LOCAL_READ_ONLY','results':results}
 
 

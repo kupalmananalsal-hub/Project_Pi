@@ -1,14 +1,16 @@
 [Unit]
-Description=Project Pi headless boot preparation (hotspot, units, apt, logs)
+Description=Project Pi headless boot preparation (network log or opt-in hotspot, log cleanup)
 After=NetworkManager-wait-online.service network-online.target
 Wants=network-online.target
-# Do not stop/restart app units here; they start via multi-user.target after this oneshot.
+# Do not stop/restart app units here. Detection units are not ordered after this oneshot,
+# so a slow or offline network never delays them.
 
 [Service]
 Type=oneshot
 User=root
 RemainAfterExit=yes
-ExecStart=/home/thesis/Project_Pi/raspberry_pi/scripts/headless_boot.sh
+# Root-owned copy installed by install_headless.sh; never run the thesis-writable repo copy as root.
+ExecStart=/usr/local/sbin/project-pi-boot
 TimeoutStartSec=600
 
 [Install]

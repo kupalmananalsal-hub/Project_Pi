@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/app_settings.dart';
 import '../models/system_status.dart';
+import '../services/background_monitoring.dart';
 import '../services/pi_api_service.dart';
 import 'alerts_provider.dart';
 import 'audio_provider.dart';
@@ -20,7 +21,14 @@ final connectionProvider =
 typedef PiStatusFetcher = Future<SystemStatus> Function(String host, int port);
 
 final piStatusFetcherProvider = Provider<PiStatusFetcher>((ref) {
-  return (host, port) => PiApiService(host: host, port: port).fetchStatus();
+  return (host, port) async {
+    final api = PiApiService(host: host, port: port);
+    try {
+      return await api.fetchStatus();
+    } finally {
+      api.close();
+    }
+  };
 });
 
 class PiConnectionChannels {
@@ -160,6 +168,9 @@ class PiConnectionState {
 
 class ConnectionController extends Notifier<PiConnectionState> {
   Timer? _statusTimer;
+  Timer? _retryTimer;
+  int _retryAttempt = 0;
+  int _connectGeneration = 0;
   bool _startupConnectScheduled = false;
   bool _updatingSettingsForConnect = false;
 
@@ -200,11 +211,17 @@ class ConnectionController extends Notifier<PiConnectionState> {
         }
       });
     }
-    ref.onDispose(_stopPolling);
+    ref.onDispose(() {
+      _stopPolling();
+      _retryTimer?.cancel();
+    });
     return PiConnectionState(host: settings.host, port: settings.port);
   }
 
   Future<void> connect({String? host, int? port}) async {
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    final generation = ++_connectGeneration;
     final settings = ref.read(settingsProvider);
     final requestedHost = (host ?? settings.host).trim();
     final requestedPort = AppSettings.normalizeBackendPort(
@@ -223,6 +240,9 @@ class ConnectionController extends Notifier<PiConnectionState> {
       return;
     }
 
+    // Every attempt, including retries, so a phone that boots before the Pi keeps
+    // retrying with the screen off. Only an explicit Disconnect stops it.
+    unawaited(BackgroundMonitoring.start());
     _updatingSettingsForConnect = true;
     try {
       await ref.read(settingsProvider.notifier).updateHost(requestedHost);
@@ -230,6 +250,7 @@ class ConnectionController extends Notifier<PiConnectionState> {
     } finally {
       _updatingSettingsForConnect = false;
     }
+    if (!ref.mounted || generation != _connectGeneration) return;
 
     state = state.copyWith(
       host: requestedHost,
@@ -244,6 +265,8 @@ class ConnectionController extends Notifier<PiConnectionState> {
         requestedHost,
         requestedPort,
       );
+      if (!ref.mounted || generation != _connectGeneration) return;
+      _retryAttempt = 0;
       ref.read(piConnectionChannelsProvider).connect(target.host, target.port);
       state = state.copyWith(
         host: target.host,
@@ -257,6 +280,7 @@ class ConnectionController extends Notifier<PiConnectionState> {
       );
       _startPolling(target.host, target.port);
     } catch (error) {
+      if (!ref.mounted || generation != _connectGeneration) return;
       _closeConnectionChannels();
       state = state.copyWith(
         host: requestedHost,
@@ -264,14 +288,28 @@ class ConnectionController extends Notifier<PiConnectionState> {
         connectionStatus: PiConnectionStatus.error,
         status: null,
         lastStatusAt: null,
-        error: _friendlyError(error),
+        error: '${_friendlyError(error)} Retrying...',
         userRequestedDisconnect: false,
       );
+      // After a power cut the phone is usually up before the Pi; without a retry
+      // the app would stay disconnected (and receive no alerts) until someone taps Connect.
+      final delay = Duration(seconds: _retryAttempt++ == 0 ? 2 : 5);
+      _retryTimer = Timer(delay, () {
+        _retryTimer = null;
+        if (ref.mounted && !state.userRequestedDisconnect) {
+          unawaited(connect(host: requestedHost, port: requestedPort));
+        }
+      });
     }
   }
 
   void disconnect() {
+    _connectGeneration++;
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _retryAttempt = 0;
     _closeConnectionChannels();
+    unawaited(BackgroundMonitoring.stop());
     state = state.copyWith(
       connectionStatus: PiConnectionStatus.disconnected,
       status: null,
@@ -311,22 +349,32 @@ class ConnectionController extends Notifier<PiConnectionState> {
 
   void _startPolling(String host, int port) {
     _stopPolling();
-    _statusTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+    // One poll at a time: a slow Pi (up to 8 s per request) must not pile requests up,
+    // so the next poll is scheduled only when this one finishes.
+    late final Timer timer;
+    timer = Timer(const Duration(seconds: 5), () async {
+      SystemStatus? status;
+      Object? failure;
       try {
-        final status = await ref.read(piStatusFetcherProvider)(host, port);
-        state = state.copyWith(
-          connectionStatus: PiConnectionStatus.connected,
-          status: status,
-          lastStatusAt: DateTime.now(),
-          error: null,
-        );
+        status = await ref.read(piStatusFetcherProvider)(host, port);
       } catch (error) {
-        state = state.copyWith(
-          connectionStatus: PiConnectionStatus.error,
-          error: _friendlyError(error),
-        );
+        failure = error;
       }
+      if (!ref.mounted || !identical(_statusTimer, timer)) return;
+      state = failure == null
+          ? state.copyWith(
+              connectionStatus: PiConnectionStatus.connected,
+              status: status,
+              lastStatusAt: DateTime.now(),
+              error: null,
+            )
+          : state.copyWith(
+              connectionStatus: PiConnectionStatus.error,
+              error: _friendlyError(failure),
+            );
+      _startPolling(host, port);
     });
+    _statusTimer = timer;
   }
 
   void _stopPolling() {
@@ -362,6 +410,9 @@ class ConnectionController extends Notifier<PiConnectionState> {
   }
 
   String _friendlyError(Object error) {
+    if (error is DioException && error.response?.statusCode == 401) {
+      return 'The Pi requires an API token (authentication is on). Enter it in Settings.';
+    }
     if (error is DioException) {
       switch (error.type) {
         case DioExceptionType.connectionTimeout:

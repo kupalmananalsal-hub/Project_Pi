@@ -19,6 +19,7 @@ RASPBERRY_PI_ROOT = Path(__file__).resolve().parents[1]
 if str(RASPBERRY_PI_ROOT) not in sys.path:
     sys.path.insert(0, str(RASPBERRY_PI_ROOT))
 
+from alert_decision import AlertDecisionEngine, AlertPolicy
 from alert_trace import trace_alert
 
 import numpy as np
@@ -39,6 +40,24 @@ RUNNING = True
 SAMPLE_RATE = 16000
 CHUNK_FRAMES = 1024
 ALERT_FLUSH_INTERVAL_SECONDS = 2.0
+# Soft limit: beyond it the oldest certain_suppressed, then possible_critical events go.
+MAX_PENDING_ALERTS = 500
+# Hard limits: only here are certain_critical events evicted (error + health fault).
+HARD_MAX_PENDING_ALERTS = 5000
+HARD_MAX_PENDING_BYTES = 5 * 1024 * 1024
+# Lost-event summaries kept in the loss ledger (the counts there are never trimmed).
+LOSS_LEDGER_RECENT = 100
+# How often KWS notices an operator acknowledging reviewed loss/rejected files.
+REVIEW_CHECK_SECONDS = 5.0
+# Permanently rejected (4xx) events kept for review. Beyond this soft limit only
+# certain_suppressed records are dropped; the hard limits above apply to the rest.
+MAX_QUARANTINED_ALERTS = 500
+# Pre-PR #9 outbox location (tmpfs); merged into the durable outbox on startup.
+LEGACY_ALERT_QUEUE_PATH = Path("/tmp/project_pi_alerts.jsonl")
+# Retention hints only: the backend classifies with thermal evidence at delivery time.
+RETENTION_TIER_NAMES = {1: "certain_suppressed", 2: "possible_critical", 3: "certain_critical"}
+# 50 openWakeWord frames of 80 ms: a broken model exits instead of silently never detecting.
+OPENWAKEWORD_MAX_CONSECUTIVE_FAILURES = 50
 DEFAULT_AUDIO_STATUS_PATH = Path("/tmp/project_pi_audio_status.json")
 TAGALOG_KEYWORD_ALIASES: dict[str, set[str]] = {
     "tulong": {
@@ -122,19 +141,68 @@ def handle_signal(signum, frame):
     RUNNING = False
 
 
+def retention_tier(event: dict[str, object], policy: AlertPolicy) -> int:
+    """Which final states the backend could still assign, from queue-time facts only.
+
+    Mirrors AlertDecisionEngine._classify without thermal evidence: 3 = CRITICAL whatever
+    the thermal state, 2 = CRITICAL or advisory depending on thermal (or a fault/manual
+    advisory), 1 = suppressed whatever the thermal state.
+    """
+    source = event.get("source")
+    if source == "manual_button":
+        return 3
+    if (
+        source in ("manual_button_single", "health_monitor")
+        or str(event.get("event", "")).strip().lower() == "system_fault"
+    ):
+        return 2
+    confidence = AlertDecisionEngine._as_float(event.get("confidence"))
+    if confidence >= policy.critical_threshold:
+        return 3
+    if confidence < policy.advisory_threshold:
+        return 1
+    return 2  # also NaN, which the backend never suppresses
+
+
 class AlertPoster:
-    def __init__(self, backend_url: str, queue_path: Path):
+    def __init__(
+        self,
+        backend_url: str,
+        queue_path: Path,
+        *,
+        legacy_queue_path: Path | None = None,
+        policy: AlertPolicy | None = None,
+    ):
         self.backend_url = backend_url
         self.queue_path = queue_path
+        # Same policy file and safe-default fallback as the backend.
+        self.policy = policy or AlertPolicy.load()
         self.session = requests.Session()
+        token = os.getenv("PROJECT_PI_API_TOKEN", "").strip()
+        if token:
+            self.session.headers["Authorization"] = f"Bearer {token}"
         self.lock = threading.Lock()
         self._flush_queue: queue.Queue[object] = queue.Queue(maxsize=1)
         self._worker_stop = threading.Event()
         self._worker_thread: threading.Thread | None = None
-        self.pending, upgraded_pending = self._load_pending()
-        if upgraded_pending:
-            with self.lock:
+        self.evictions = 0
+        # Durable record of lost possibly-critical events: survives restarts until an
+        # operator reviews it and moves it out of the state directory.
+        self.loss_path = queue_path.with_name(f"{queue_path.stem}.losses.json")
+        self.losses = self._read_losses()
+        # Events the backend permanently rejected (4xx); kept for review, never retried.
+        self.quarantine_path = queue_path.with_name(f"{queue_path.stem}.rejected.jsonl")
+        self.quarantined, _ = self._read_events(self.quarantine_path)
+        self._review_seen = self._review_signature()
+        self._next_review_check = time.monotonic() + REVIEW_CHECK_SECONDS
+        self.pending, changed = self._read_events(self.queue_path)
+        with self.lock:
+            migrated_from = self._merge_legacy_locked(legacy_queue_path)
+            changed = self._enforce_bounds_locked() or changed or migrated_from is not None
+            if changed:
                 self._persist_pending_locked()
+        if migrated_from is not None:
+            self._retire_legacy(migrated_from)
 
     def publish(
         self,
@@ -156,10 +224,13 @@ class AlertPoster:
         }
         if extra:
             event.update(extra)
+        event["retention_tier"] = retention_tier(event, self.policy)
         trace_alert("detection", event["event_id"], "accepted", keyword=keyword,
-                    source=source, confidence=confidence)
+                    source=source, confidence=confidence,
+                    retention_tier=RETENTION_TIER_NAMES[event["retention_tier"]])
         with self.lock:
             self.pending.append(event)
+            self._enforce_bounds_locked()
             self._persist_pending_locked()
         if self._worker_thread is not None and self._worker_thread.is_alive():
             try:
@@ -206,8 +277,15 @@ class AlertPoster:
                 event = dict(self.pending[0])
                 pending_count = len(self.pending)
             try:
-                response = self.session.post(self.backend_url, json=event, timeout=1.0)
-                response.raise_for_status()
+                # The tier is a local retention hint; the backend payload (and fingerprint) stay as before.
+                payload = {k: v for k, v in event.items() if k != "retention_tier"}
+                response = self.session.post(self.backend_url, json=payload, timeout=1.0)
+                status_code = int(getattr(response, "status_code", 200))
+                # Other 4xx (400, 409 conflict, 422) never succeed on retry and would block the
+                # queue head forever: they are quarantined, not retried and not discarded.
+                rejected = 400 <= status_code < 500 and status_code not in (401, 408, 429)
+                if not rejected:
+                    response.raise_for_status()
             except Exception as exc:  # pragma: no cover - network side effect
                 trace_alert("http_post", event.get("event_id"), "failed",
                             error_type=type(exc).__name__, pending_count=pending_count)
@@ -221,19 +299,235 @@ class AlertPoster:
             with self.lock:
                 if self.pending and self.pending[0].get("event_id") == event.get("event_id"):
                     sent = self.pending.pop(0)
+                    if rejected:
+                        # Durable in quarantine before it leaves the outbox.
+                        self._quarantine_locked(sent, status_code,
+                                                str(getattr(response, "text", ""))[:500])
                     self._persist_pending_locked()
                 else:
                     continue
-            trace_alert("http_post", sent.get("event_id"), "succeeded",
-                        keyword=sent["keyword"], status_code=getattr(response, "status_code", None))
+            if not rejected:
+                trace_alert("http_post", sent.get("event_id"), "succeeded",
+                            keyword=sent["keyword"], status_code=status_code)
 
-    def _load_pending(self) -> tuple[list[dict[str, object]], bool]:
-        if not self.queue_path.exists():
+    def outbox_status(self) -> dict[str, object]:
+        if time.monotonic() >= self._next_review_check:
+            self.reload_reviewed_state()
+        with self.lock:
+            pending = len(self.pending)
+            return {
+                "pending": pending,
+                "pressure": pending >= MAX_PENDING_ALERTS or self.evictions > 0,
+                "evictions": self.evictions,
+                # Persisted counts: they stay non-zero until the loss ledger is cleared.
+                "critical_evictions": self.losses["outbox_hard_limit"],
+                "soft_limit": MAX_PENDING_ALERTS,
+                "hard_limit": HARD_MAX_PENDING_ALERTS,
+                "hard_limit_bytes": HARD_MAX_PENDING_BYTES,
+                "quarantined": len(self.quarantined),
+                "quarantined_possibly_critical": sum(
+                    1 for e in self.quarantined if e.get("retention_tier", 2) >= 2),
+                "quarantine_critical_evictions": self.losses["quarantine_hard_limit"],
+                "loss_ledger_unreadable": len(self._review_seen[2]),
+                "loss_ledger_path": str(self.loss_path),
+                "quarantine_path": str(self.quarantine_path),
+            }
+
+    def _quarantine_locked(self, event: dict[str, object], status_code: int, detail: str) -> None:
+        tier = event.get("retention_tier", 2)
+        self.quarantined.append({
+            **event,
+            "rejected_status": status_code,
+            "rejected_detail": detail,
+            "rejected_at": datetime.now(timezone.utc).isoformat(),
+        })
+        # Beyond the soft limit only certain_suppressed records go; possibly-critical ones are
+        # evicted only at the outbox hard limits, lowest tier and oldest first, with a fault.
+        sizes = [len(json.dumps(e)) + 1 for e in self.quarantined]
+        total = sum(sizes)
+        while self.quarantined:
+            over_hard = (len(self.quarantined) > HARD_MAX_PENDING_ALERTS
+                         or total > HARD_MAX_PENDING_BYTES)
+            if not over_hard and len(self.quarantined) <= MAX_QUARANTINED_ALERTS:
+                break
+            index = min(range(len(self.quarantined)),
+                        key=lambda i: (self.quarantined[i].get("retention_tier", 2), i))
+            dropped_tier = self.quarantined[index].get("retention_tier", 2)
+            if not over_hard and dropped_tier >= 2:
+                break
+            dropped = self.quarantined.pop(index)
+            total -= sizes.pop(index)
+            if dropped_tier >= 2:
+                self._record_loss_locked("quarantine_hard_limit", dropped)
+            trace_alert("outbox", dropped.get("event_id"), "quarantine_evicted",
+                        retention_tier=RETENTION_TIER_NAMES.get(dropped_tier, "unknown"))
+            print(f"{'ERROR' if dropped_tier >= 2 else 'WARNING'}: alert quarantine full; "
+                  f"rejected {RETENTION_TIER_NAMES.get(dropped_tier, 'unknown')} event "
+                  f"{dropped.get('event_id')} evicted", file=sys.stderr, flush=True)
+        self._write_jsonl(self.quarantine_path, self.quarantined)
+        self._review_seen = self._review_signature()
+        trace_alert("http_post", event.get("event_id"), "quarantined",
+                    keyword=event.get("keyword"), status_code=status_code,
+                    retention_tier=RETENTION_TIER_NAMES.get(tier, "unknown"))
+        print(
+            f"{'ERROR' if tier >= 2 else 'WARNING'}: backend rejected alert "
+            f"{event.get('event_id')} ({event.get('keyword')!r}, "
+            f"{RETENTION_TIER_NAMES.get(tier, 'unknown')}) with HTTP {status_code}; "
+            f"quarantined in {self.quarantine_path}, not retried: {detail}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    def _enforce_bounds_locked(self) -> bool:
+        evicted = False
+        # Soft limit: certain_suppressed first, then possible_critical; never certain_critical.
+        while len(self.pending) > MAX_PENDING_ALERTS:
+            candidates = [i for i, e in enumerate(self.pending) if e["retention_tier"] < 3]
+            if not candidates:
+                break
+            self._evict_locked(
+                min(candidates, key=lambda i: (self.pending[i]["retention_tier"], i)),
+                "outbox_soft_limit",
+            )
+            evicted = True
+        sizes = [len(json.dumps(event)) + 1 for event in self.pending]
+        total = sum(sizes)
+        while self.pending and (
+            len(self.pending) > HARD_MAX_PENDING_ALERTS or total > HARD_MAX_PENDING_BYTES
+        ):
+            index = min(range(len(self.pending)),
+                        key=lambda i: (self.pending[i]["retention_tier"], i))
+            total -= sizes.pop(index)
+            self._evict_locked(index, "outbox_hard_limit")
+            evicted = True
+        return evicted
+
+    def _evict_locked(self, index: int, reason: str) -> None:
+        event = self.pending.pop(index)
+        tier = event["retention_tier"]
+        self.evictions += 1
+        if tier == 3:
+            self._record_loss_locked("outbox_hard_limit", event)
+        trace_alert("outbox", event.get("event_id"), "evicted", reason=reason,
+                    retention_tier=RETENTION_TIER_NAMES[tier])
+        print(
+            f"{'ERROR' if tier == 3 else 'WARNING'}: alert outbox {reason}: evicted "
+            f"{RETENTION_TIER_NAMES[tier]} event {event.get('event_id')} "
+            f"({event.get('keyword')!r}, confidence={event.get('confidence')}); "
+            f"{len(self.pending)} still queued",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    def reload_reviewed_state(self) -> None:
+        """Pick up an operator moving reviewed loss/rejected files away, without a restart.
+
+        Only a change KWS did not make itself triggers a reload, so a failed write of our
+        own never lowers the in-memory counts.
+        """
+        with self.lock:
+            self._next_review_check = time.monotonic() + REVIEW_CHECK_SECONDS
+            if self._review_signature() == self._review_seen:
+                return
+            self.losses = self._read_losses()
+            self.quarantined, _ = self._read_events(self.quarantine_path)
+            self._review_seen = self._review_signature()
+
+    def _review_signature(self) -> tuple[object, ...]:
+        def stamp(path: Path) -> tuple[int, int] | None:
+            try:
+                info = path.stat()
+            except FileNotFoundError:
+                return None
+            return info.st_mtime_ns, info.st_size
+
+        return (stamp(self.loss_path), stamp(self.quarantine_path),
+                tuple(p.name for p in self._unreadable_ledgers()))
+
+    def _unreadable_ledgers(self) -> list[Path]:
+        # The kept-aside damaged ledgers are the durable fault: it lasts across restarts
+        # until the operator moves them out of this directory.
+        return sorted(self.loss_path.parent.glob(f"{self.loss_path.name}.unreadable-*"))
+
+    def _read_losses(self) -> dict[str, object]:
+        losses: dict[str, object] = {"outbox_hard_limit": 0, "quarantine_hard_limit": 0,
+                                     "recent": []}
+        if not self.loss_path.exists():
+            return losses
+        try:
+            stored = json.loads(self.loss_path.read_text(encoding="utf-8"))
+            for key in ("outbox_hard_limit", "quarantine_hard_limit"):
+                losses[key] = int(stored.get(key, 0))
+            losses["recent"] = list(stored.get("recent", []))[-LOSS_LEDGER_RECENT:]
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            # Never let a damaged ledger read as "no losses": keep it aside, unmodified.
+            aside = self.loss_path.with_name(f"{self.loss_path.name}.unreadable-{time.time_ns()}")
+            os.replace(self.loss_path, aside)
+            self._fsync_dir(aside.parent)
+            print(f"ERROR: alert loss ledger unreadable ({exc}); moved to {aside}",
+                  file=sys.stderr, flush=True)
+        return losses
+
+    def _record_loss_locked(self, kind: str, event: dict[str, object]) -> None:
+        self.losses[kind] = int(self.losses[kind]) + 1
+        recent = list(self.losses["recent"])
+        recent.append({
+            "kind": kind,
+            "event_id": event.get("event_id"),
+            "keyword": event.get("keyword"),
+            "confidence": event.get("confidence"),
+            "source": event.get("source"),
+            "retention_tier": RETENTION_TIER_NAMES.get(event.get("retention_tier"), "unknown"),
+            "timestamp": event.get("timestamp"),
+            "lost_at": datetime.now(timezone.utc).isoformat(),
+        })
+        self.losses["recent"] = recent[-LOSS_LEDGER_RECENT:]
+        self.loss_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.loss_path.with_name(f"{self.loss_path.name}.tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
+            json.dump(self.losses, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, self.loss_path)
+        self._fsync_dir(self.loss_path.parent)
+        self._review_seen = self._review_signature()
+
+    def _merge_legacy_locked(self, legacy_path: Path | None) -> Path | None:
+        if legacy_path is None or not legacy_path.exists():
+            return None
+        if legacy_path.resolve() == self.queue_path.resolve():
+            return None
+        legacy, _ = self._read_events(legacy_path)
+        known = {event["event_id"] for event in self.pending}
+        for event in legacy:
+            if event["event_id"] in known:
+                continue  # keep the first copy of each event_id
+            known.add(event["event_id"])
+            self.pending.append(event)
+            trace_alert("outbox", event["event_id"], "migrated",
+                        source_path=str(legacy_path),
+                        retention_tier=RETENTION_TIER_NAMES[event["retention_tier"]])
+        return legacy_path
+
+    @staticmethod
+    def _retire_legacy(legacy_path: Path) -> None:
+        # Never deleted: renamed only after its events are fsynced into the durable outbox.
+        target = legacy_path.with_name(f"{legacy_path.name}.migrated")
+        if target.exists():
+            target = legacy_path.with_name(f"{legacy_path.name}.{int(time.time())}.migrated")
+        try:
+            os.replace(legacy_path, target)
+        except OSError as exc:
+            # Re-merged next start; event_id dedupe keeps that harmless.
+            print(f"WARNING: could not rename {legacy_path}: {exc}", file=sys.stderr, flush=True)
+
+    def _read_events(self, path: Path) -> tuple[list[dict[str, object]], bool]:
+        if not path.exists():
             return [], False
 
         pending: list[dict[str, object]] = []
         upgraded_pending = False
-        with self.queue_path.open("r", encoding="utf-8") as handle:
+        with path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 try:
                     decoded = json.loads(line)
@@ -243,23 +537,44 @@ class AlertPoster:
                     if not self._has_event_id(decoded):
                         decoded["event_id"] = str(uuid.uuid4())
                         upgraded_pending = True
+                    if decoded.get("retention_tier") not in RETENTION_TIER_NAMES:
+                        decoded["retention_tier"] = retention_tier(decoded, self.policy)
+                        upgraded_pending = True
                     pending.append(decoded)
         return pending, upgraded_pending
 
     def _persist_pending_locked(self) -> None:
-        if not self.pending:
+        self._write_jsonl(self.queue_path, self.pending)
+
+    @staticmethod
+    def _write_jsonl(path: Path, events: list[dict[str, object]]) -> None:
+        if not events:
             try:
-                self.queue_path.unlink()
+                path.unlink()
             except FileNotFoundError:
                 pass
             return
 
-        self.queue_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = self.queue_path.with_name(f"{self.queue_path.name}.tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f"{path.name}.tmp")
         with temp_path.open("w", encoding="utf-8") as handle:
-            for event in self.pending:
+            for event in events:
                 handle.write(json.dumps(event) + "\n")
-        os.replace(temp_path, self.queue_path)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        AlertPoster._fsync_dir(path.parent)
+
+    @staticmethod
+    def _fsync_dir(directory: Path) -> None:
+        # Makes the rename itself durable on POSIX; Windows cannot fsync a directory.
+        if os.name != "posix":
+            return
+        fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     @staticmethod
     def _has_event_id(event: dict[str, object]) -> bool:
@@ -628,6 +943,7 @@ def write_audio_status(status_path: Path, packet: dict[str, object]) -> None:
         "openwakeword_wake_words": packet.get("openwakeword_wake_words", []),
         "openwakeword_scores": packet.get("openwakeword_scores", []),
         "openwakeword_error": packet.get("openwakeword_error"),
+        "outbox": packet.get("outbox"),
         "source": "kws_shared_audio",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -698,9 +1014,10 @@ def vosk_worker(
     audio_queue: queue.Queue,
     dispatcher: DetectionDispatcher,
     config: dict[str, object],
+    recognizer: KaldiRecognizer,
+    verifier: Wav2Vec2Verifier | None,
 ) -> None:
     sample_rate = int(config["sample_rate"])
-    recognizer = create_vosk_recognizer(config["model_path"], sample_rate)
     debug = bool(config["debug"])
     last_debug_text = ""
     confidence = float(config["confidence"])
@@ -709,11 +1026,6 @@ def vosk_worker(
     max_context_samples = max(int(sample_rate * context_seconds), sample_rate)
     recent_audio: deque[np.ndarray] = deque()
     recent_audio_sample_count = 0
-    verifier = (
-        Wav2Vec2Verifier(sample_rate=sample_rate)
-        if bool(config["wav2vec2_enabled"])
-        else None
-    )
     print(f"Vosk ready for Tagalog distress keywords: {config['model_path']}", flush=True)
     if verifier is not None:
         print(
@@ -813,21 +1125,19 @@ def vosk_worker(
             recent_audio_sample_count = 0
 
 
-def snowboy_worker(
-    audio_queue: queue.Queue,
-    dispatcher: DetectionDispatcher,
+def create_snowboy_detector(
     config: dict[str, object],
     sensitivity_controller: AdaptiveSnowboySensitivity,
-) -> None:
+):
     snowboydetect = import_snowboydetect(config["swig_path"], config["examples_path"])
     detector = snowboydetect.SnowboyDetect(
         str(config["resource_path"]).encode(),
         ",".join(str(path) for path in config["model_paths"]).encode(),
     )
     detector.SetAudioGain(float(config["audio_gain"]))
-
-    current_sensitivities = ",".join(sensitivity_controller.sensitivity_list(len(config["model_paths"])))
-    detector.SetSensitivity(current_sensitivities.encode())
+    detector.SetSensitivity(
+        ",".join(sensitivity_controller.sensitivity_list(len(config["model_paths"]))).encode()
+    )
 
     detected_sample_rate = int(detector.SampleRate())
     if detected_sample_rate != config["sample_rate"]:
@@ -835,7 +1145,19 @@ def snowboy_worker(
             f"Snowboy sample rate is {detected_sample_rate}; capture uses {config['sample_rate']}.",
             flush=True,
         )
+    return detector
 
+
+def snowboy_worker(
+    audio_queue: queue.Queue,
+    dispatcher: DetectionDispatcher,
+    config: dict[str, object],
+    sensitivity_controller: AdaptiveSnowboySensitivity,
+    detector,
+) -> None:
+    current_sensitivities = ",".join(
+        sensitivity_controller.sensitivity_list(len(config["model_paths"]))
+    )
     print(
         "Snowboy ready for "
         + ", ".join(config["keywords"])
@@ -1058,15 +1380,7 @@ def main() -> None:
     if len(snowboy_keywords) != len(snowboy_model_paths):
         raise RuntimeError("SNOWBOY_KEYWORDS must match SNOWBOY_MODEL_PATHS")
 
-    missing = [
-        str(path)
-        for path in [vosk_model_path, snowboy_resource_path, *snowboy_model_paths]
-        if not path.exists()
-    ]
-    if missing:
-        raise RuntimeError(f"Missing keyword model path(s): {', '.join(missing)}")
-
-    poster = AlertPoster(backend_url, queue_path)
+    poster = AlertPoster(backend_url, queue_path, legacy_queue_path=LEGACY_ALERT_QUEUE_PATH)
     poster.start_worker()
     cooldown = CooldownGate(cooldown_seconds)
     dispatcher = DetectionDispatcher(
@@ -1079,50 +1393,62 @@ def main() -> None:
     )
     vosk_queue: queue.Queue = queue.Queue(maxsize=32)
     snowboy_queue: queue.Queue = queue.Queue(maxsize=32)
+    vosk_config = {
+        "model_path": vosk_model_path,
+        "sample_rate": sample_rate,
+        "confidence": float(os.getenv("VOSK_KEYWORD_CONFIDENCE", "0.75")),
+        "debug": debug,
+        "wav2vec2_verify_below_confidence": float(
+            os.getenv("WAV2VEC2_VERIFY_BELOW_CONFIDENCE", "0.70")
+        ),
+        "wav2vec2_context_seconds": float(
+            os.getenv("WAV2VEC2_CONTEXT_SECONDS", "2.0")
+        ),
+    }
+    snowboy_config = {
+        "swig_path": os.getenv("SNOWBOY_SWIG_PATH", "/home/thesis/snowboy/swig/Python3"),
+        "examples_path": os.getenv(
+            "SNOWBOY_EXAMPLES_PATH", "/home/thesis/snowboy/examples/Python3"
+        ),
+        "resource_path": snowboy_resource_path,
+        "model_paths": snowboy_model_paths,
+        "keywords": snowboy_keywords,
+        "alert_keyword": os.getenv("SNOWBOY_ALERT_KEYWORD", "help"),
+        "audio_gain": float(os.getenv("SNOWBOY_AUDIO_GAIN", "1.0")),
+        "confidence": float(os.getenv("SNOWBOY_CONFIDENCE", "0.95")),
+        "sample_rate": sample_rate,
+    }
 
-    vosk_thread = threading.Thread(
-        target=vosk_worker,
-        args=(
-            vosk_queue,
-            dispatcher,
-            {
-                "model_path": vosk_model_path,
-                "sample_rate": sample_rate,
-                "confidence": float(os.getenv("VOSK_KEYWORD_CONFIDENCE", "0.75")),
-                "debug": debug,
-                "wav2vec2_enabled": _env_bool("WAV2VEC2_VERIFIER_ENABLED", True),
-                "wav2vec2_verify_below_confidence": float(
-                    os.getenv("WAV2VEC2_VERIFY_BELOW_CONFIDENCE", "0.70")
-                ),
-                "wav2vec2_context_seconds": float(
-                    os.getenv("WAV2VEC2_CONTEXT_SECONDS", "2.0")
-                ),
-            },
-        ),
-        daemon=True,
-    )
-    snowboy_thread = threading.Thread(
-        target=snowboy_worker,
-        args=(
-            snowboy_queue,
-            dispatcher,
-            {
-                "swig_path": os.getenv("SNOWBOY_SWIG_PATH", "/home/thesis/snowboy/swig/Python3"),
-                "examples_path": os.getenv(
-                    "SNOWBOY_EXAMPLES_PATH", "/home/thesis/snowboy/examples/Python3"
-                ),
-                "resource_path": snowboy_resource_path,
-                "model_paths": snowboy_model_paths,
-                "keywords": snowboy_keywords,
-                "alert_keyword": os.getenv("SNOWBOY_ALERT_KEYWORD", "help"),
-                "audio_gain": float(os.getenv("SNOWBOY_AUDIO_GAIN", "1.0")),
-                "confidence": float(os.getenv("SNOWBOY_CONFIDENCE", "0.95")),
-                "sample_rate": sample_rate,
-            },
-            adaptive_sensitivity,
-        ),
-        daemon=True,
-    )
+    # Engines initialise here, not in their threads: a missing optional engine is
+    # disabled up front, and any worker thread that dies later stops the process.
+    workers: list[threading.Thread] = []
+    try:
+        recognizer = create_vosk_recognizer(vosk_model_path, sample_rate)
+        verifier = (
+            Wav2Vec2Verifier(sample_rate=sample_rate)
+            if _env_bool("WAV2VEC2_VERIFIER_ENABLED", True)
+            else None
+        )
+        workers.append(threading.Thread(
+            target=vosk_worker,
+            args=(vosk_queue, dispatcher, vosk_config, recognizer, verifier),
+            name="vosk",
+            daemon=True,
+        ))
+    except Exception as exc:
+        print(f"Vosk disabled: {exc!r}", file=sys.stderr, flush=True)
+    try:
+        detector = create_snowboy_detector(snowboy_config, adaptive_sensitivity)
+        workers.append(threading.Thread(
+            target=snowboy_worker,
+            args=(snowboy_queue, dispatcher, snowboy_config, adaptive_sensitivity, detector),
+            name="snowboy",
+            daemon=True,
+        ))
+    except Exception as exc:
+        print(f"Snowboy disabled: {exc!r}", file=sys.stderr, flush=True)
+    if not workers and not audio_preprocessor.available:
+        raise RuntimeError("No keyword engine available (openWakeWord, Vosk and Snowboy all failed)")
 
     pa = pyaudio.PyAudio()
     stream = None
@@ -1147,8 +1473,8 @@ def main() -> None:
             packet = split_audio_chunk(data, channels)
             noise_suppressor.capture_noise_profile(packet["raw_mono_samples"])
 
-        vosk_thread.start()
-        snowboy_thread.start()
+        for worker in workers:
+            worker.start()
         print(
             "Listening with openWakeWord as primary VAD/keyword engine; "
             "Vosk/Snowboy run only as speech fallback"
@@ -1160,13 +1486,18 @@ def main() -> None:
             flush=True,
         )
 
-        next_flush_at = 0.0
         next_noise_log_at = 0.0
         next_openwakeword_score_log_at = 0.0
         next_config_poll_at = 0.0
+        openwakeword_failures = 0
         while RUNNING:
             now = time.monotonic()
             if now >= next_config_poll_at:
+                dead = [worker.name for worker in workers if not worker.is_alive()]
+                if dead:
+                    raise RuntimeError(
+                        f"Keyword engine thread(s) died: {dead}; exiting so systemd restarts KWS"
+                    )
                 latest_config = config_store.load()
                 if latest_config != current_noise_config:
                     current_noise_config = latest_config
@@ -1189,6 +1520,16 @@ def main() -> None:
             packet = split_audio_chunk(data, channels)
             raw_samples = packet["raw_mono_samples"]
             preprocessor_result = audio_preprocessor.process(raw_samples)
+            if audio_preprocessor.available:
+                if preprocessor_result.get("available"):
+                    openwakeword_failures = 0
+                else:
+                    openwakeword_failures += 1
+                    if openwakeword_failures >= OPENWAKEWORD_MAX_CONSECUTIVE_FAILURES:
+                        raise RuntimeError(
+                            "openWakeWord prediction keeps failing: "
+                            f"{preprocessor_result.get('error')}"
+                        )
             speech_active = fallback_speech_active(preprocessor_result, raw_samples)
             cleaned_samples, metrics = noise_suppressor.process(raw_samples)
             preprocessed_samples = np.asarray(
@@ -1201,6 +1542,7 @@ def main() -> None:
             noise_suppressor.update_noise_profile(raw_samples, is_speech=speech_active)
             packet.update(metrics)
             packet.update(audio_preprocessor.to_metrics(preprocessor_result))
+            packet["outbox"] = poster.outbox_status()
             write_audio_status(audio_status_path, packet)
             adaptive_sensitivity.update_for_snr(float(packet.get("snr_db", 0.0)))
 
@@ -1291,10 +1633,8 @@ def main() -> None:
                     flush=True,
                 )
                 next_noise_log_at = now + noise_log_interval
-
-            if now >= next_flush_at:
-                poster.flush()
-                next_flush_at = now + ALERT_FLUSH_INTERVAL_SECONDS
+            # No poster.flush() here: the alert-poster thread owns all network I/O, so a
+            # slow backend can never stall capture and drop spoken keywords.
     finally:
         poster.stop_worker()
         if stream is not None:

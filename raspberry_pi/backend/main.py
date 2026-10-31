@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -24,7 +25,6 @@ import wave
 
 import numpy as np
 import psutil
-import pyaudio
 from fastapi import (
     FastAPI,
     File,
@@ -55,7 +55,11 @@ from alert_decision import AlertDecisionEngine
 from alert_trace import trace_alert
 from alert_delivery import DeliverySessions
 
-delivery_sessions = DeliverySessions()
+# 5 s/5 s detects a dead caregiver link fast; the pre-PR #9 values were 15 s/10 s.
+delivery_sessions = DeliverySessions(
+    heartbeat_interval=float(os.getenv("PROJECT_PI_HEARTBEAT_INTERVAL_SECONDS", "5")),
+    heartbeat_timeout=float(os.getenv("PROJECT_PI_HEARTBEAT_TIMEOUT_SECONDS", "5")),
+)
 from noise_suppressor import (
     DEFAULT_CONFIG_PATH,
     NoiseSuppressionConfig,
@@ -104,7 +108,22 @@ KEYWORD_DATASET_DIR = DATASET_DIR / "audio" / "keyword_dataset"
 KEYWORD_METADATA_PATH = KEYWORD_DATASET_DIR / "metadata.csv"
 OPENWAKEWORD_MODEL_DIR = DATASET_DIR / "audio" / "openwakeword_models"
 DATASET_ARCHIVES_DIR = DATASET_DIR / "archives"
-API_TOKEN = os.getenv("PROJECT_PI_API_TOKEN", "project-pi-local-token")
+API_TOKEN = os.getenv("PROJECT_PI_API_TOKEN", "").strip()
+# "open" (default): no authentication, isolated network only. "required": bearer token.
+API_AUTH_MODE = os.getenv("PROJECT_PI_API_AUTH", "").strip().lower() or "open"
+API_AUTH_MODES = ("open", "required")
+LEGACY_DEFAULT_API_TOKEN = "project-pi-local-token"
+MIN_API_TOKEN_LENGTH = 16
+REFRESH_HELPER = Path("/usr/local/sbin/project-pi-refresh")
+# Root-owned; created only by an authorized upgrade. Without it the app cannot git pull.
+APP_GIT_DEPLOY_FLAG = Path("/etc/project-pi/allow-app-git-deploy")
+# The rate depends on the MLX90640 variant, so it is a per-device setting (local drop-in).
+# Unset: 4 Hz, the rate the code hard-coded before, kept only so existing Pis do not change.
+_THERMAL_REFRESH_ENV = os.getenv("THERMAL_REFRESH_HZ", "").strip()
+THERMAL_REFRESH_HZ = _THERMAL_REFRESH_ENV or "4"
+THERMAL_REFRESH_SOURCE = "env" if _THERMAL_REFRESH_ENV else "legacy_default"
+MLX90640_VARIANT = os.getenv("MLX90640_VARIANT", "").strip() or "unverified"
+THERMAL_REINIT_INTERVAL_SECONDS = 2.0
 MAX_TRAINING_WAV_UPLOAD_BYTES = int(os.getenv("TRAINING_WAV_MAX_BYTES", str(8 * 1024 * 1024)))
 MAX_ONNX_UPLOAD_BYTES = int(os.getenv("TRAINING_ONNX_MAX_BYTES", str(128 * 1024 * 1024)))
 MAX_ONNX_DATA_UPLOAD_BYTES = int(
@@ -144,6 +163,68 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def api_auth_enabled() -> bool:
+    # Any value other than "open" fails closed; startup refuses unknown modes anyway.
+    return API_AUTH_MODE != "open"
+
+
+def api_token_valid(authorization: str) -> bool:
+    scheme, _, token = authorization.partition(" ")
+    token = token.strip()
+    return (
+        bool(API_TOKEN)
+        and API_TOKEN != LEGACY_DEFAULT_API_TOKEN
+        and token != LEGACY_DEFAULT_API_TOKEN
+        and scheme.lower() == "bearer"
+        and hmac.compare_digest(token.encode(), API_TOKEN.encode())
+    )
+
+
+def api_token_required(scope: dict[str, Any]) -> bool:
+    if scope["type"] == "http" and scope.get("method") == "OPTIONS":
+        return False
+    path = scope.get("path", "")
+    query = scope.get("query_string", b"").split(b"&")
+    if path == "/ws/alerts" and b"protocol=2" in query:
+        return False  # caregiver delivery authenticates with its own per-phone secret
+    return path.startswith(("/api/", "/ws/"))
+
+
+class ApiTokenMiddleware:
+    """When auth is enabled, require the bearer token on every /api and /ws route,
+    so no handler can forget it. With auth enabled but no usable token, every guarded
+    request is refused (fail closed); startup refuses that configuration anyway."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope["type"] in ("http", "websocket")
+            and api_auth_enabled()
+            and api_token_required(scope)
+        ):
+            headers = dict(scope.get("headers") or [])
+            if not api_token_valid(headers.get(b"authorization", b"").decode("latin-1")):
+                if scope["type"] == "http":
+                    await send({
+                        "type": "http.response.start",
+                        "status": 401,
+                        "headers": [(b"content-type", b"application/json")],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": b'{"detail":"Missing or invalid API token"}',
+                    })
+                else:
+                    await send({"type": "websocket.close", "code": 1008})
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(ApiTokenMiddleware)
 
 
 class LedRequest(BaseModel):
@@ -593,29 +674,6 @@ noise_config_store = NoiseSuppressionConfigStore(
 )
 
 
-def estimate_direction(left_chunk, right_chunk, sample_rate=DEFAULT_AUDIO_SAMPLE_RATE):
-    left = np.asarray(left_chunk, dtype=np.float32)
-    right = np.asarray(right_chunk, dtype=np.float32)
-    if left.size < 2 or right.size < 2:
-        return "center"
-
-    left -= float(np.mean(left))
-    right -= float(np.mean(right))
-    if float(np.max(np.abs(left))) < 1 or float(np.max(np.abs(right))) < 1:
-        return "center"
-
-    correlation = np.correlate(left, right, mode="full")
-    lag = int(np.argmax(correlation) - (len(left) - 1))
-    time_diff = lag / sample_rate
-    threshold = float(os.getenv("DIRECTION_THRESHOLD_SECONDS", "0.00003"))
-
-    if time_diff > threshold:
-        return "right"
-    if time_diff < -threshold:
-        return "left"
-    return "center"
-
-
 def calculate_direction(left_rms: float, right_rms: float):
     if left_rms <= 0 and right_rms <= 0:
         return "unknown", 0, 0.0, None
@@ -684,6 +742,8 @@ class ThermalCamera:
         self._lock = threading.Lock()
         self._last_payload: dict[str, Any] | None = None
         self._last_read_at = 0.0
+        self._i2c = None
+        self._next_init_at = 0.0
         self._confidence_scorer = ThermalConfidenceScorer(
             width=32,
             height=24,
@@ -691,18 +751,39 @@ class ThermalCamera:
         )
 
     def init(self):
+        with self._lock:
+            self._init_locked()
+
+    def _init_locked(self):
         if self.mlx is not None:
             return
         if board is None or busio is None or adafruit_mlx90640 is None:
             self.error = "Adafruit Blinka/MLX90640 libraries are unavailable"
             return
+        # Every caller polls read(); without a limit a missing sensor is probed at 4 Hz per client.
+        now = time.monotonic()
+        if now < self._next_init_at:
+            return
+        self._next_init_at = now + THERMAL_REINIT_INTERVAL_SECONDS
 
-        i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+        refresh_name = f"REFRESH_{THERMAL_REFRESH_HZ.replace('.', '_')}_HZ"
+        refresh_rate = getattr(adafruit_mlx90640.RefreshRate, refresh_name, None)
+        if refresh_rate is None:
+            self.error = f"Unsupported THERMAL_REFRESH_HZ={THERMAL_REFRESH_HZ!r}"
+            return
+        try:
+            if self._i2c is None:
+                self._i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+        except Exception as exc:  # pragma: no cover - hardware path
+            self.error = f"I2C bus unavailable: {exc}"
+            return
+
         last_error = None
         for address in MLX_ADDRS:
             try:
-                self.mlx = adafruit_mlx90640.MLX90640(i2c, address=address)
-                self.mlx.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_4_HZ
+                mlx = adafruit_mlx90640.MLX90640(self._i2c, address=address)
+                mlx.refresh_rate = refresh_rate
+                self.mlx = mlx
                 self.address = address
                 self.error = None
                 return
@@ -711,21 +792,35 @@ class ThermalCamera:
 
         self.error = f"MLX90640 not found at {[hex(a) for a in MLX_ADDRS]}: {last_error}"
 
-    def read(self) -> dict[str, Any]:
-        self.init()
-        if self.mlx is None:
-            raise RuntimeError(self.error or "MLX90640 unavailable")
+    def _release_locked(self, error: str) -> None:
+        self.mlx = None
+        self.address = None
+        self.error = error
+        if self._i2c is not None:
+            try:
+                self._i2c.deinit()
+            except Exception:  # pragma: no cover - hardware path
+                pass
+            self._i2c = None
 
+    def close(self) -> None:
         with self._lock:
+            self._release_locked("closed")
+
+    def read(self) -> dict[str, Any]:
+        with self._lock:
+            self._init_locked()
+            if self.mlx is None:
+                raise RuntimeError(self.error or "MLX90640 unavailable")
+
             for attempt in range(THERMAL_FRAME_RETRY_COUNT):
                 try:
                     self.mlx.getFrame(self.frame)
                     break
-                except ValueError as exc:
+                # OSError is the I2C failure (unplugged/bus glitch); ValueError is a bad frame.
+                except (ValueError, OSError) as exc:
                     if attempt + 1 >= THERMAL_FRAME_RETRY_COUNT:
-                        self.mlx = None
-                        self.address = None
-                        self.error = (
+                        self._release_locked(
                             "MLX90640 frame read failed after "
                             f"{THERMAL_FRAME_RETRY_COUNT} retries: {exc}"
                         )
@@ -781,9 +876,13 @@ thermal = ThermalCamera()
 
 
 class AudioMonitor:
+    """Audio levels published by kws-alert.service, the only process that opens the mic.
+
+    A second capture here could grab the ALSA device exclusively while KWS restarts,
+    leaving keyword detection unable to start.
+    """
+
     def __init__(self):
-        self.pa = None
-        self.stream = None
         self.latest = {
             "rms": [0.0, 0.0],
             "direction": "center",
@@ -797,7 +896,6 @@ class AudioMonitor:
             "estimated_pitch_hz": None,
             "timestamp": None,
         }
-        self.device_index = None
         self.config_store = noise_config_store
         self._config = self.config_store.load()
         self.noise_suppressor = NoiseSuppressor(
@@ -810,35 +908,6 @@ class AudioMonitor:
         )
         self.apply_noise_settings(self._config)
 
-    def _find_device(self):
-        fallback = None
-        for index in range(self.pa.get_device_count()):
-            info = self.pa.get_device_info_by_index(index)
-            if int(info.get("maxInputChannels", 0)) <= 0:
-                continue
-            name = str(info.get("name", "")).lower()
-            if "seeed" in name or "respeaker" in name:
-                return index
-            if fallback is None:
-                fallback = index
-        if fallback is None:
-            raise RuntimeError("No audio input device found")
-        return fallback
-
-    def start(self):
-        if self.stream is not None:
-            return
-        self.pa = pyaudio.PyAudio()
-        self.device_index = self._find_device()
-        self.stream = self.pa.open(
-            rate=DEFAULT_AUDIO_SAMPLE_RATE,
-            channels=2,
-            format=pyaudio.paInt16,
-            input=True,
-            input_device_index=self.device_index,
-            frames_per_buffer=800,
-        )
-
     def apply_noise_settings(self, config: NoiseSuppressionConfig) -> None:
         self._config = config
         self.noise_suppressor.apply_config(config)
@@ -849,74 +918,11 @@ class AudioMonitor:
         return payload
 
     def read(self) -> dict[str, Any]:
-        try:
-            self.start()
-            data = self.stream.read(800, exception_on_overflow=False)
-        except Exception:
-            shared = read_shared_audio_status()
-            if shared is not None:
-                self.latest = shared
-                return shared
-            raise
-
-        samples = np.frombuffer(data, dtype=np.int16)
-        left = samples[0::2].astype(np.float32)
-        right = samples[1::2].astype(np.float32)
-        mono = np.mean(np.column_stack((left, right)), axis=1).astype(np.int16)
-
-        if not self.noise_suppressor.profile_ready:
-            self.noise_suppressor.capture_noise_profile(mono)
-        else:
-            latest_config = self.config_store.load()
-            if latest_config != self._config:
-                self.apply_noise_settings(latest_config)
-
-        cleaned, metrics = self.noise_suppressor.process(mono)
-        speech_active = bool(np.sqrt(np.mean(np.square(cleaned.astype(np.float32)))) / 32768.0 > 0.02)
-        self.noise_suppressor.update_noise_profile(mono, is_speech=speech_active)
-
-        rms_left = float(np.sqrt(np.mean(left * left)) / 32768.0)
-        rms_right = float(np.sqrt(np.mean(right * right)) / 32768.0)
-        correlation_direction = estimate_direction(left, right)
-        direction, direction_angle, direction_confidence, distance_m = calculate_direction(
-            rms_left,
-            rms_right,
-        )
-        if direction == "front" and correlation_direction in {"left", "right"}:
-            direction = f"front-{correlation_direction}"
-            direction_angle = -45 if correlation_direction == "left" else 45
-            direction_confidence = max(direction_confidence, 0.35)
-        pitch_hz = estimate_pitch_hz(cleaned, DEFAULT_AUDIO_SAMPLE_RATE)
-
-        self.latest = normalize_audio_payload({
-            "left": round(rms_left, 4),
-            "right": round(rms_right, 4),
-            "rms": [round(rms_left, 4), round(rms_right, 4)],
-            "direction": direction,
-            "direction_angle": direction_angle,
-            "direction_confidence": round(direction_confidence, 3),
-            "distance_estimate_m": round(distance_m, 2) if distance_m else None,
-            "noise_level_db": metrics["noise_level_db"],
-            "signal_level_db": metrics["signal_level_db"],
-            "snr_db": metrics["snr_db"],
-            "noise_reduction_db": metrics["noise_reduction_db"],
-            "noise_suppression_active": metrics["noise_suppression_active"],
-            "suppression_strength": metrics["strength"],
-            "suppression_sensitivity": metrics["sensitivity"],
-            "estimated_pitch_hz": round(pitch_hz, 1) if pitch_hz is not None else None,
-            "device_index": self.device_index,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-        return self.latest
-
-    def close(self):
-        if self.stream is not None:
-            self.stream.stop_stream()
-            self.stream.close()
-            self.stream = None
-        if self.pa is not None:
-            self.pa.terminate()
-            self.pa = None
+        shared = read_shared_audio_status()
+        if shared is None:
+            raise RuntimeError("KWS audio status unavailable; is kws-alert.service running?")
+        self.latest = shared
+        return shared
 
 
 audio = AudioMonitor()
@@ -1082,6 +1088,7 @@ def normalize_audio_payload(data: dict[str, Any], *, working: bool = True) -> di
         "source": data.get("source", "backend_audio"),
         "timestamp": data.get("timestamp", datetime.now(timezone.utc).isoformat()),
         **({"error": data["error"]} if data.get("error") else {}),
+        **({"outbox": data["outbox"]} if isinstance(data.get("outbox"), dict) else {}),
     }
 
 
@@ -1181,25 +1188,6 @@ def safe_dataset_path(relative_path: str) -> Path:
     if root != candidate and root not in candidate.parents:
         raise HTTPException(status_code=400, detail="Unsafe dataset path")
     return candidate
-
-
-def require_api_token(request: Request | None) -> None:
-    """Validate Bearer token for HTTP requests.
-
-    When ``request`` is None (direct function call from tests), skip
-    validation.  When a real HTTP request is present, enforce the token
-    even if the token is not configured (deny by default on HTTP).
-    """
-    if request is None:
-        # Called directly from unit tests — allow.
-        return
-    expected = API_TOKEN.strip()
-    if not expected:
-        return
-    authorization = request.headers.get("authorization", "")
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or token.strip() != expected:
-        raise HTTPException(status_code=401, detail="Missing or invalid API token")
 
 
 async def write_upload_to_path(
@@ -1704,8 +1692,136 @@ def current_noise_settings() -> dict[str, Any]:
     }
 
 
+def check_security_config() -> None:
+    if API_AUTH_MODE not in API_AUTH_MODES:
+        raise RuntimeError(
+            f"PROJECT_PI_API_AUTH={API_AUTH_MODE!r} is not one of {API_AUTH_MODES}."
+        )
+    print(f"api_auth_mode={API_AUTH_MODE}", file=sys.stderr, flush=True)
+    if api_auth_enabled():
+        # Explicitly enabled auth with an unusable token must not quietly turn auth off.
+        if (
+            not API_TOKEN
+            or API_TOKEN == LEGACY_DEFAULT_API_TOKEN
+            or len(API_TOKEN) < MIN_API_TOKEN_LENGTH
+        ):
+            raise RuntimeError(
+                "PROJECT_PI_API_AUTH=required but PROJECT_PI_API_TOKEN is missing, "
+                f"shorter than {MIN_API_TOKEN_LENGTH} characters, or the public default. "
+                "Set a random token in /etc/project-pi/backend.env, or set "
+                "PROJECT_PI_API_AUTH=open for the isolated-network mode."
+            )
+    else:
+        print(
+            "WARNING: PROJECT_PI_API_AUTH=open: NO authentication. Every /api and /ws "
+            "route, including refresh, reboot, shutdown, model deploy and alerts, is open "
+            "to anyone on this network; the legacy app token is not security. Use only "
+            "on an isolated hotspot.",
+            file=sys.stderr,
+            flush=True,
+        )
+        if API_TOKEN:
+            print(
+                "WARNING: PROJECT_PI_API_TOKEN is set but ignored: set "
+                "PROJECT_PI_API_AUTH=required to enforce it.",
+                file=sys.stderr,
+                flush=True,
+            )
+    credentials = os.getenv("PROJECT_PI_CAREGIVER_CREDENTIALS")
+    if not credentials or not Path(credentials).is_file():
+        print(
+            "ERROR: PROJECT_PI_CAREGIVER_CREDENTIALS is unset or missing "
+            f"({credentials!r}); paired caregiver phones cannot authenticate. "
+            "Provision one with raspberry_pi/scripts/provision_caregiver.py.",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+HEALTH_CHECK_INTERVAL_SECONDS = 15.0
+HEALTH_STARTUP_GRACE_SECONDS = 60.0  # KWS loads its models before publishing audio status
+
+
+class HealthMonitor:
+    """Alerts the caregiver once per outage when the Pi stops being able to detect distress."""
+
+    def __init__(self) -> None:
+        self.suspect: set[str] = set()
+        self.faulted: set[str] = set()
+
+    def failing_components(self) -> dict[str, str]:
+        failing = {}
+        audio_status = read_shared_audio_status(max_age_seconds=10.0)
+        if audio_status is None:
+            failing["keyword detection offline"] = "kws-alert.service is not publishing audio"
+        else:
+            outbox = audio_status.get("outbox") or {}
+            # Counts come from KWS's durable loss ledger: they survive restarts until an
+            # operator reviews and deletes it.
+            if outbox.get("critical_evictions") or outbox.get("loss_ledger_unreadable"):
+                failing["alert outbox overflow"] = (
+                    f"{outbox.get('critical_evictions', 0)} undelivered certain_critical "
+                    "alert(s) evicted at the KWS outbox hard limit"
+                    + (", loss ledger was unreadable" if outbox.get("loss_ledger_unreadable")
+                       else "")
+                    + f"; review {outbox.get('loss_ledger_path')}"
+                )
+            # Stays faulted until an operator reviews and clears the quarantine file.
+            if outbox.get("quarantined_possibly_critical") or outbox.get(
+                    "quarantine_critical_evictions"):
+                failing["alert rejected by backend"] = (
+                    f"{outbox.get('quarantined_possibly_critical', 0)} possibly-critical alert(s) "
+                    f"rejected by the backend, {outbox.get('quarantine_critical_evictions', 0)} "
+                    f"evicted at the hard limit; review {outbox.get('quarantine_path')}"
+                )
+        if thermal.mlx is None and thermal.error:
+            failing["thermal camera offline"] = str(thermal.error)
+        return failing
+
+    async def check_once(self) -> None:
+        failing = await asyncio.to_thread(self.failing_components)
+        # Two consecutive failed checks, so a service restart does not page anyone.
+        confirmed = set(failing) & self.suspect
+        self.suspect = set(failing)
+        for name in sorted(confirmed - self.faulted):
+            print(f"Health monitor: {name}: {failing[name]}", file=sys.stderr, flush=True)
+            await api_alerts(AlertIn(
+                event="system_fault",
+                keyword=name,
+                confidence=0.0,
+                source="health_monitor",
+            ))
+        # A recovered component may fault (and alert) again later.
+        self.faulted = (self.faulted | confirmed) & set(failing)
+
+
+health_monitor = HealthMonitor()
+health_task: asyncio.Task[None] | None = None
+
+
+async def run_health_monitor() -> None:
+    await asyncio.sleep(HEALTH_STARTUP_GRACE_SECONDS)
+    while True:
+        try:
+            await health_monitor.check_once()
+        except Exception as exc:
+            print(f"Health monitor check failed: {exc!r}", file=sys.stderr, flush=True)
+        await asyncio.sleep(HEALTH_CHECK_INTERVAL_SECONDS)
+
+
 @app.on_event("startup")
 async def startup():
+    global health_task
+    check_security_config()
+    if THERMAL_REFRESH_SOURCE == "legacy_default":
+        print(
+            "WARNING: THERMAL_REFRESH_HZ is unset; using the legacy 4 Hz for compatibility "
+            "with existing deployments. This is not a claim that 4 Hz suits every "
+            "MLX90640 variant; set it in thermal-backend.service.d/10-local.conf.",
+            file=sys.stderr,
+            flush=True,
+        )
+    health_task = asyncio.create_task(run_health_monitor())
     try:
         button.init()
     except Exception as exc:
@@ -1720,9 +1836,9 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    audio.close()
-    if hasattr(thermal, "close"):
-        thermal.close()
+    if health_task is not None:
+        health_task.cancel()
+    thermal.close()
 
 
 @app.websocket("/ws/thermal")
@@ -1830,8 +1946,13 @@ async def api_status():
             "body_coverage": latest_thermal.get("body_coverage", 0.0),
             "detected_part": latest_thermal.get("detected_part", "unknown"),
             "confidence_boost": latest_thermal.get("confidence_boost", 0.0),
+            "thermal_refresh_hz": THERMAL_REFRESH_HZ,
+            "thermal_refresh_source": THERMAL_REFRESH_SOURCE,
+            "mlx90640_variant": MLX90640_VARIANT,
             **thermal_model_status,
         },
+        "api_auth_mode": API_AUTH_MODE,
+        "alert_outbox": (read_shared_audio_status(max_age_seconds=10.0) or {}).get("outbox"),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1876,18 +1997,9 @@ async def audio_status():
             "channels": 2,
         }
     except Exception as exc:
-        shared = read_shared_audio_status()
-        if shared is not None:
-            return {
-                **shared,
-                "working": True,
-                "sample_rate": DEFAULT_AUDIO_SAMPLE_RATE,
-                "channels": 2,
-            }
         return {
             "working": False,
             "error": str(exc),
-            "device_index": audio.device_index,
             "sample_rate": DEFAULT_AUDIO_SAMPLE_RATE,
             "channels": 2,
         }
@@ -2310,13 +2422,11 @@ def restart_kws_alert_service() -> dict[str, Any]:
 
 @app.post("/api/training/deploy")
 async def training_deploy(
-    request: Request = None,
     onnx_file: UploadFile = File(...),
     onnx_data_file: UploadFile = File(...),
     keyword: str = Form(...),
 ):
     """Deploy a trained .onnx + .onnx.data model pair to the live models directory."""
-    require_api_token(request)
     keyword_slug = slugify_keyword(keyword.strip().lower())
     if keyword.strip().lower() not in TRAINING_KEYWORDS:
         raise HTTPException(status_code=400, detail="Invalid keyword for deployment")
@@ -2391,17 +2501,14 @@ async def training_deploy(
 
 @app.post("/api/training/models/import")
 async def training_model_import(
-    request: Request = None,
     onnx_file: UploadFile = File(...),
     onnx_data_file: UploadFile = File(...),
     keyword: str = Form(...),
 ):
-    require_api_token(request)
     return await training_deploy(
         onnx_file=onnx_file,
         onnx_data_file=onnx_data_file,
         keyword=keyword,
-        request=request,
     )
 
 
@@ -2435,7 +2542,15 @@ async def upload_voice_sample(
     if keyword not in {"tulong", "help"}:
         raise HTTPException(status_code=400, detail="keyword must be 'tulong' or 'help'")
 
-    audio_data = await request.body()
+    audio_data = bytearray()
+    async for chunk in request.stream():
+        audio_data.extend(chunk)
+        if len(audio_data) > MAX_TRAINING_WAV_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Uploaded file exceeds {MAX_TRAINING_WAV_UPLOAD_BYTES} bytes",
+            )
+    audio_data = bytes(audio_data)
     if len(audio_data) < 44 or not audio_data.startswith(b"RIFF"):
         raise HTTPException(status_code=400, detail="Only WAV audio is accepted")
 
@@ -2632,7 +2747,6 @@ async def api_alerts_manual(manual: ManualAlertIn | None = None):
     return await api_alerts(event)
 
 
-REFRESH_SCRIPT = RASPBERRY_PI_ROOT / "scripts" / "pi_refresh.sh"
 POWER_COMMAND_DELAY_SECONDS = 0.75
 
 
@@ -2683,31 +2797,60 @@ async def run_delayed_power_command(action: str, command: list[str]) -> None:
 
 
 @app.post("/api/refresh")
-async def api_refresh(request: RefreshRequest, http_request: Request):
-    require_api_token(http_request)
-    if not REFRESH_SCRIPT.is_file():
-        raise HTTPException(status_code=500, detail="Refresh script is missing on the Pi.")
-
-    args = ["sudo", str(REFRESH_SCRIPT)]
-    if request.git_pull:
-        args.append("--git-pull")
-    if request.restart_backend:
-        args.append("--restart-backend")
-
-    try:
-        completed = await asyncio.to_thread(
-            subprocess.run,
-            args,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
+async def api_refresh(request: RefreshRequest):
+    # A pull without the installer leaves new code running on old units, sudoers and helpers.
+    if request.git_pull and not APP_GIT_DEPLOY_FLAG.is_file():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"App-triggered git deploy is disabled ({APP_GIT_DEPLOY_FLAG} is absent). "
+                "Update the Pi with the reviewed upgrade procedure "
+                "(docs/m1_m2_upgrade_and_rollback.md). Restart without git_pull still works."
+            ),
         )
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=504, detail="Refresh timed out.") from exc
+    if not REFRESH_HELPER.is_file():
+        raise HTTPException(
+            status_code=500,
+            detail=f"{REFRESH_HELPER} is missing; run install_headless.sh on the Pi.",
+        )
 
-    stdout = (completed.stdout or "").strip()
-    stderr = (completed.stderr or "").strip()
+    # git runs as this unprivileged service user; only the root-owned helper gets sudo.
+    commands = []
+    # `git pull` needs a branch; a detached checkout (e.g. after a rollback) must fail clearly.
+    head_check = ["git", "-C", str(PROJECT_ROOT), "symbolic-ref", "-q", "HEAD"]
+    if request.git_pull:
+        commands.append(head_check)
+        commands.append(["git", "-C", str(PROJECT_ROOT), "pull", "--ff-only"])
+    helper = ["sudo", "-n", str(REFRESH_HELPER)]
+    if request.restart_backend:
+        helper.append("--restart-backend")
+    commands.append(helper)
+
+    stdout_parts, stderr_parts = [], []
+    for args in commands:
+        try:
+            completed = await asyncio.to_thread(
+                subprocess.run,
+                args,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(status_code=504, detail="Refresh timed out.") from exc
+        stdout_parts.append((completed.stdout or "").strip())
+        stderr_parts.append((completed.stderr or "").strip())
+        if completed.returncode != 0:
+            if args is head_check:
+                stderr_parts.append(
+                    "Pi checkout is not on a branch (detached HEAD); git pull skipped and "
+                    "nothing was restarted. See docs/m1_m2_upgrade_and_rollback.md."
+                )
+            break
+
+    stdout = "\n".join(part for part in stdout_parts if part)
+    stderr = "\n".join(part for part in stderr_parts if part)
     return {
         "ok": completed.returncode == 0,
         "git_pull": request.git_pull,
@@ -2719,8 +2862,7 @@ async def api_refresh(request: RefreshRequest, http_request: Request):
 
 
 @app.post("/api/shutdown")
-async def api_shutdown(request: Request):
-    require_api_token(request)
+async def api_shutdown():
     verify_passwordless_sudo()
     asyncio.create_task(
         run_delayed_power_command(
@@ -2732,8 +2874,7 @@ async def api_shutdown(request: Request):
 
 
 @app.post("/api/reboot")
-async def api_reboot(request: Request):
-    require_api_token(request)
+async def api_reboot():
     verify_passwordless_sudo()
     asyncio.create_task(
         run_delayed_power_command("reboot", ["/usr/sbin/reboot"])

@@ -1,9 +1,11 @@
 import asyncio
 import csv
 import os
+import subprocess
 import tempfile
 import threading
 import time
+import types
 import unittest
 import wave
 from pathlib import Path
@@ -22,11 +24,6 @@ class FakeUploadFile:
             return b""
         self._consumed = True
         return self._data
-
-
-class FakeRequest:
-    def __init__(self, headers=None):
-        self.headers = headers or {}
 
 
 class FakeAsyncStream:
@@ -650,33 +647,165 @@ class TrainingApiTest(unittest.TestCase):
             finally:
                 self.cleanup(module, previous)
 
-    def test_sensitive_training_routes_require_api_token(self):
+    def run_through_auth(self, module, scope):
+        reached, sent = [], []
+
+        async def app(scope, receive, send):
+            reached.append(scope["path"])
+
+        async def send(message):
+            sent.append(message)
+
+        asyncio.run(module.ApiTokenMiddleware(app)(scope, None, send))
+        return reached, sent
+
+    # Group 1: old-APK compatibility in open mode. These assert compatibility only;
+    # open mode has no authentication at all.
+    OLD_APK_HTTP_ROUTES = [
+        ("GET", "/api/status"), ("GET", "/api/alerts"), ("POST", "/api/alerts"),
+        ("DELETE", "/api/alerts"), ("POST", "/api/alerts/manual"), ("POST", "/api/leds"),
+        ("POST", "/api/refresh"), ("POST", "/api/reboot"), ("POST", "/api/shutdown"),
+    ]
+    OLD_APK_HEADER_VARIANTS = [
+        [],
+        [(b"authorization", b"Bearer project-pi-local-token")],
+        [(b"authorization", b"Bearer anything-at-all")],
+        [(b"authorization", b"garbage")],
+    ]
+
+    def test_open_mode_legacy_client_compat_every_route_and_header(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             module, previous = self.load_module(temp_dir)
             try:
-                bad_request = FakeRequest(headers={})
-                with self.assertRaises(module.HTTPException) as raised:
-                    asyncio.run(
-                        module.training_deploy(
-                            onnx_file=FakeUploadFile("help.onnx", b"model"),
-                            onnx_data_file=FakeUploadFile("help.onnx.data", b"data"),
-                            keyword="help",
-                            request=bad_request,
-                        )
-                    )
-                self.assertEqual(raised.exception.status_code, 401)
+                for token in ("", "a-configured-but-ignored-token-0123"):
+                    module.API_AUTH_MODE, module.API_TOKEN = "open", token
+                    self.assertFalse(module.api_auth_enabled())
+                    for headers in self.OLD_APK_HEADER_VARIANTS:
+                        for method, path in self.OLD_APK_HTTP_ROUTES:
+                            reached, sent = self.run_through_auth(module, {
+                                "type": "http", "method": method, "path": path,
+                                "headers": headers})
+                            self.assertEqual(reached, [path], (method, path, headers))
+                            self.assertEqual(sent, [])
+                        for path, query in (("/ws/alerts", b""), ("/ws/thermal", b""),
+                                            ("/ws/audio", b""), ("/ws/alerts", b"protocol=2")):
+                            reached, sent = self.run_through_auth(module, {
+                                "type": "websocket", "path": path, "query_string": query,
+                                "headers": headers})
+                            self.assertEqual(reached, [path], (path, headers))
+            finally:
+                self.cleanup(module, previous)
 
-                with self.assertRaises(module.HTTPException) as raised:
-                    asyncio.run(module.api_refresh(module.RefreshRequest(), bad_request))
-                self.assertEqual(raised.exception.status_code, 401)
+    def test_open_mode_legacy_client_compat_startup_and_status(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                # Open mode starts even with the legacy token configured: it is ignored.
+                for token in ("", "project-pi-local-token", "short"):
+                    module.API_AUTH_MODE, module.API_TOKEN = "open", token
+                    module.check_security_config()
+            finally:
+                self.cleanup(module, previous)
 
-                with self.assertRaises(module.HTTPException) as raised:
-                    asyncio.run(module.api_shutdown(bad_request))
-                self.assertEqual(raised.exception.status_code, 401)
+    # Group 2: authenticated access in required mode (new APK only).
+    def test_required_mode_accepts_valid_token_on_http_and_ws(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                module.API_AUTH_MODE, module.API_TOKEN = "required", "a-real-secret-0123456789"
+                good = [(b"authorization", b"Bearer a-real-secret-0123456789")]
+                for method, path in self.OLD_APK_HTTP_ROUTES:
+                    reached, _ = self.run_through_auth(module, {
+                        "type": "http", "method": method, "path": path, "headers": good})
+                    self.assertEqual(reached, [path])
+                for path in ("/ws/alerts", "/ws/thermal", "/ws/audio"):
+                    reached, _ = self.run_through_auth(module, {
+                        "type": "websocket", "path": path, "query_string": b"", "headers": good})
+                    self.assertEqual(reached, [path])
+            finally:
+                self.cleanup(module, previous)
 
-                with self.assertRaises(module.HTTPException) as raised:
-                    asyncio.run(module.api_reboot(bad_request))
-                self.assertEqual(raised.exception.status_code, 401)
+    def test_required_mode_rejects_missing_wrong_short_and_legacy_tokens(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                module.API_AUTH_MODE, module.API_TOKEN = "required", "a-real-secret-0123456789"
+                rejected = [
+                    [],
+                    [(b"authorization", b"Bearer wrong-secret-0123456789")],
+                    [(b"authorization", b"Bearer short")],
+                    [(b"authorization", b"Bearer project-pi-local-token")],
+                    [(b"authorization", b"Basic a-real-secret-0123456789")],
+                ]
+                for headers in rejected:
+                    for method, path in self.OLD_APK_HTTP_ROUTES:
+                        reached, sent = self.run_through_auth(module, {
+                            "type": "http", "method": method, "path": path, "headers": headers})
+                        self.assertEqual(reached, [], (path, headers))
+                        self.assertEqual(sent[0]["status"], 401, path)
+                    for path in ("/ws/thermal", "/ws/audio", "/ws/alerts"):
+                        reached, sent = self.run_through_auth(module, {
+                            "type": "websocket", "path": path, "query_string": b"",
+                            "headers": headers})
+                        self.assertEqual(reached, [], path)
+                        self.assertEqual(sent, [{"type": "websocket.close", "code": 1008}])
+
+                # Protocol v2 authenticates caregivers itself; CORS preflight carries no token.
+                reached, _ = self.run_through_auth(module, {
+                    "type": "websocket", "path": "/ws/alerts",
+                    "query_string": b"protocol=2", "headers": []})
+                self.assertEqual(reached, ["/ws/alerts"])
+                reached, _ = self.run_through_auth(module, {
+                    "type": "http", "method": "OPTIONS", "path": "/api/alerts", "headers": []})
+                self.assertEqual(reached, ["/api/alerts"])
+
+                # The legacy token is never authentication, even if it were configured.
+                module.API_TOKEN = "project-pi-local-token"
+                reached, sent = self.run_through_auth(module, {
+                    "type": "http", "method": "GET", "path": "/api/status",
+                    "headers": [(b"authorization", b"Bearer project-pi-local-token")]})
+                self.assertEqual(reached, [])
+                # Required with no token: fail closed, never fall open.
+                module.API_TOKEN = ""
+                reached, sent = self.run_through_auth(module, {
+                    "type": "http", "method": "GET", "path": "/api/status",
+                    "headers": [(b"authorization", b"Bearer ")]})
+                self.assertEqual(reached, [])
+                self.assertEqual(sent[0]["status"], 401)
+            finally:
+                self.cleanup(module, previous)
+
+    def test_required_mode_startup_refuses_missing_short_or_legacy_token(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                for token in ("", "short", "project-pi-local-token"):
+                    module.API_AUTH_MODE, module.API_TOKEN = "required", token
+                    with self.assertRaisesRegex(RuntimeError, "PROJECT_PI_API_TOKEN"):
+                        module.check_security_config()
+                module.API_AUTH_MODE, module.API_TOKEN = "required", "a-real-secret-0123456789"
+                module.check_security_config()
+                # A typo in the mode must not silently mean "open".
+                module.API_AUTH_MODE = "requird"
+                self.assertTrue(module.api_auth_enabled())
+                with self.assertRaisesRegex(RuntimeError, "PROJECT_PI_API_AUTH"):
+                    module.check_security_config()
+            finally:
+                self.cleanup(module, previous)
+
+    def test_status_reports_auth_mode_and_thermal_refresh_source(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                # Host probes (/proc, i2cdetect) are not under test here.
+                module.uptime_string = lambda: "0s"
+                module.cpu_temp_c = lambda: None
+                module.i2c_devices = lambda: {"devices": []}
+                status = asyncio.run(module.api_status())
+                self.assertEqual(status["api_auth_mode"], module.API_AUTH_MODE)
+                self.assertIn(status["thermal"]["thermal_refresh_source"],
+                              ("env", "legacy_default"))
+                self.assertIn("alert_outbox", status)
             finally:
                 self.cleanup(module, previous)
 
@@ -711,15 +840,11 @@ class TrainingApiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             module, previous = self.load_module(temp_dir)
             try:
-                token_request = FakeRequest(
-                    headers={"authorization": "Bearer project-pi-local-token"}
-                )
                 result = asyncio.run(
                     module.training_model_import(
                         onnx_file=FakeUploadFile("help.onnx", b"model"),
                         onnx_data_file=FakeUploadFile("help.onnx.data", b"data"),
                         keyword="help",
-                        request=token_request,
                     )
                 )
                 self.assertTrue(result["deployed"])
@@ -818,6 +943,120 @@ class TrainingApiTest(unittest.TestCase):
                 asyncio.run(_run())
             finally:
                 self.cleanup(module, previous)
+
+    def test_thermal_refresh_rate_is_never_silently_changed(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            saved = {k: os.environ.pop(k, None) for k in ("THERMAL_REFRESH_HZ", "MLX90640_VARIANT")}
+            try:
+                module, previous = self.load_module(temp_dir)
+                try:  # unset: the legacy 4 Hz, labelled as such
+                    self.assertEqual((module.THERMAL_REFRESH_HZ, module.THERMAL_REFRESH_SOURCE,
+                                      module.MLX90640_VARIANT), ("4", "legacy_default", "unverified"))
+                finally:
+                    self.cleanup(module, previous)
+                os.environ.update(THERMAL_REFRESH_HZ="2", MLX90640_VARIANT="BAA")
+                module, previous = self.load_module(temp_dir)
+                try:
+                    self.assertEqual((module.THERMAL_REFRESH_HZ, module.THERMAL_REFRESH_SOURCE,
+                                      module.MLX90640_VARIANT), ("2", "env", "BAA"))
+                finally:
+                    self.cleanup(module, previous)
+            finally:
+                for key, value in saved.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+
+    def test_health_monitor_faults_on_certain_critical_outbox_eviction(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                module.thermal.error = None
+                outbox = {"pending": 5000, "pressure": True, "evictions": 9,
+                          "critical_evictions": 0}
+                module.read_shared_audio_status = lambda max_age_seconds=1.5: {"outbox": outbox}
+                self.assertEqual(module.health_monitor.failing_components(), {})
+                outbox["loss_ledger_unreadable"] = 1
+                self.assertIn("alert outbox overflow",
+                              module.health_monitor.failing_components())
+                outbox["loss_ledger_unreadable"] = 0
+                outbox["critical_evictions"] = 2
+                self.assertIn("alert outbox overflow",
+                              module.health_monitor.failing_components())
+                outbox.update(critical_evictions=0, quarantined=1,
+                              quarantined_possibly_critical=0)
+                self.assertEqual(module.health_monitor.failing_components(), {})
+                outbox["quarantined_possibly_critical"] = 1
+                self.assertIn("alert rejected by backend",
+                              module.health_monitor.failing_components())
+                outbox.update(quarantined_possibly_critical=0, quarantine_critical_evictions=1)
+                self.assertIn("alert rejected by backend",
+                              module.health_monitor.failing_components())
+            finally:
+                self.cleanup(module, previous)
+
+    def run_refresh(self, temp_dir, returncodes, deploy_allowed=True, **request):
+        module, previous = self.load_module(temp_dir)
+        try:
+            calls = []
+
+            def fake_run(args, **kwargs):
+                calls.append(args)
+                return types.SimpleNamespace(returncode=returncodes.pop(0), stdout="", stderr="")
+
+            module.REFRESH_HELPER = Path(temp_dir) / "project-pi-refresh"
+            module.REFRESH_HELPER.write_text("")
+            module.APP_GIT_DEPLOY_FLAG = Path(temp_dir) / "allow-app-git-deploy"
+            if deploy_allowed:
+                module.APP_GIT_DEPLOY_FLAG.write_text("")
+            module.subprocess = types.SimpleNamespace(
+                run=fake_run, TimeoutExpired=subprocess.TimeoutExpired)
+            result = asyncio.run(module.api_refresh(module.RefreshRequest(**request)))
+            return result, calls
+        finally:
+            self.cleanup(module, previous)
+
+    def test_refresh_pull_without_deploy_flag_is_409_and_runs_nothing(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            calls = []
+            with self.assertRaises(Exception) as raised:
+                _, calls = self.run_refresh(temp_dir, [], deploy_allowed=False, git_pull=True)
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("allow-app-git-deploy", raised.exception.detail)
+        self.assertEqual(calls, [])
+
+    def test_refresh_restart_without_pull_works_without_deploy_flag(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            result, calls = self.run_refresh(temp_dir, [0], deploy_allowed=False,
+                                             restart_backend=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [["sudo", "-n", calls[0][2], "--restart-backend"]])
+
+    def test_refresh_on_detached_head_skips_pull_and_restart(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            result, calls = self.run_refresh(temp_dir, [1], git_pull=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][-3:], ["symbolic-ref", "-q", "HEAD"])
+        self.assertIn("detached HEAD", result["stderr"])
+
+    def test_refresh_on_branch_pulls_then_runs_helper(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            result, calls = self.run_refresh(
+                temp_dir, [0, 0, 0], git_pull=True, restart_backend=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual([c[3:] for c in calls[:2]],
+                         [["symbolic-ref", "-q", "HEAD"], ["pull", "--ff-only"]])
+        self.assertEqual(calls[2][:2], ["sudo", "-n"])
+        self.assertEqual(calls[2][-1], "--restart-backend")
+
+    def test_refresh_without_pull_skips_branch_check(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            result, calls = self.run_refresh(temp_dir, [0])
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:2], ["sudo", "-n"])
 
 
 if __name__ == "__main__":

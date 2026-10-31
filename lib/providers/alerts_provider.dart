@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -94,7 +95,11 @@ class AlertsController extends Notifier<AlertsState> {
   AlertDeliveryService? _delivery;
   int _connectionGeneration = 0;
   Future<void> _deliveryClose = Future.value();
-  final Set<String> _handledIds = {};
+  // Insertion-ordered so the oldest ids can be evicted; the durable inbox does the real dedup.
+  final LinkedHashSet<String> _handledIds = LinkedHashSet();
+  // Alerts replaced on screen by a newer one; dismissing the overlay confirms them too,
+  // otherwise the Pi keeps replaying them as unconfirmed.
+  final List<String> _supersededAlertIds = [];
   StreamSubscription<AlertEvent>? _alertSubscription;
   StreamSubscription<SocketConnectionStatus>? _statusSubscription;
   Timer? _keywordNoticeTimer;
@@ -224,10 +229,15 @@ class AlertsController extends Notifier<AlertsState> {
 
   Future<void> dismissActiveAlert() async {
     final dismissed = state.activeAlert;
-    if (dismissed?.eventId != null) {
+    final confirmedIds = [
+      ..._supersededAlertIds,
+      if (dismissed?.eventId != null) dismissed!.eventId!,
+    ];
+    _supersededAlertIds.clear();
+    for (final id in confirmedIds) {
       unawaited(
-        _delivery?.confirm(dismissed!.eventId!).catchError((Object error) {
-              traceAlert('ack_user_confirmed', dismissed.eventId, 'failed', {
+        _delivery?.confirm(id).catchError((Object error) {
+              traceAlert('ack_user_confirmed', id, 'failed', {
                 'reason': error.runtimeType.toString(),
               });
             }) ??
@@ -334,6 +344,7 @@ class AlertsController extends Notifier<AlertsState> {
       traceAlert('provider_disposition', event.eventId, 'duplicate_ignored');
       return;
     }
+    if (_handledIds.length > 256) _handledIds.remove(_handledIds.first);
 
     final nextHistory = [event, ...state.history];
     if (nextHistory.length > 100) {
@@ -391,7 +402,7 @@ class AlertsController extends Notifier<AlertsState> {
         _clearPendingVoiceState(clearKeywordNotice: true);
         state = state.copyWith(
           thermalSoftAlert: false,
-          error: event.decisionReason ?? 'System fault reported by backend',
+          error: 'Pi fault: ${event.keyword}. Alerts may not be detected.',
         );
         return;
       case AlertDecisionState.unknown:
@@ -632,6 +643,10 @@ class AlertsController extends Notifier<AlertsState> {
     } else {
       _keywordNoticeTimer?.cancel();
       _keywordNoticeTimer = null;
+    }
+    final replaced = state.activeAlert?.eventId;
+    if (replaced != null && replaced != event.eventId) {
+      _supersededAlertIds.add(replaced);
     }
     state = state.copyWith(
       keywordNotice: showKeyword ? event : null,

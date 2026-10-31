@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
-# Runs once per boot via project-pi-boot.service (root).
+# Runs once per boot via project-pi-boot.service (root), from the root-owned copy
+# /usr/local/sbin/project-pi-boot. It must not execute or install anything from the
+# thesis-writable repo; unit files are installed only by install_headless.sh.
 set -euo pipefail
 
-REPO="${PROJECT_PI_REPO:-/home/thesis/Project_Pi}"
-SYSTEMD_SRC="${REPO}/raspberry_pi/systemd"
-STATE_DIR="/var/lib/project-pi"
+STATE_DIR="${PROJECT_PI_STATE_DIR:-/var/lib/project-pi}"
 LOG_TAG="project-pi-boot"
-APT_STAMP="${STATE_DIR}/last-apt-update"
-HOTSPOT_CONF="/etc/project-pi/hotspot.env"
+HOTSPOT_CONF="${PROJECT_PI_HOTSPOT_CONF:-/etc/project-pi/hotspot.env}"
 
 log() {
   echo "[${LOG_TAG}] $*"
-  logger -t "${LOG_TAG}" "$*"
+  logger -t "${LOG_TAG}" "$*" || true
 }
 
 mkdir -p "${STATE_DIR}"
 
+# Root sources this file: anyone who can write it can run commands as root.
 if [[ -f "${HOTSPOT_CONF}" ]]; then
-  # shellcheck disable=SC1090
-  source "${HOTSPOT_CONF}"
+  read -r conf_uid conf_mode < <(stat -c '%u %a' "${HOTSPOT_CONF}")
+  if [[ "${conf_uid}" == "0" ]] && (( (8#${conf_mode} & 8#022) == 0 )); then
+    # shellcheck disable=SC1090
+    source "${HOTSPOT_CONF}"
+  else
+    log "Ignoring ${HOTSPOT_CONF}: not root-owned or group/world-writable (uid ${conf_uid}, mode ${conf_mode})"
+  fi
 fi
 HOTSPOT_SSID="${PROJECT_PI_HOTSPOT_SSID:-Teddy}"
 HOTSPOT_PASSWORD="${PROJECT_PI_HOTSPOT_PASSWORD:-}"
@@ -132,54 +137,23 @@ connect_hotspot() {
     connection.autoconnect yes connection.autoconnect-priority 10 || true
 }
 
-sync_systemd_units() {
-  local units=(
-    project-pi-boot.service
-    project-pi-apt-update.service
-    project-pi-apt-update.timer
-    project-pi-log-cleanup.service
-    project-pi-log-cleanup.timer
-    project-pi.target
-    thermal-backend.service
-    kws-alert.service
-    apk-server.service
-  )
-  for unit in "${units[@]}"; do
-    install -m 0644 "${SYSTEMD_SRC}/${unit}" "/etc/systemd/system/${unit}"
-  done
-  systemctl daemon-reload
-  systemctl enable project-pi-boot.service project-pi.target
-  systemctl enable thermal-backend.service kws-alert.service apk-server.service
-  systemctl enable project-pi-apt-update.timer project-pi-log-cleanup.timer
-  systemctl disable kws-alert-vosk.service 2>/dev/null || true
+log_network() {
+  log "Network unchanged: SSID=$(iwgetid -r 2>/dev/null || echo none)," \
+    "IPv4=$(ip -4 -o addr show dev wlan0 2>/dev/null | awk '{print $4}' | paste -sd, -)"
 }
 
-maybe_apt_update() {
-  local now last=0
-  now="$(date +%s)"
-  if [[ -f "${APT_STAMP}" ]]; then
-    last="$(cat "${APT_STAMP}")"
-  fi
-  if (( now - last < 86400 )); then
-    log "Skipping apt update (ran within the last 24h)"
-    return 0
-  fi
-  log "Running apt-get update"
-  if apt-get update -qq; then
-    echo "${now}" > "${APT_STAMP}"
-    log "apt-get update completed"
-  else
-    log "apt-get update failed (continuing boot)"
-  fi
-}
-
+# Detection units do not wait for this script, and it never waits for the network unless
+# hotspot management is on. Package-index updates run from project-pi-apt-update.timer.
 main() {
   log "Headless boot script started"
-  wait_for_network || true
-  connect_hotspot || log "Hotspot connect did not succeed; services will still start"
-  sync_systemd_units
-  maybe_apt_update
-  bash "${REPO}/raspberry_pi/scripts/log_cleanup.sh" || log "Log cleanup failed (continuing)"
+  # Opt-in only: by default the boot never creates, modifies or activates an NM profile.
+  if [[ "${PROJECT_PI_FORCE_HOTSPOT:-0}" == "1" ]]; then
+    wait_for_network || true
+    connect_hotspot || log "Hotspot connect did not succeed; services will still start"
+  else
+    log_network
+  fi
+  /usr/local/sbin/project-pi-log-cleanup || log "Log cleanup failed (continuing)"
   log "Headless boot script finished (systemd will start enabled app units)"
 }
 
