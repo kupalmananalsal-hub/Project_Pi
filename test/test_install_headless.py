@@ -236,10 +236,17 @@ class DataPreservationTest(unittest.TestCase):
 class UpgradeDocTest(unittest.TestCase):
     def test_upgrade_doc_keeps_a_branch_for_refresh(self):
         step2 = read(UPGRADE_DOC).split("## 2.", 1)[1].split("## 3.", 1)[0]
-        self.assertIn("git switch main", step2)
-        self.assertIn("git merge --ff-only <REVIEWED_COMMIT>", step2)
-        self.assertNotIn("git checkout <REVIEWED_COMMIT>", step2)
-        self.assertNotRegex(step2, r"git reset|--force|-f\b")
+        self.assertIn("preupgrade_switch.sh", step2)
+        self.assertNotRegex(step2, r"git (switch|checkout|merge|reset)|--force|-f\b")
+        # The switch script fast-forwards a main that tracks origin/main; it never resets,
+        # cleans or forces a checkout, and only moves main forward after an ancestry check.
+        switch = "\n".join(line for line in read(SCRIPTS / "preupgrade_switch.sh").splitlines()
+                           if not line.lstrip().startswith("#"))
+        self.assertIn('merge --ff-only "${TARGET_SHA}"', switch)
+        self.assertIn("--set-upstream-to=origin/main main", switch)
+        self.assertNotRegex(switch, r"\breset\b|\bclean\b|--force|checkout -f|switch -f|--discard")
+        self.assertLess(switch.index('merge-base --is-ancestor main "${TARGET_SHA}"'),
+                        switch.index('branch -f main "${TARGET_SHA}"'))
 
     def test_upgrade_doc_runs_the_dry_run_before_apply(self):
         step3 = read(UPGRADE_DOC).split("## 3.", 1)[1].split("## 4.", 1)[0]

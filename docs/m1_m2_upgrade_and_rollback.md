@@ -176,53 +176,80 @@ If `PROJECT_PI_CAREGIVER_CREDENTIALS` was already set (drop-in), note its path:
 `EnvironmentFile=` values take precedence over `Environment=`, so after the
 upgrade `backend.env` must point at the same file (step 4).
 
-### 0a. Get the reviewed preflight tools without changing the checkout
-
-The backup and inventory scripts are new in the reviewed commit and do not exist in
-the deployed `1a5c309` checkout. Extract them from git's object store into a
-separate directory; the working tree, branch and running services do not change
-(`git fetch` only adds objects under `.git`). This is itself part of the separately
-authorized upgrade, not a read-only step.
+Every block below that guards the upgrade runs in its own `bash -euo pipefail`
+shell: any failed check prints `STOP:` and exits non-zero at once; nothing after it
+in that block runs. Do not continue to the next block after a non-zero exit. The
+code itself moves only in step 2, through `preupgrade_switch.sh`, which repeats the
+checks that matter and refuses on its own. Set the variables once (as `thesis`):
 
 ```bash
-cd ~/Project_Pi
+export PI_REPO=~/Project_Pi REVIEWED=<REVIEWED_COMMIT>
+export T=~/project-pi-preflight/$REVIEWED B=~/project-pi-backups/pre-m1m2-$(date +%Y%m%d-%H%M)
+```
+
+### 0a. Get the reviewed preflight tools without changing the checkout
+
+The preflight scripts are new in the reviewed commit and do not exist in the deployed
+`1a5c309` checkout. Extract them from git's object store into a separate directory;
+the working tree, branch and running services do not change (`git fetch` only adds
+objects under `.git`). This is itself part of the separately authorized upgrade, not
+a read-only step.
+
+<!-- runbook:0a -->
+```bash
+bash -euo pipefail <<'EOF'
+cd "$PI_REPO"
 git fetch origin
-git merge-base --is-ancestor <REVIEWED_COMMIT> origin/main || echo "STOP: not on origin/main"
-T=~/project-pi-preflight/<REVIEWED_COMMIT>
+git merge-base --is-ancestor "$REVIEWED" origin/main \
+  || { echo "STOP: $REVIEWED is not on origin/main" >&2; exit 1; }
 mkdir -p "$T"
-TOOLS="raspberry_pi/scripts/preupgrade_backup.sh raspberry_pi/scripts/preupgrade_inventory.sh raspberry_pi/config/protected_assets.txt"
-git archive <REVIEWED_COMMIT> $TOOLS | tar -x -C "$T"
-for f in $TOOLS; do                     # each extracted file is byte-identical to the reviewed blob
-  [ "$(git rev-parse "<REVIEWED_COMMIT>:$f")" = "$(git hash-object "$T/$f")" ] || echo "STOP: $f differs"
+TOOLS="raspberry_pi/scripts/preupgrade_backup.sh raspberry_pi/scripts/preupgrade_inventory.sh
+  raspberry_pi/scripts/preupgrade_switch.sh raspberry_pi/config/protected_assets.txt"
+git archive "$REVIEWED" $TOOLS | tar -x -C "$T"
+for f in $TOOLS; do  # each extracted file must be byte-identical to the reviewed blob
+  [ "$(git rev-parse "$REVIEWED:$f")" = "$(git hash-object "$T/$f")" ] \
+    || { echo "STOP: $T/$f differs from the reviewed $f" >&2; exit 1; }
 done
+echo "TOOLS VERIFIED in $T"
+EOF
 ```
 
 ### 0b. Confirm the protected-file paths (read-only)
 
 `protected_assets.txt` marks the two thermal model paths `? ` (provisional): the
 audit gave only file names. Both scripts refuse a manifest with `? ` entries, so
-this step cannot be skipped. Check each path with the `ls -la` above, then make the
-confirmed copy (the reviewed file stays unchanged):
+this step cannot be skipped. The block makes the confirmed copy once (the reviewed
+file stays unchanged) and stops at the first path that does not exist:
 
+<!-- runbook:0b -->
 ```bash
-sed 's/^? //' "$T/raspberry_pi/config/protected_assets.txt" > "$T/protected_assets.confirmed.txt"
-grep -v '^#' "$T/protected_assets.confirmed.txt" | while read -r p; do ls -la "$p" || echo "STOP: $p"; done
+bash -euo pipefail <<'EOF'
+cd "$PI_REPO"
+C="$T/protected_assets.confirmed.txt"
+[ -e "$C" ] || sed 's/^? //' "$T/raspberry_pi/config/protected_assets.txt" > "$C"
+grep -v -e '^#' -e '^$' "$C" | while read -r p; do
+  ls -la -- "$p" || { echo "STOP: $p not found; put its real path in $C" >&2; exit 1; }
+done
+echo "PATHS CONFIRMED in $C"
+EOF
 ```
 
-If a file is elsewhere, put its real path in the confirmed copy; never move the file
-to fit the manifest.
+If a file is elsewhere, put its real path in the confirmed copy and run the block
+again; never move the file to fit the manifest.
 
 ### 0c. Back up, then run the gate
 
 Back up the protected production files (authorized; it writes only into a new `$B`),
 then run the read-only gate against the commit you will deploy:
 
+<!-- runbook:0c -->
 ```bash
-B=~/project-pi-backups/pre-m1m2-$(date +%Y%m%d-%H%M)
-bash "$T/raspberry_pi/scripts/preupgrade_backup.sh" --repo="$HOME/Project_Pi" \
+bash -euo pipefail <<'EOF'
+bash "$T/raspberry_pi/scripts/preupgrade_backup.sh" --repo="$PI_REPO" \
   --manifest="$T/protected_assets.confirmed.txt" --backup-dir="$B"   # also writes $B/ROLLBACK_COMMIT
-bash "$T/raspberry_pi/scripts/preupgrade_inventory.sh" --repo="$HOME/Project_Pi" \
-  --target=<REVIEWED_COMMIT> --backup-dir="$B"
+bash "$T/raspberry_pi/scripts/preupgrade_inventory.sh" --repo="$PI_REPO" \
+  --target="$REVIEWED" --backup-dir="$B"
+EOF
 ```
 
 The backup opens the live database read-only (SQLite URI `mode=ro`: a missing file is
@@ -236,7 +263,7 @@ backup reports them and leaves them (harmless).
 The inventory writes nothing and must print `PASS`: backup intact, manifest
 confirmed, tracked files unedited, each protected file present and backed up, and no
 local untracked or **ignored** file (models, datasets, recordings included) at a
-path `<REVIEWED_COMMIT>` tracks, or inside one it tracks as a file: a plain
+path `$REVIEWED` tracks, or inside one it tracks as a file: a plain
 `git switch` overwrites or deletes such files, no force needed. Other local files
 are listed as `LOCAL`/`WARN` and do not block. On `BLOCKED`, stop; never use
 `git clean`, `git reset --hard` or `git checkout -f`.
@@ -275,18 +302,26 @@ Deploy only after the PR is merged: `<REVIEWED_COMMIT>` must be on `origin/main`
 (the repo squash-merges, so a PR-branch commit would leave `main` diverged and every
 later pull would fail). The Pi stays on a `main` branch that tracks `origin/main`.
 
+Move the checkout only with the reviewed switch script:
+
+<!-- runbook:2 -->
 ```bash
-cd ~/Project_Pi
-bash "$T/raspberry_pi/scripts/preupgrade_inventory.sh" --repo="$HOME/Project_Pi" \
-  --target=<REVIEWED_COMMIT> --backup-dir="$B"                      # PASS again, right before
-git merge-base --is-ancestor <REVIEWED_COMMIT> origin/main || echo "STOP: not on origin/main"
-git switch main                                       # creates a tracking main from origin/main if absent
-git branch --set-upstream-to=origin/main main
-git merge --ff-only <REVIEWED_COMMIT>                 # STOP if this refuses: local main has diverged
-git rev-parse HEAD                                    # must equal <REVIEWED_COMMIT>
+bash "$T/raspberry_pi/scripts/preupgrade_switch.sh" --repo="$PI_REPO" \
+  --target="$REVIEWED" --backup-dir="$B"
 ```
 
-If the fast-forward refuses, do not reset or discard anything: run
+Before git touches any file it checks, each fatally: that it and the inventory
+script are byte-identical to the reviewed blobs; that `$REVIEWED` is on
+`origin/main`; and that the inventory passes again for exactly `$REVIEWED`. It then
+fast-forwards `main` (tracking `origin/main`) straight to `$REVIEWED`, with no
+intermediate checkout, and records `$REVIEWED` in `$B/PRESWITCH_VERIFIED`. The
+installer refuses `--apply` unless that record names the checked-out `HEAD`; its own
+post-switch inventory is only an extra check and cannot by itself show that no file
+was overwritten during the switch. For a reinstall of the same commit, run the
+switch script too (the fast-forward is then a no-op).
+
+If it stops because local `main` has commits not in `$REVIEWED`, do not reset or
+discard anything: run
 `git log --oneline origin/main..main` to see the local commits, back them up
 (`git branch backup/pi-local-$(date +%Y%m%d)`) and get them reviewed before retrying.
 Do not use the app's Refresh button for this step.
@@ -309,13 +344,17 @@ the model, metadata and threshold settings recorded in step 0, and
 ```bash
 sudo bash raspberry_pi/scripts/install_headless.sh --apply --api-auth=required \
   --backup-dir="$B" --rollback-commit="$(cat "$B/ROLLBACK_COMMIT")"   # installs, restarts nothing
+# (sudo keeps none of thesis's variables: in a root shell, set B to the same path first)
 sudo systemctl restart thermal-backend.service kws-alert.service      # backend, then KWS, together
 ```
 
-`--backup-dir` is required with `--apply`: the installer runs the inventory itself
-(as `thesis`, against the now checked-out `HEAD`) and refuses, with nothing changed,
-unless it passes and the backup was made at `--rollback-commit`. There is no PASS
-file to forge, and no option to skip it.
+`--backup-dir` is required with `--apply`. The installer refuses, with nothing
+changed, unless `$B/PRESWITCH_VERIFIED` names the checked-out `HEAD` (written only by
+the switch script after its passing pre-switch inventory), the backup was made at
+`--rollback-commit`, and its own re-run of the read-only inventory (as `thesis`,
+against `HEAD`) passes. There is no option to skip it. `$B` is writable by `thesis`,
+so these records show that the procedure ran; they are not proof against someone who
+can already write as `thesis`.
 
 `--api-auth` is required with `--apply`. `required` (the choice on any shared Wi-Fi)
 creates `backend.env` with a random 64-hex token that is never printed: every diff
@@ -500,10 +539,19 @@ per-phone authentication in both modes.
 
 ## Token rotation, revocation and the APK server
 
-Rotate (on the Pi console): generate a new token without echoing it,
-`sudo sed -i "s/^PROJECT_PI_API_TOKEN=.*/PROJECT_PI_API_TOKEN=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')/" /etc/project-pi/backend.env`,
-keep the file root `0600`, restart `thermal-backend` then `kws-alert`, and enter
-the new token on every phone (step 5). A typo or deleted token later makes the
+Rotate on the Pi console with the root helper, which generates the token in its own
+memory and writes it with a shell builtin, so it never appears in any process's
+arguments, in output, logs, shell history or git; the file is replaced atomically,
+root-owned `0600`:
+
+```bash
+sudo bash raspberry_pi/scripts/rotate_api_token.sh
+sudo systemctl restart thermal-backend.service && sudo systemctl restart kws-alert.service
+```
+
+Then enter the new token on every phone (step 5). Never put a token on a command
+line yourself (`sed -i "s/…/$(…)/"`, `curl -H "…$TOKEN"`): command lines are visible to
+every local user while the command runs. A typo or deleted token later makes the
 backend run locked, never open. Switching to open mode needs both
 `PROJECT_PI_API_AUTH=open` and `PROJECT_PI_OPEN_MODE_ACK=isolated-network-verified`
 and is only for a verified isolated hotspot.

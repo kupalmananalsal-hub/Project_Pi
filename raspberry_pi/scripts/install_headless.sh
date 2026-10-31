@@ -17,8 +17,9 @@
 #                         --apply fails it is reported next to the current HEAD; the
 #                         installer never changes the git checkout itself.
 #   --backup-dir=DIR      required with --apply: the backup from preupgrade_backup.sh,
-#                         made at --rollback-commit. The installer re-runs the read-only
-#                         preupgrade_inventory.sh on it and refuses unless it passes.
+#                         made at --rollback-commit, in which preupgrade_switch.sh
+#                         recorded HEAD as verified before the switch. The installer also
+#                         re-runs the read-only preupgrade_inventory.sh on it.
 #   --api-auth=MODE       required with --apply: required (bearer token; generated if
 #                         backend.env is created) or open (NO authentication; also needs
 #                         --i-verified-network-isolation). An existing backend.env is never
@@ -111,15 +112,22 @@ else
   echo "CODE       HEAD ${CODE_HEAD_BEFORE}; --apply will need --rollback-commit=SHA"
 fi
 
-# Release gate: the installer runs the read-only inventory itself (no PASS file to
-# forge): the pre-upgrade backup must verify, hold every protected file, have been made
-# from the rollback commit, and no local file may collide with the installed checkout.
+# Release gate. Files git may overwrite are protected only BEFORE the switch: that is
+# preupgrade_switch.sh, which runs the inventory against the exact target and records
+# it in DIR/PRESWITCH_VERIFIED. Here that record must name the checked-out HEAD, and the
+# installer re-runs the read-only inventory as an extra check (backup still intact,
+# protected files still present, made at the rollback commit); it cannot itself prove
+# what the switch did.
 GATE=BLOCKED
 if [[ -z "${PREUPGRADE_BACKUP}" ]]; then
   echo "GATE       --apply needs --backup-dir=DIR from preupgrade_backup.sh"
 elif ! as_owner bash "${SCRIPTS}/preupgrade_inventory.sh" --repo="${REPO}" --target=HEAD \
     --backup-dir="${PREUPGRADE_BACKUP}" | sed 's/^/GATE       /'; then
   echo "GATE       BLOCKED by the inventory above"
+elif [[ "$(cat "${PREUPGRADE_BACKUP}/PRESWITCH_VERIFIED" 2>/dev/null)" != "${CODE_HEAD_BEFORE}" ]]; then
+  echo "GATE       BLOCKED: ${PREUPGRADE_BACKUP}/PRESWITCH_VERIFIED does not name HEAD" \
+    "${CODE_HEAD_BEFORE}: move the checkout only with preupgrade_switch.sh (it checks the" \
+    "target before git touches any file)"
 elif [[ -n "${ROLLBACK_SHA}" && "$(cat "${PREUPGRADE_BACKUP}/ROLLBACK_COMMIT")" != "${ROLLBACK_SHA}" ]]; then
   echo "GATE       BLOCKED: the backup was made at $(cat "${PREUPGRADE_BACKUP}/ROLLBACK_COMMIT")," \
     "not at --rollback-commit ${ROLLBACK_SHA}"

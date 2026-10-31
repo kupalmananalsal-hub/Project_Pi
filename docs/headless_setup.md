@@ -24,10 +24,12 @@ sudo bash raspberry_pi/scripts/install_headless.sh --apply --restart --api-auth=
   --backup-dir="$B" --rollback-commit="$(git rev-parse HEAD)"   # the code that ran before
 ```
 
-`--backup-dir` is the pre-upgrade backup from `preupgrade_backup.sh`; the installer
-re-runs the read-only `preupgrade_inventory.sh` on it and refuses `--apply` unless it
-passes (procedure: [m1_m2_upgrade_and_rollback.md](m1_m2_upgrade_and_rollback.md),
-step 0). Bearer tokens travel over plain HTTP: use a trusted isolated network (or
+`--backup-dir` is the pre-upgrade backup from `preupgrade_backup.sh`. The installer
+refuses `--apply` unless `preupgrade_switch.sh` recorded the checked-out commit there
+after a passing pre-switch inventory, and its own re-run of the inventory passes
+(procedure: [m1_m2_upgrade_and_rollback.md](m1_m2_upgrade_and_rollback.md), steps
+0–2; also for a reinstall). Rotate the API token only with
+`sudo bash raspberry_pi/scripts/rotate_api_token.sh`. Bearer tokens travel over plain HTTP: use a trusted isolated network (or
 encrypted transport, not provided here); see "Network and transport security" there.
 
 The default is a dry run that writes nothing: it reports package drift against
@@ -120,9 +122,9 @@ sudo sed -n 's/^PROJECT_PI_API_TOKEN=/Authorization: Bearer /p' /etc/project-pi/
   | curl -s -H @- http://127.0.0.1:8765/api/status | python3 -m json.tool
 
 # Refresh API (same as mobile app)
-sudo bash -c 'source /etc/project-pi/backend.env; curl -s -X POST http://127.0.0.1:8765/api/refresh \
-  -H "Authorization: Bearer $PROJECT_PI_API_TOKEN" -H "Content-Type: application/json" \
-  -d "{\"git_pull\": false, \"restart_backend\": false}"'
+sudo sed -n 's/^PROJECT_PI_API_TOKEN=/Authorization: Bearer /p' /etc/project-pi/backend.env \
+  | curl -s -X POST -H @- -H "Content-Type: application/json" \
+    -d '{"git_pull": false, "restart_backend": false}' http://127.0.0.1:8765/api/refresh
 
 # Re-run full boot script (root-owned copy)
 sudo /usr/local/sbin/project-pi-boot

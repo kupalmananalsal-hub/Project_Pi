@@ -114,6 +114,8 @@ class InstallerRuntimeTest(unittest.TestCase):
             capture_output=True, text=True, timeout=60)
         self.assertEqual(backup.returncode, 0, backup.stdout + backup.stderr)
         self.git("checkout", "-q", "-")
+        # What preupgrade_switch.sh records after its passing pre-switch inventory.
+        (self.preupgrade / "PRESWITCH_VERIFIED").write_text(self.after_sha + "\n", encoding="utf-8")
 
     def git(self, *args):
         return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
@@ -390,6 +392,19 @@ class InstallerRuntimeTest(unittest.TestCase):
             self.assertIn("Refusing --apply: the pre-upgrade gate did not pass", result.stderr)
             self.assertEqual(self.files(), [])
             self.assertEqual(self.calls(), [])
+        # No (or another commit's) pre-switch record: the checkout was not moved by
+        # preupgrade_switch.sh, so nothing proves the target was checked before git ran.
+        record = self.preupgrade / "PRESWITCH_VERIFIED"
+        for text in (None, self.before_sha + "\n"):
+            if text is None:
+                record.unlink()
+            else:
+                record.write_text(text, encoding="utf-8")
+            result = self.run_installer("--apply")
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("PRESWITCH_VERIFIED does not name HEAD", result.stdout)
+            self.assertEqual(self.files(), [])
+        record.write_text(self.after_sha + "\n", encoding="utf-8")
         # A backup that no longer verifies (protected file changed after it was made).
         (self.preupgrade / "raspberry_pi/backend/alerts.db").write_bytes(b"not a database")
         result = self.run_installer("--apply")
