@@ -55,7 +55,11 @@ from alert_decision import AlertDecisionEngine
 from alert_trace import trace_alert
 from alert_delivery import DeliverySessions
 
-delivery_sessions = DeliverySessions()
+# 5 s/5 s detects a dead caregiver link fast; the pre-PR #9 values were 15 s/10 s.
+delivery_sessions = DeliverySessions(
+    heartbeat_interval=float(os.getenv("PROJECT_PI_HEARTBEAT_INTERVAL_SECONDS", "5")),
+    heartbeat_timeout=float(os.getenv("PROJECT_PI_HEARTBEAT_TIMEOUT_SECONDS", "5")),
+)
 from noise_suppressor import (
     DEFAULT_CONFIG_PATH,
     NoiseSuppressionConfig,
@@ -105,13 +109,20 @@ KEYWORD_METADATA_PATH = KEYWORD_DATASET_DIR / "metadata.csv"
 OPENWAKEWORD_MODEL_DIR = DATASET_DIR / "audio" / "openwakeword_models"
 DATASET_ARCHIVES_DIR = DATASET_DIR / "archives"
 API_TOKEN = os.getenv("PROJECT_PI_API_TOKEN", "").strip()
-# Auth is on when a token is configured or PROJECT_PI_API_AUTH=required; off (no-token mode) otherwise.
-API_AUTH_REQUIRED = os.getenv("PROJECT_PI_API_AUTH", "").strip().lower() == "required"
+# "open" (default): no authentication, isolated network only. "required": bearer token.
+API_AUTH_MODE = os.getenv("PROJECT_PI_API_AUTH", "").strip().lower() or "open"
+API_AUTH_MODES = ("open", "required")
 LEGACY_DEFAULT_API_TOKEN = "project-pi-local-token"
 MIN_API_TOKEN_LENGTH = 16
 REFRESH_HELPER = Path("/usr/local/sbin/project-pi-refresh")
-# BAA (110 degree) MLX90640 variants are unreliable above 2 Hz.
-THERMAL_REFRESH_HZ = os.getenv("THERMAL_REFRESH_HZ", "2").strip()
+# Root-owned; created only by an authorized upgrade. Without it the app cannot git pull.
+APP_GIT_DEPLOY_FLAG = Path("/etc/project-pi/allow-app-git-deploy")
+# The rate depends on the MLX90640 variant, so it is a per-device setting (local drop-in).
+# Unset: 4 Hz, the rate the code hard-coded before, kept only so existing Pis do not change.
+_THERMAL_REFRESH_ENV = os.getenv("THERMAL_REFRESH_HZ", "").strip()
+THERMAL_REFRESH_HZ = _THERMAL_REFRESH_ENV or "4"
+THERMAL_REFRESH_SOURCE = "env" if _THERMAL_REFRESH_ENV else "legacy_default"
+MLX90640_VARIANT = os.getenv("MLX90640_VARIANT", "").strip() or "unverified"
 THERMAL_REINIT_INTERVAL_SECONDS = 2.0
 MAX_TRAINING_WAV_UPLOAD_BYTES = int(os.getenv("TRAINING_WAV_MAX_BYTES", str(8 * 1024 * 1024)))
 MAX_ONNX_UPLOAD_BYTES = int(os.getenv("TRAINING_ONNX_MAX_BYTES", str(128 * 1024 * 1024)))
@@ -155,15 +166,19 @@ app.add_middleware(
 
 
 def api_auth_enabled() -> bool:
-    return bool(API_TOKEN) or API_AUTH_REQUIRED
+    # Any value other than "open" fails closed; startup refuses unknown modes anyway.
+    return API_AUTH_MODE != "open"
 
 
 def api_token_valid(authorization: str) -> bool:
     scheme, _, token = authorization.partition(" ")
+    token = token.strip()
     return (
         bool(API_TOKEN)
+        and API_TOKEN != LEGACY_DEFAULT_API_TOKEN
+        and token != LEGACY_DEFAULT_API_TOKEN
         and scheme.lower() == "bearer"
-        and hmac.compare_digest(token.strip().encode(), API_TOKEN.encode())
+        and hmac.compare_digest(token.encode(), API_TOKEN.encode())
     )
 
 
@@ -1073,6 +1088,7 @@ def normalize_audio_payload(data: dict[str, Any], *, working: bool = True) -> di
         "source": data.get("source", "backend_audio"),
         "timestamp": data.get("timestamp", datetime.now(timezone.utc).isoformat()),
         **({"error": data["error"]} if data.get("error") else {}),
+        **({"outbox": data["outbox"]} if isinstance(data.get("outbox"), dict) else {}),
     }
 
 
@@ -1677,6 +1693,11 @@ def current_noise_settings() -> dict[str, Any]:
 
 
 def check_security_config() -> None:
+    if API_AUTH_MODE not in API_AUTH_MODES:
+        raise RuntimeError(
+            f"PROJECT_PI_API_AUTH={API_AUTH_MODE!r} is not one of {API_AUTH_MODES}."
+        )
+    print(f"api_auth_mode={API_AUTH_MODE}", file=sys.stderr, flush=True)
     if api_auth_enabled():
         # Explicitly enabled auth with an unusable token must not quietly turn auth off.
         if (
@@ -1685,19 +1706,27 @@ def check_security_config() -> None:
             or len(API_TOKEN) < MIN_API_TOKEN_LENGTH
         ):
             raise RuntimeError(
-                "API authentication is enabled but PROJECT_PI_API_TOKEN is missing, "
+                "PROJECT_PI_API_AUTH=required but PROJECT_PI_API_TOKEN is missing, "
                 f"shorter than {MIN_API_TOKEN_LENGTH} characters, or the public default. "
-                "Set a random token in /etc/project-pi/backend.env, or remove "
-                "PROJECT_PI_API_AUTH=required to run in no-token mode."
+                "Set a random token in /etc/project-pi/backend.env, or set "
+                "PROJECT_PI_API_AUTH=open for the isolated-network mode."
             )
     else:
         print(
-            "WARNING: API authentication is DISABLED (no PROJECT_PI_API_TOKEN). Every /api "
-            "and /ws route, including refresh, reboot, shutdown and model deploy, is open "
-            "to anyone on this network. Use only on an isolated, trusted network.",
+            "WARNING: PROJECT_PI_API_AUTH=open: NO authentication. Every /api and /ws "
+            "route, including refresh, reboot, shutdown, model deploy and alerts, is open "
+            "to anyone on this network; the legacy app token is not security. Use only "
+            "on an isolated hotspot.",
             file=sys.stderr,
             flush=True,
         )
+        if API_TOKEN:
+            print(
+                "WARNING: PROJECT_PI_API_TOKEN is set but ignored: set "
+                "PROJECT_PI_API_AUTH=required to enforce it.",
+                file=sys.stderr,
+                flush=True,
+            )
     credentials = os.getenv("PROJECT_PI_CAREGIVER_CREDENTIALS")
     if not credentials or not Path(credentials).is_file():
         print(
@@ -1722,8 +1751,16 @@ class HealthMonitor:
 
     def failing_components(self) -> dict[str, str]:
         failing = {}
-        if read_shared_audio_status(max_age_seconds=10.0) is None:
+        audio_status = read_shared_audio_status(max_age_seconds=10.0)
+        if audio_status is None:
             failing["keyword detection offline"] = "kws-alert.service is not publishing audio"
+        else:
+            outbox = audio_status.get("outbox") or {}
+            if outbox.get("critical_evictions"):
+                failing["alert outbox overflow"] = (
+                    f"{outbox['critical_evictions']} undelivered certain_critical alert(s) "
+                    "evicted at the KWS outbox hard limit"
+                )
         if thermal.mlx is None and thermal.error:
             failing["thermal camera offline"] = str(thermal.error)
         return failing
@@ -1763,6 +1800,14 @@ async def run_health_monitor() -> None:
 async def startup():
     global health_task
     check_security_config()
+    if THERMAL_REFRESH_SOURCE == "legacy_default":
+        print(
+            "WARNING: THERMAL_REFRESH_HZ is unset; using the legacy 4 Hz for compatibility "
+            "with existing deployments. This is not a claim that 4 Hz suits every "
+            "MLX90640 variant; set it in thermal-backend.service.d/10-local.conf.",
+            file=sys.stderr,
+            flush=True,
+        )
     health_task = asyncio.create_task(run_health_monitor())
     try:
         button.init()
@@ -1888,8 +1933,13 @@ async def api_status():
             "body_coverage": latest_thermal.get("body_coverage", 0.0),
             "detected_part": latest_thermal.get("detected_part", "unknown"),
             "confidence_boost": latest_thermal.get("confidence_boost", 0.0),
+            "thermal_refresh_hz": THERMAL_REFRESH_HZ,
+            "thermal_refresh_source": THERMAL_REFRESH_SOURCE,
+            "mlx90640_variant": MLX90640_VARIANT,
             **thermal_model_status,
         },
+        "api_auth_mode": API_AUTH_MODE,
+        "alert_outbox": (read_shared_audio_status(max_age_seconds=10.0) or {}).get("outbox"),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -2735,6 +2785,16 @@ async def run_delayed_power_command(action: str, command: list[str]) -> None:
 
 @app.post("/api/refresh")
 async def api_refresh(request: RefreshRequest):
+    # A pull without the installer leaves new code running on old units, sudoers and helpers.
+    if request.git_pull and not APP_GIT_DEPLOY_FLAG.is_file():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"App-triggered git deploy is disabled ({APP_GIT_DEPLOY_FLAG} is absent). "
+                "Update the Pi with the reviewed upgrade procedure "
+                "(docs/m1_m2_upgrade_and_rollback.md). Restart without git_pull still works."
+            ),
+        )
     if not REFRESH_HELPER.is_file():
         raise HTTPException(
             status_code=500,

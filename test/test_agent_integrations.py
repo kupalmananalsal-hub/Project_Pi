@@ -113,6 +113,20 @@ class ReadOnlyProbeTests(unittest.TestCase):
         self.assertEqual(classify({'exit_code': 0, 'output': '500'}), 'BACKEND_HTTP_500')
         self.assertEqual(classify({'exit_code': None, 'output': ''}), 'BACKEND_UNREACHABLE')
 
+    def test_mic_owner_compares_capture_pcm_owner_with_kws_main_pid(self):
+        classify = preflight.classify_mic_owner
+        capture = ('/proc/asound/card2/pcm0c/sub0/status:owner_pid   : 812\n'
+                   '/proc/asound/card0/pcm0p/sub0/status:owner_pid   : 99\n')
+        kws = {'exit_code': 0, 'output': '812\n'}
+        self.assertEqual(classify({'output': capture}, kws), 'MIC_OWNER_KWS_ONLY')
+        self.assertEqual(classify({'output': capture}, {'output': '700'}), 'MIC_OWNER_NOT_KWS')
+        second = capture + '/proc/asound/card2/pcm0c/sub1/status:owner_pid   : 913\n'
+        self.assertEqual(classify({'output': second}, kws), 'MIC_MULTIPLE_OWNERS')
+        self.assertEqual(classify({'output': ''}, kws), 'MIC_NOT_CAPTURING')
+        self.assertEqual(classify({'error': 'missing'}, kws), 'MIC_OWNER_UNKNOWN')
+        self.assertEqual(classify({'output': capture}, {'output': ''}), 'MIC_OWNER_UNKNOWN')
+        self.assertEqual(preflight.PROBES['capture_owner'][0], 'grep')
+
 
 class OfflineHilTests(unittest.TestCase):
     def test_valid_thermal_fixture(self):

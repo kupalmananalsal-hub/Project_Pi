@@ -12,14 +12,14 @@ uvicorn main:app --host 0.0.0.0 --port 8765
 
 Headless boot and refresh: see [`../../docs/headless_setup.md`](../../docs/headless_setup.md).
 
-Main endpoints. API authentication is optional and off by default: in no-token mode every route is open to anyone on the network. When `PROJECT_PI_API_TOKEN` is set in `/etc/project-pi/backend.env`, every `/api` and `/ws` route needs `Authorization: Bearer <token>`, except `/ws/alerts?protocol=2`, which authenticates caregiver phones itself:
+Main endpoints. `PROJECT_PI_API_AUTH` in `/etc/project-pi/backend.env` selects the mode, reported as `api_auth_mode` in `/api/status`. `open` (default): no authentication, every route is open to anyone on the network (isolated hotspot only; the old app's token is not security). `required`: every `/api` and `/ws` route needs `Authorization: Bearer <PROJECT_PI_API_TOKEN>` (16+ characters, never the legacy token), except `/ws/alerts?protocol=2`, which authenticates caregiver phones itself:
 
 - `GET /api/status`
 - `POST /api/leds`
 - `GET /api/button`
 - `POST /api/alerts`
 - `GET /api/alerts`
-- `POST /api/refresh` — optional `git pull` (as thesis), then restart KWS via the root-owned helper; does not reinstall units
+- `POST /api/refresh` — restart KWS (and optionally the backend) via the root-owned helper; `git_pull` returns 409 unless `/etc/project-pi/allow-app-git-deploy` exists; never reinstalls units
 - `POST /api/shutdown`
 - `POST /api/reboot`
 - `WS /ws/thermal`

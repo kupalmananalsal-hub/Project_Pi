@@ -17,14 +17,13 @@ EnvironmentFile=-/etc/project-pi/backend.env
 StateDirectory=project-pi/backend
 StateDirectoryMode=0700
 Environment=PYTHONUNBUFFERED=1
-# 2 Hz is the safe MLX90640 rate for the 110-degree BAA variant; raise only for BAB.
-Environment=THERMAL_REFRESH_HZ=2
 Environment="GPIOZERO_PIN_FACTORY=lgpio"
 Environment="DATASET_DIR=/home/thesis/Project_Pi/dataset"
-Environment="THERMAL_HUMAN_MODEL_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_shape.tflite"
-Environment="THERMAL_HUMAN_MODEL_METADATA_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_shape_labels.json"
-Environment="THERMAL_HUMAN_MODEL_THRESHOLD=0.65"
-# Optional troubleshooting override: Environment="LGPIO_CHIP=<chip-number>"
+# The detection threshold comes from the model metadata; do not override it here.
+Environment="THERMAL_HUMAN_MODEL_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_detector.tflite"
+Environment="THERMAL_HUMAN_MODEL_METADATA_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_detector.metadata.json"
+# Device-specific settings (THERMAL_REFRESH_HZ, MLX90640_VARIANT, LGPIO_CHIP) live in the
+# local drop-in thermal-backend.service.d/10-local.conf, never in this generic unit.
 # Runs as thesis, not root (+): root must never execute thesis-writable files.
 # "-": if the patch needs root-owned site-packages it fails, but the patch already
 # on disk stays in effect and the backend still starts.

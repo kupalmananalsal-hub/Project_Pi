@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 
-from test_backend_alert_smoke import load_backend_module, restore_modules
+from test.test_backend_alert_smoke import load_backend_module, restore_modules
 
 try:
     from fastapi.testclient import TestClient
@@ -27,6 +27,7 @@ class DeliveryIntegrationTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.module, previous = load_backend_module(self.temp.name, real_http=True)
         self.addCleanup(restore_modules, previous)
+        self.module.API_AUTH_MODE = "required"
         self.module.API_TOKEN = "integration-api-token"
         self.client = TestClient(self.module.app, headers={"Authorization": "Bearer integration-api-token"})
         self.addCleanup(self.client.close)
@@ -48,7 +49,7 @@ class DeliveryIntegrationTest(unittest.TestCase):
         self.assertEqual(connected["type"], "connected")
         ws.send_json(dict(protocol_version=2, type="replay_request", cursor=0, instance=connected["instance"]))
 
-    def test_unauthenticated_clients_are_rejected_over_real_http(self):
+    def test_required_mode_rejects_unauthenticated_clients_over_real_http(self):
         anonymous = TestClient(self.module.app)
         self.addCleanup(anonymous.close)
         for method, path in (("post", "/api/alerts"), ("delete", "/api/alerts"), ("get", "/api/status")):
@@ -59,21 +60,23 @@ class DeliveryIntegrationTest(unittest.TestCase):
                 ws.receive_json()
         self.assertEqual(len(self.module.alert_store.list_recent()), 0)
 
-    def test_wrong_token_is_rejected_and_correct_token_accepted(self):
-        wrong = TestClient(self.module.app, headers={"Authorization": "Bearer not-the-token-0123456789"})
-        self.addCleanup(wrong.close)
-        self.assertEqual(wrong.post("/api/alerts", json={"keyword": "help"}).status_code, 401)
-        self.assertEqual(wrong.get("/api/alerts").status_code, 401)
-        with self.assertRaises(WebSocketDisconnect):
-            with wrong.websocket_connect("/ws/alerts") as ws:
-                ws.receive_json()
+    def test_required_mode_rejects_wrong_and_legacy_token_accepts_correct(self):
+        for header in ("Bearer not-the-token-0123456789", "Bearer project-pi-local-token"):
+            wrong = TestClient(self.module.app, headers={"Authorization": header})
+            self.addCleanup(wrong.close)
+            self.assertEqual(wrong.post("/api/alerts", json={"keyword": "help"}).status_code, 401)
+            self.assertEqual(wrong.get("/api/alerts").status_code, 401)
+            with self.assertRaises(WebSocketDisconnect):
+                with wrong.websocket_connect("/ws/alerts") as ws:
+                    ws.receive_json()
         self.assertEqual(self.client.get("/api/alerts").status_code, 200)
         with self.client.websocket_connect("/ws/thermal") as ws:
             self.assertIn("timestamp", ws.receive_json())
 
-    def test_no_token_mode_serves_rest_and_websockets_without_credentials(self):
+    def test_open_mode_legacy_client_compat_over_real_http(self):
+        """Compatibility only: open mode has no authentication."""
+        self.module.API_AUTH_MODE = "open"
         self.module.API_TOKEN = ""
-        self.module.API_AUTH_REQUIRED = False
         anonymous = TestClient(self.module.app)
         self.addCleanup(anonymous.close)
         # Request shapes the current app sends with an empty token field.

@@ -151,10 +151,20 @@ maybe_apt_update() {
   fi
 }
 
+log_network() {
+  log "Network unchanged: SSID=$(iwgetid -r 2>/dev/null || echo none)," \
+    "IPv4=$(ip -4 -o addr show dev wlan0 2>/dev/null | awk '{print $4}' | paste -sd, -)"
+}
+
 main() {
   log "Headless boot script started"
   wait_for_network || true
-  connect_hotspot || log "Hotspot connect did not succeed; services will still start"
+  # Opt-in only: by default the boot never creates, modifies or activates an NM profile.
+  if [[ "${PROJECT_PI_FORCE_HOTSPOT:-0}" == "1" ]]; then
+    connect_hotspot || log "Hotspot connect did not succeed; services will still start"
+  else
+    log_network
+  fi
   maybe_apt_update
   /usr/local/sbin/project-pi-log-cleanup || log "Log cleanup failed (continuing)"
   log "Headless boot script finished (systemd will start enabled app units)"

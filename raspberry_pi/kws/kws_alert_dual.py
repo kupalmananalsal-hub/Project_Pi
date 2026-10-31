@@ -19,6 +19,7 @@ RASPBERRY_PI_ROOT = Path(__file__).resolve().parents[1]
 if str(RASPBERRY_PI_ROOT) not in sys.path:
     sys.path.insert(0, str(RASPBERRY_PI_ROOT))
 
+from alert_decision import AlertDecisionEngine, AlertPolicy
 from alert_trace import trace_alert
 
 import numpy as np
@@ -39,7 +40,15 @@ RUNNING = True
 SAMPLE_RATE = 16000
 CHUNK_FRAMES = 1024
 ALERT_FLUSH_INTERVAL_SECONDS = 2.0
+# Soft limit: beyond it the oldest certain_suppressed, then possible_critical events go.
 MAX_PENDING_ALERTS = 500
+# Hard limits: only here are certain_critical events evicted (error + health fault).
+HARD_MAX_PENDING_ALERTS = 5000
+HARD_MAX_PENDING_BYTES = 5 * 1024 * 1024
+# Pre-PR #9 outbox location (tmpfs); merged into the durable outbox on startup.
+LEGACY_ALERT_QUEUE_PATH = Path("/tmp/project_pi_alerts.jsonl")
+# Retention hints only: the backend classifies with thermal evidence at delivery time.
+RETENTION_TIER_NAMES = {1: "certain_suppressed", 2: "possible_critical", 3: "certain_critical"}
 # 50 openWakeWord frames of 80 ms: a broken model exits instead of silently never detecting.
 OPENWAKEWORD_MAX_CONSECUTIVE_FAILURES = 50
 DEFAULT_AUDIO_STATUS_PATH = Path("/tmp/project_pi_audio_status.json")
@@ -125,10 +134,42 @@ def handle_signal(signum, frame):
     RUNNING = False
 
 
+def retention_tier(event: dict[str, object], policy: AlertPolicy) -> int:
+    """Which final states the backend could still assign, from queue-time facts only.
+
+    Mirrors AlertDecisionEngine._classify without thermal evidence: 3 = CRITICAL whatever
+    the thermal state, 2 = CRITICAL or advisory depending on thermal (or a fault/manual
+    advisory), 1 = suppressed whatever the thermal state.
+    """
+    source = event.get("source")
+    if source == "manual_button":
+        return 3
+    if (
+        source in ("manual_button_single", "health_monitor")
+        or str(event.get("event", "")).strip().lower() == "system_fault"
+    ):
+        return 2
+    confidence = AlertDecisionEngine._as_float(event.get("confidence"))
+    if confidence >= policy.critical_threshold:
+        return 3
+    if confidence < policy.advisory_threshold:
+        return 1
+    return 2  # also NaN, which the backend never suppresses
+
+
 class AlertPoster:
-    def __init__(self, backend_url: str, queue_path: Path):
+    def __init__(
+        self,
+        backend_url: str,
+        queue_path: Path,
+        *,
+        legacy_queue_path: Path | None = None,
+        policy: AlertPolicy | None = None,
+    ):
         self.backend_url = backend_url
         self.queue_path = queue_path
+        # Same policy file and safe-default fallback as the backend.
+        self.policy = policy or AlertPolicy.load()
         self.session = requests.Session()
         token = os.getenv("PROJECT_PI_API_TOKEN", "").strip()
         if token:
@@ -137,10 +178,16 @@ class AlertPoster:
         self._flush_queue: queue.Queue[object] = queue.Queue(maxsize=1)
         self._worker_stop = threading.Event()
         self._worker_thread: threading.Thread | None = None
-        self.pending, upgraded_pending = self._load_pending()
-        if upgraded_pending:
-            with self.lock:
+        self.evictions = 0
+        self.critical_evictions = 0
+        self.pending, changed = self._read_events(self.queue_path)
+        with self.lock:
+            migrated_from = self._merge_legacy_locked(legacy_queue_path)
+            changed = self._enforce_bounds_locked() or changed or migrated_from is not None
+            if changed:
                 self._persist_pending_locked()
+        if migrated_from is not None:
+            self._retire_legacy(migrated_from)
 
     def publish(
         self,
@@ -162,14 +209,13 @@ class AlertPoster:
         }
         if extra:
             event.update(extra)
+        event["retention_tier"] = retention_tier(event, self.policy)
         trace_alert("detection", event["event_id"], "accepted", keyword=keyword,
-                    source=source, confidence=confidence)
+                    source=source, confidence=confidence,
+                    retention_tier=RETENTION_TIER_NAMES[event["retention_tier"]])
         with self.lock:
             self.pending.append(event)
-            while len(self.pending) > MAX_PENDING_ALERTS:
-                dropped = self.pending.pop(0)
-                trace_alert("outbox", dropped.get("event_id"), "dropped",
-                            reason="outbox_full")
+            self._enforce_bounds_locked()
             self._persist_pending_locked()
         if self._worker_thread is not None and self._worker_thread.is_alive():
             try:
@@ -216,7 +262,9 @@ class AlertPoster:
                 event = dict(self.pending[0])
                 pending_count = len(self.pending)
             try:
-                response = self.session.post(self.backend_url, json=event, timeout=1.0)
+                # The tier is a local retention hint; the backend payload (and fingerprint) stay as before.
+                payload = {k: v for k, v in event.items() if k != "retention_tier"}
+                response = self.session.post(self.backend_url, json=payload, timeout=1.0)
                 status_code = int(getattr(response, "status_code", 200))
                 # Other 4xx (409 conflict, 422) never succeed on retry and would block the queue head forever.
                 if not 400 <= status_code < 500 or status_code in (401, 408, 429):
@@ -241,13 +289,96 @@ class AlertPoster:
                         "dropped" if 400 <= status_code < 500 else "succeeded",
                         keyword=sent["keyword"], status_code=status_code)
 
-    def _load_pending(self) -> tuple[list[dict[str, object]], bool]:
-        if not self.queue_path.exists():
+    def outbox_status(self) -> dict[str, object]:
+        with self.lock:
+            pending = len(self.pending)
+            return {
+                "pending": pending,
+                "pressure": pending >= MAX_PENDING_ALERTS or self.evictions > 0,
+                "evictions": self.evictions,
+                "critical_evictions": self.critical_evictions,
+                "soft_limit": MAX_PENDING_ALERTS,
+                "hard_limit": HARD_MAX_PENDING_ALERTS,
+                "hard_limit_bytes": HARD_MAX_PENDING_BYTES,
+            }
+
+    def _enforce_bounds_locked(self) -> bool:
+        evicted = False
+        # Soft limit: certain_suppressed first, then possible_critical; never certain_critical.
+        while len(self.pending) > MAX_PENDING_ALERTS:
+            candidates = [i for i, e in enumerate(self.pending) if e["retention_tier"] < 3]
+            if not candidates:
+                break
+            self._evict_locked(
+                min(candidates, key=lambda i: (self.pending[i]["retention_tier"], i)),
+                "outbox_soft_limit",
+            )
+            evicted = True
+        sizes = [len(json.dumps(event)) + 1 for event in self.pending]
+        total = sum(sizes)
+        while self.pending and (
+            len(self.pending) > HARD_MAX_PENDING_ALERTS or total > HARD_MAX_PENDING_BYTES
+        ):
+            index = min(range(len(self.pending)),
+                        key=lambda i: (self.pending[i]["retention_tier"], i))
+            total -= sizes.pop(index)
+            self._evict_locked(index, "outbox_hard_limit")
+            evicted = True
+        return evicted
+
+    def _evict_locked(self, index: int, reason: str) -> None:
+        event = self.pending.pop(index)
+        tier = event["retention_tier"]
+        self.evictions += 1
+        if tier == 3:
+            self.critical_evictions += 1
+        trace_alert("outbox", event.get("event_id"), "evicted", reason=reason,
+                    retention_tier=RETENTION_TIER_NAMES[tier])
+        print(
+            f"{'ERROR' if tier == 3 else 'WARNING'}: alert outbox {reason}: evicted "
+            f"{RETENTION_TIER_NAMES[tier]} event {event.get('event_id')} "
+            f"({event.get('keyword')!r}, confidence={event.get('confidence')}); "
+            f"{len(self.pending)} still queued",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    def _merge_legacy_locked(self, legacy_path: Path | None) -> Path | None:
+        if legacy_path is None or not legacy_path.exists():
+            return None
+        if legacy_path.resolve() == self.queue_path.resolve():
+            return None
+        legacy, _ = self._read_events(legacy_path)
+        known = {event["event_id"] for event in self.pending}
+        for event in legacy:
+            if event["event_id"] in known:
+                continue  # keep the first copy of each event_id
+            known.add(event["event_id"])
+            self.pending.append(event)
+            trace_alert("outbox", event["event_id"], "migrated",
+                        source_path=str(legacy_path),
+                        retention_tier=RETENTION_TIER_NAMES[event["retention_tier"]])
+        return legacy_path
+
+    @staticmethod
+    def _retire_legacy(legacy_path: Path) -> None:
+        # Never deleted: renamed only after its events are fsynced into the durable outbox.
+        target = legacy_path.with_name(f"{legacy_path.name}.migrated")
+        if target.exists():
+            target = legacy_path.with_name(f"{legacy_path.name}.{int(time.time())}.migrated")
+        try:
+            os.replace(legacy_path, target)
+        except OSError as exc:
+            # Re-merged next start; event_id dedupe keeps that harmless.
+            print(f"WARNING: could not rename {legacy_path}: {exc}", file=sys.stderr, flush=True)
+
+    def _read_events(self, path: Path) -> tuple[list[dict[str, object]], bool]:
+        if not path.exists():
             return [], False
 
         pending: list[dict[str, object]] = []
         upgraded_pending = False
-        with self.queue_path.open("r", encoding="utf-8") as handle:
+        with path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 try:
                     decoded = json.loads(line)
@@ -256,6 +387,9 @@ class AlertPoster:
                 if isinstance(decoded, dict):
                     if not self._has_event_id(decoded):
                         decoded["event_id"] = str(uuid.uuid4())
+                        upgraded_pending = True
+                    if decoded.get("retention_tier") not in RETENTION_TIER_NAMES:
+                        decoded["retention_tier"] = retention_tier(decoded, self.policy)
                         upgraded_pending = True
                     pending.append(decoded)
         return pending, upgraded_pending
@@ -644,6 +778,7 @@ def write_audio_status(status_path: Path, packet: dict[str, object]) -> None:
         "openwakeword_wake_words": packet.get("openwakeword_wake_words", []),
         "openwakeword_scores": packet.get("openwakeword_scores", []),
         "openwakeword_error": packet.get("openwakeword_error"),
+        "outbox": packet.get("outbox"),
         "source": "kws_shared_audio",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -1080,7 +1215,7 @@ def main() -> None:
     if len(snowboy_keywords) != len(snowboy_model_paths):
         raise RuntimeError("SNOWBOY_KEYWORDS must match SNOWBOY_MODEL_PATHS")
 
-    poster = AlertPoster(backend_url, queue_path)
+    poster = AlertPoster(backend_url, queue_path, legacy_queue_path=LEGACY_ALERT_QUEUE_PATH)
     poster.start_worker()
     cooldown = CooldownGate(cooldown_seconds)
     dispatcher = DetectionDispatcher(
@@ -1242,6 +1377,7 @@ def main() -> None:
             noise_suppressor.update_noise_profile(raw_samples, is_speech=speech_active)
             packet.update(metrics)
             packet.update(audio_preprocessor.to_metrics(preprocessor_result))
+            packet["outbox"] = poster.outbox_status()
             write_audio_status(audio_status_path, packet)
             adaptive_sensitivity.update_for_snr(float(packet.get("snr_db", 0.0)))
 

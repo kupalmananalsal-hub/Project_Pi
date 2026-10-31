@@ -29,7 +29,7 @@ for pattern in '*.log' '*.log.*'; do
 done
 
 # The KWS alert outbox (/var/lib/project-pi/backend/alerts.jsonl) is never truncated here:
-# it holds undelivered distress alerts and bounds itself at 500 entries.
+# it holds undelivered distress alerts and bounds itself (500 soft, 5,000 / 5 MB hard).
 
 usage="$(disk_use_percent)"
 if [[ "${usage}" -ge 85 ]]; then

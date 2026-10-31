@@ -5,45 +5,87 @@ Level 4 deployment under the [shared policy](agent_integrations/policy.md) and
 needs explicit owner authorization. Software tests are not physical certification.
 
 Milestone 1–2 is a set of **reviewed product changes**, not tooling: it adds
-optional API authentication (off by default), and changes sudoers, systemd units,
-root-run scripts, microphone ownership, the KWS alert outbox location and Android
-background behavior. It does
-**not** change the alert decision policy, models, thresholds, SQLite schema,
-datasets or recordings.
+optional API authentication (open by default), and changes sudoers, systemd units,
+root-run scripts, microphone ownership, the KWS alert outbox and Android
+background behavior. It does **not** change the alert decision policy, models,
+detection thresholds, keyword lists, VAD settings, the SQLite schema, datasets or
+recordings, and it never installs or upgrades packages.
+
+Baseline it must reproduce (read-only audit of the deployed Pi, 2026-10-31): commit
+`1a5c309`; Python 3.11.2 venvs whose packages are recorded in
+`raspberry_pi/requirements/kws-env.lock.txt` and `thermal-env-sys.lock.txt`; thermal
+detector model `thermal_human_detector.tflite` with its metadata threshold (0.05);
+`LGPIO_CHIP=11`; MLX90640 at 4 Hz; `kws-alert.service` identical to the repo.
 
 ## What changes on the Pi
 
 | Area | Before | After |
 |---|---|---|
-| API auth | Token checked on 5 endpoints; public default `project-pi-local-token` | **Off by default (no-token mode)**: every route is open and the backend logs a warning at start. Enabled by setting `PROJECT_PI_API_TOKEN` (and optionally `PROJECT_PI_API_AUTH=required`): then a bearer token is required on every `/api` and `/ws` route except `/ws/alerts?protocol=2` (caregiver secret). Enabled with a missing, short (<16) or public-default token: the backend refuses to start. |
-| Auth configuration | Hard-coded default | `/etc/project-pi/backend.env` (root, `0600`), created once by the installer with auth off, never overwritten; loaded by systemd `EnvironmentFile=-` (optional) into `thermal-backend` and `kws-alert` |
-| Root-run scripts | `pi_refresh.sh`, `headless_boot.sh`, `log_cleanup.sh` run from the thesis-writable repo | Root-owned copies `/usr/local/sbin/project-pi-{refresh,boot,log-cleanup}`, installed only by `install_headless.sh` |
+| API auth | Token checked on 5 endpoints; public default `project-pi-local-token` | `PROJECT_PI_API_AUTH=open` (default): **no authentication**, isolated hotspot only, startup warning. `required`: a bearer token (16+ characters) on every `/api` and `/ws` route except `/ws/alerts?protocol=2` (per-phone caregiver secret); new APK only. The legacy token is never accepted as authentication. `required` with a missing, short or legacy token, or an unknown mode, stops the backend. |
+| Auth configuration | Hard-coded default | `/etc/project-pi/backend.env` (root, `0600`), created once by the installer in open mode, never overwritten |
+| Root-run scripts | `pi_refresh.sh`, `headless_boot.sh`, `log_cleanup.sh` run from the thesis-writable repo | Root-owned copies `/usr/local/sbin/project-pi-{refresh,boot,log-cleanup}`, installed only by `install_headless.sh --apply` |
 | sudoers | thesis may run repo scripts as root | Exact commands only (see `raspberry_pi/sudoers/project-pi-thesis`); no repo paths |
-| Unit files | Re-copied from the repo by the boot service on every boot | Installed only when an admin runs `install_headless.sh` |
-| `/api/refresh` | Root script does `git pull` and reinstalls units | Backend runs `git pull` as thesis; root helper only restarts services |
-| Microphone | Backend and KWS could both open the ReSpeaker | KWS is the single capture owner; backend reads KWS's published audio status |
-| KWS outbox | `/tmp/project_pi_alerts.jsonl` (tmpfs), truncated by log cleanup | `/var/lib/project-pi/backend/alerts.jsonl` (systemd `StateDirectory`, thesis `0700`), fsynced, capped at 500 |
+| Unit files | Re-copied from the repo by the boot service on every boot | Installed only by `install_headless.sh --apply` |
+| Installer | Writes immediately, upgrades packages, runs nmcli, restarts services | Dry run by default (NEW / IDENTICAL / CHANGED with diffs, package drift report); `--apply` backs up every replaced file first; restarts only with `--restart`; never installs packages; never touches NetworkManager |
+| `/api/refresh` | Root script does `git pull` and reinstalls units | `git_pull` refused (409) unless the root-owned `/etc/project-pi/allow-app-git-deploy` exists; restart without pull always works |
+| Wi-Fi | Boot script could create/modify/activate the hotspot profile | Changed only when `hotspot.env` sets `PROJECT_PI_FORCE_HOTSPOT=1`; otherwise the boot logs the current SSID/IPv4 and changes nothing |
+| Microphone | Backend and KWS could both open the ReSpeaker | KWS is the single capture owner (`Conflicts=kws-alert-vosk.service`, legacy unit masked); backend reads KWS's published audio status |
+| KWS outbox | `/tmp/project_pi_alerts.jsonl` (tmpfs), truncated by log cleanup | `/var/lib/project-pi/backend/alerts.jsonl`, fsynced; the legacy file is merged in on first start and renamed `*.migrated`; bounded by retention tier (below) |
+| Thermal | Hard-coded 4 Hz; installed unit differs from the repo | Generic unit: detector model + metadata, no threshold override, no rate. Rate, variant and `LGPIO_CHIP` live in the local drop-in `thermal-backend.service.d/10-local.conf`, created once from the installed unit |
 | Caregiver credentials | `PROJECT_PI_CAREGIVER_CREDENTIALS` unset | Set in `backend.env` to `/var/lib/project-pi/backend/caregivers.json` |
-| Thermal refresh | Hard-coded 4 Hz | `THERMAL_REFRESH_HZ` in the unit, default 2 Hz |
-| Health | Silent | Backend raises a `system_fault` event (never critical/siren) once per outage of KWS or thermal |
+| Health | Silent | One `system_fault` event (never critical/siren) per outage of KWS, thermal, or a `certain_critical` outbox eviction |
 
-Unchanged and untouched by both upgrade and rollback: `raspberry_pi/backend/alerts.db`
-(no schema change), `dataset/`, `~/voice_samples`, model files, the noise
-suppression config.
+Unchanged and untouched by upgrade and rollback: `raspberry_pi/backend/alerts.db`
+(no schema change), `dataset/`, `~/thesis_dataset`, `~/voice_samples`,
+`~/vosk-models`, `~/snowboy`, model files, the noise suppression config,
+`/etc/project-pi/*.env` other than creating `backend.env` if absent.
+
+### Thermal refresh rate
+
+The right MLX90640 rate depends on the variant (BAA 110° vs BAB 55°), which has not
+been verified on this Pi. The installer therefore seeds the drop-in with
+`MLX90640_VARIANT=unverified` and `THERMAL_REFRESH_HZ=4`, labelled
+"baseline-preserving, variant not verified": 4 Hz is what this Pi has run at, not a
+claim that 4 Hz is right for every variant. If `THERMAL_REFRESH_HZ` is unset the
+backend also uses 4 Hz for compatibility, logs a startup warning and reports
+`thermal_refresh_source: legacy_default` in `/api/status`. Nothing changes the rate
+silently in either direction; change it only in the drop-in, after identifying the
+variant.
+
+### KWS outbox retention
+
+An undelivered event has **not** been classified: the backend decides with thermal
+evidence when it arrives. KWS tags each queued event with a retention tier from
+queue-time facts only, using the same `alert_policy.yaml` (and safe-default
+fallback) as the backend. **Tiers are retention hints, not classifications.**
+
+| Tier | Meaning | Events |
+|---|---|---|
+| 3 `certain_critical` | CRITICAL whatever the thermal state | `manual_button`; voice confidence ≥ `critical_threshold` |
+| 2 `possible_critical` | CRITICAL if thermal is positive, else advisory | `advisory_threshold` ≤ confidence < `critical_threshold`; `manual_button_single`; `health_monitor` |
+| 1 `certain_suppressed` | Suppressed whatever the thermal state | confidence < `advisory_threshold` |
+
+Above 500 events the oldest tier 1, then tier 2 events are evicted (each logged,
+`outbox_pressure` published in the KWS audio status and `/api/status`). Tier 3 is
+evicted only at the hard limit (5,000 events or 5 MB), oldest first, with an
+error log and a health fault. Disk use is bounded and evictions are never silent.
 
 ## Compatibility rules that set the order
 
 - **New APK + old Pi: works.** With no token entered, the app sends no
   `Authorization` header, which the old backend does not require.
-- **Old APK + new Pi in no-token mode (the default): expected to work.** The old
-  app's request shapes (no header; the old public token on control routes) pass
-  the middleware in no-token mode; this is tested at the HTTP/WebSocket level, not
-  with an installed old APK. The old APK lacks the background monitoring, retry
-  and banner improvements, so upgrade phones anyway.
-- **Old APK + new Pi with auth enabled: does not work** (401 everywhere).
-- **New code before the installer runs:** the old unit files are still in place,
-  so the backend starts in no-token mode; root helpers, sudoers and the new outbox
-  path take effect only after the installer. Run it straight after the checkout.
+- **Old APK + new Pi in open mode (the default): expected to work.** The old
+  app's request shapes (no header, the old public token, any header) pass in open
+  mode; this is tested at the HTTP/WebSocket level, not with an installed old APK.
+  Open mode is compatibility, not security. The old APK lacks the background
+  monitoring, retry and banner improvements, so upgrade phones anyway.
+- **Old APK + new Pi in required mode: does not work** (401 everywhere).
+- **Heartbeat:** the caregiver link uses a 5 s heartbeat interval and 5 s timeout
+  (`PROJECT_PI_HEARTBEAT_INTERVAL_SECONDS` / `_TIMEOUT_SECONDS` in `backend.env`).
+  The pre-PR #9 values were 15 s / 10 s; set those if old APKs churn connections.
+- **New code before the installer runs:** the old unit files are still in place;
+  root helpers, sudoers, the drop-in and the outbox path take effect only after
+  `--apply` and a restart. Run the installer straight after the checkout.
 
 ## 0. Pre-upgrade checks and backups (on the Pi, as `thesis`)
 
@@ -53,9 +95,9 @@ Stop if any check fails.
 cd ~/Project_Pi
 git status --short                      # must be empty; stop if the Pi checkout has local edits
 git rev-parse HEAD                      # record as ROLLBACK_COMMIT
-ls -la /tmp/project_pi_alerts.jsonl     # should not exist (= no undelivered alerts); see step 3 if it does
+ls -la /tmp/project_pi_alerts.jsonl     # undelivered legacy alerts, if any (merged automatically)
 ls /etc/sudoers.d/                      # expect project-pi-thesis (and optionally project-pi-power, power commands only)
-systemctl show -p Environment thermal-backend.service | tr ' ' '\n' | grep -E 'CAREGIVER|ALERT_DB_PATH' || true
+systemctl show -p Environment thermal-backend.service | tr ' ' '\n' | grep -E 'CAREGIVER|ALERT_DB_PATH|LGPIO|THERMAL' || true
 systemctl cat thermal-backend.service kws-alert.service | grep -n '^# /' # lists drop-in overrides, if any
 ```
 
@@ -71,18 +113,20 @@ mkdir -p "$B" && chmod 700 "$B"
 git rev-parse HEAD > "$B/ROLLBACK_COMMIT"
 python3 -c "import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close()" \
   raspberry_pi/backend/alerts.db "$B/alerts.db"
-sha256sum dataset/audio/openwakeword_models/* > "$B/models.sha256" 2>/dev/null || true
+sha256sum dataset/audio/openwakeword_models/* dataset/thermal/models/* > "$B/models.sha256" 2>/dev/null || true
 sudo cp -a /etc/sudoers.d /etc/project-pi "$B/" 2>/dev/null || true
 sudo cp -a /etc/systemd/system/thermal-backend.service /etc/systemd/system/kws-alert.service \
   /etc/systemd/system/apk-server.service /etc/systemd/system/project-pi-boot.service \
   /etc/systemd/system/project-pi-log-cleanup.service /etc/systemd/system/project-pi-apt-update.service \
   /etc/systemd/system/project-pi-apt-update.timer /etc/systemd/system/project-pi-log-cleanup.timer \
-  /etc/systemd/system/project-pi.target "$B/"
+  /etc/systemd/system/project-pi.target "$B/" 2>/dev/null || true
 sudo cp -a /etc/systemd/system/thermal-backend.service.d /etc/systemd/system/kws-alert.service.d "$B/" 2>/dev/null || true
 ```
 
 Run the SQLite backup as `thesis`, never as root: root would leave root-owned
-`-wal`/`-shm` files that the backend cannot open.
+`-wal`/`-shm` files that the backend cannot open. (The installer also backs up
+every file it replaces, see step 3; this backup additionally covers rollback of
+the code.)
 
 ## 1. Phones first (Pi still on the old version)
 
@@ -92,15 +136,13 @@ Run the SQLite backup as `thesis`, never as root: root would leave root-owned
    distress alerts" notification and asks to exempt the app from battery
    optimization; accept.
 3. Confirm the app still connects to the **old** Pi (status, thermal, alerts).
-   Leave the API token field empty (no-token mode).
+   Leave the API token field empty (open mode).
 
 ## 2. Pi code (as `thesis`)
 
 Deploy only after the PR is merged: `<REVIEWED_COMMIT>` must be on `origin/main`
 (the repo squash-merges, so a PR-branch commit would leave `main` diverged and every
-later app Refresh would fail). The Pi stays on a `main` branch that tracks
-`origin/main`, because the app's Refresh runs `git pull --ff-only` and refuses a
-detached checkout.
+later pull would fail). The Pi stays on a `main` branch that tracks `origin/main`.
 
 ```bash
 cd ~/Project_Pi
@@ -120,34 +162,41 @@ Do not use the app's Refresh button for this step.
 
 ## 3. Installer, immediately after step 2 (as root)
 
+First the dry run. It writes nothing and prints the package drift against the lock
+files, every target file as NEW / IDENTICAL / CHANGED with a unified diff, the
+units it would enable and mask, and whether anything would restart:
+
 ```bash
 sudo bash raspberry_pi/scripts/install_headless.sh
 ```
 
-Add `PROJECT_PI_HOTSPOT_PASSWORD='<new password>'` before `bash` only if you are
-rotating the hotspot password (recommended: the previous default is in git
-history). Without it the existing `/etc/project-pi/hotspot.env` is kept.
+Review it. Stop if the drift section shows a package difference you cannot
+explain, or if the seeded `10-local.conf` does not show this Pi's `LGPIO_CHIP=11`,
+the detector model and metadata paths, and `THERMAL_REFRESH_HZ=4`. Then apply:
 
-The installer, in order: creates `backend.env` once with auth off (an existing
-file, and the auth choice in it, is never overwritten), installs the root-owned helpers, validates then installs
-sudoers, installs and enables the units, runs `install_kws_openwakeword_deps.sh`
-if `~/kws-env` exists (network, pip), runs the boot script (nmcli, `apt-get
-update`, log cleanup) and finally restarts `thermal-backend` and `kws-alert`.
-Expect several minutes and a brief alert outage. KWS keeps undelivered alerts in
-its outbox across the backend restart. Keyword detection is down from the moment
-the installer stops the legacy `kws-alert-vosk.service` (if it is still running)
-until `kws-alert` restarts at the end; the installer aborts rather than start a
-second microphone owner if the legacy unit fails to stop. Afterwards check:
+```bash
+sudo bash raspberry_pi/scripts/install_headless.sh --apply             # installs, restarts nothing
+sudo systemctl restart thermal-backend.service kws-alert.service      # or add --restart above
+```
+
+`--apply` refuses to run on package drift unless `--accept-env-drift` is given
+after review. It backs up every replaced file to
+`/var/lib/project-pi/install-backups/<UTC timestamp>/` (root, `0700`), creates
+`backend.env` and the thermal drop-in only if absent, never edits anything else
+in `/etc/systemd/system/*.service.d/`, and stops then masks
+`kws-alert-vosk.service` (its unit file is kept in the backup); it aborts rather
+than leave a second microphone owner. `thesis-camera.service` is only reported.
+`/etc/project-pi/hotspot.env` changes only with `--configure-hotspot` (needs
+`PROJECT_PI_HOTSPOT_PASSWORD`), which also lets the boot script manage the hotspot.
+
+Expect a brief alert outage during the restart. On its first start the new KWS
+merges `/tmp/project_pi_alerts.jsonl` into the durable outbox by `event_id`, then
+renames it `/tmp/project_pi_alerts.jsonl.migrated` (never deleted). Check:
 
 ```bash
 systemctl is-active kws-alert.service kws-alert-vosk.service   # expect: active, inactive
-```
-
-If `/tmp/project_pi_alerts.jsonl` existed in step 0 and still exists now:
-
-```bash
-sudo install -o thesis -g thesis -m 600 /tmp/project_pi_alerts.jsonl /var/lib/project-pi/backend/alerts.jsonl
-sudo systemctl restart kws-alert.service
+systemctl is-enabled kws-alert-vosk.service                    # expect: masked
+systemctl cat thermal-backend.service | grep -E 'LGPIO_CHIP|THERMAL_'   # drop-in values win
 ```
 
 ## 4. Caregiver credentials
@@ -164,12 +213,12 @@ sudo -u thesis python3 raspberry_pi/scripts/provision_caregiver.py \
   --file /var/lib/project-pi/backend/caregivers.json
 ```
 
-## 5. API token on the phones: only if authentication is enabled
+## 5. API token on the phones: only in required mode
 
-No-token mode (default): nothing to enter; leave **Settings → Pi API token
+Open mode (default): nothing to enter; leave **Settings → Pi API token
 (optional)** empty in both apps.
 
-With authentication enabled (see "Enabling authentication later"):
+In required mode (see "Requiring authentication"):
 
 ```bash
 sudo cat /etc/project-pi/backend.env    # PROJECT_PI_API_TOKEN=...
@@ -184,43 +233,53 @@ being received" banner.
 
 ```bash
 systemctl is-active thermal-backend.service kws-alert.service
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8765/api/status   # no-token mode: 200; auth enabled: 401
-journalctl -u thermal-backend -n 50 --no-pager | grep 'API authentication is DISABLED'   # present only in no-token mode
-# Auth enabled only:
-sudo bash -c 'source /etc/project-pi/backend.env; curl -s -o /dev/null -w "%{http_code}\n" \
-  -H "Authorization: Bearer $PROJECT_PI_API_TOKEN" http://127.0.0.1:8765/api/status'   # expect 200
+curl -s http://127.0.0.1:8765/api/status | python3 -m json.tool | grep -E 'api_auth_mode|thermal_refresh|mlx90640_variant|alert_outbox' -A1
+journalctl -u thermal-backend -n 80 --no-pager | grep -E 'api_auth_mode|PROJECT_PI_API_AUTH=open|THERMAL_REFRESH_HZ'
 sudo -l -U thesis                        # only /usr/local/sbin/project-pi-refresh, systemctl restart x3, power
-journalctl -u kws-alert -n 50 --no-pager | grep -E 'Listening|disabled|died'
+journalctl -u kws-alert -n 50 --no-pager | grep -E 'Listening|disabled|died|alert outbox'
 journalctl -u thermal-backend -n 50 --no-pager | grep -E 'ERROR|Health monitor'
+journalctl -u project-pi-boot -b --no-pager | grep 'Network unchanged'   # after the next reboot
 sha256sum -c "$B/models.sha256"          # models unchanged
+python3 tools/agent_integrations/read_only_pi_preflight.py --execute-local --approved-read-only \
+  --probe capture_owner --probe kws_main_pid   # expect MIC_OWNER_KWS_ONLY while KWS runs
 ```
 
 Then on a phone: banner gone, thermal/audio live, a spoken test keyword produces
 an alert, and the panic button reports "EMERGENCY ALERT SENT".
 
-## No-token mode: what is open
+## Open mode: what is exposed
 
-With authentication off, anyone who can reach the Pi on the network can call
+With `PROJECT_PI_API_AUTH=open`, anyone who can reach the Pi on the network can call
 every route without credentials: read status, thermal frames, audio levels and
 alert history; post or delete alerts; change noise suppression; set LEDs;
 upload training data; deploy a keyword model (which restarts KWS); `refresh`
-(git pull + service restart); `reboot`; `shutdown`. Nothing about this is secure:
-it relies entirely on the network being isolated and trusted (the defense
-hotspot with a private password). The caregiver protocol-v2 alert socket keeps its
-own per-phone authentication in both modes.
+(service restart, and git pull only if the deploy flag exists); `reboot`;
+`shutdown`. Nothing about this is secure, and the old app's built-in token is
+not security: it relies entirely on the network being isolated (the defense hotspot
+with a private password). The caregiver protocol-v2 alert socket keeps its own
+per-phone authentication in both modes.
 
-## Enabling authentication later, rotation and revocation
+## Requiring authentication, rotation and revocation
 
 1. Generate a token: `python3 -c 'import secrets; print(secrets.token_hex(32))'`.
-2. In `/etc/project-pi/backend.env` (`sudo nano`, keep `0600`), uncomment
-   `PROJECT_PI_API_AUTH=required` and set `PROJECT_PI_API_TOKEN=<token>`.
+2. In `/etc/project-pi/backend.env` (`sudo nano`, keep `0600`), set
+   `PROJECT_PI_API_AUTH=required` and `PROJECT_PI_API_TOKEN=<token>`.
 3. `sudo systemctl restart thermal-backend.service kws-alert.service`.
-4. Enter the token on every phone (step 5).
+4. Enter the token on every phone (step 5). Old APKs stop working.
 
-`PROJECT_PI_API_AUTH=required` makes a later typo or deleted token stop the
-backend instead of silently reopening every route. Rotate by replacing the token
-and repeating steps 3–4; turn auth off by commenting both lines out again. Revoke one caregiver phone's alert delivery by deleting
-its entry from `caregivers.json` and restarting `thermal-backend`.
+In required mode a later typo, deleted token or unknown mode stops the backend
+instead of silently reopening every route. Rotate by replacing the token and
+repeating steps 3–4; go back to open mode by setting `PROJECT_PI_API_AUTH=open`.
+Revoke one caregiver phone's alert delivery by deleting its entry from
+`caregivers.json` and restarting `thermal-backend`.
+
+## App-triggered git deploy (optional, off by default)
+
+`/api/refresh` with `git_pull` returns 409 unless `/etc/project-pi/allow-app-git-deploy`
+exists, because a pull without the installer leaves new code running on old units,
+sudoers and helpers. Create it (`sudo touch`, root-owned) only as part of an
+authorized upgrade whose changes need no installer run, and remove it afterwards.
+The pull also needs the tracking `main` from step 2.
 
 ## Rollback
 
@@ -243,9 +302,15 @@ fi
 sudo systemctl restart thermal-backend.service kws-alert.service
 ```
 
-- The rollback checkout is detached on purpose, so the app's Refresh cannot
-  fast-forward the Pi back onto the new code; Refresh with `git_pull` fails at
-  `git pull` until someone runs step 2 again.
+- The rollback checkout is detached on purpose, so a pull cannot move the Pi back
+  onto the new code.
+- The installer's own backups of every replaced file are in
+  `/var/lib/project-pi/install-backups/<timestamp>/` (paths mirror `/`).
+- `kws-alert-vosk.service` stays masked; it was disabled and inactive before.
+  `sudo systemctl unmask kws-alert-vosk.service` only if the old setup needs it.
+- `thermal-backend.service.d/10-local.conf` holds the same values the old unit had
+  (plus a rate and variant the old code ignores), so it can stay.
+- Queued events carry a `retention_tier` field that the old backend ignores.
 - Leave `/etc/project-pi/backend.env`, `/var/lib/project-pi/backend/` and the
   `/usr/local/sbin/project-pi-*` helpers in place; the old units do not use them.
   Remove them only once rollback is confirmed final.
@@ -257,18 +322,31 @@ sudo systemctl restart thermal-backend.service kws-alert.service
 - Rolling back reinstates the old sudoers, which lets `thesis` run repo scripts
   as root. Treat a rollback as temporary.
 
+## Kept from PR #9 but requiring physical validation
+
+None of these is claimed as an improvement until tested on the Pi: single
+microphone owner; durable outbox and its migration; worker-thread alert posting;
+engine fail-fast; MLX90640 I2C recovery and re-init backoff; health-monitor
+`system_fault` alerts; the 5 s heartbeat (old-APK churn risk).
+
 ## Remaining physical tests (not covered by software tests)
 
-1. `install_headless.sh` end to end on the Pi, including `visudo` validation.
+1. `install_headless.sh` dry run and `--apply` on the Pi, including `visudo`
+   validation, the drift report against both lock files and the seeded drop-in.
 2. ReSpeaker single-owner capture: KWS restarts (x5) while the app streams
-   `/ws/audio`; KWS must come back every time.
-3. MLX90640 at 2 Hz on the fitted variant; unplug for 30 s and re-plug; the
-   backend must recover without restart and its open file count must stay flat.
+   `/ws/audio`; KWS must come back every time and the preflight must report
+   `MIC_OWNER_KWS_ONLY`.
+3. MLX90640 at the drop-in rate (4 Hz) on the fitted variant; unplug for 30 s and
+   re-plug; the backend must recover without restart and its open file count must
+   stay flat.
 4. Health monitor: stop `kws-alert` for over 1 minute; exactly one
    `system_fault` reaches the phone, with no siren.
 5. Android: screen off for 10 minutes, then a spoken keyword alarms within about
    5 s; app swiped from recents still alarms; battery drain over 8 hours recorded.
 6. Wi-Fi drop of 20 s: the alert link must recover within about 10 s; Pi power
-   cut with the app open: the app must reconnect without a tap.
+   cut with the app open: the app must reconnect without a tap. Old APK on the
+   new Pi with the 5 s heartbeat: no reconnect churn.
 7. Panic button during a Wi-Fi blip of under 30 s: one alert recorded, not
    duplicates.
+8. Reboot with `hotspot.env` lacking `PROJECT_PI_FORCE_HOTSPOT`: the Pi stays on
+   its current Wi-Fi profile.
