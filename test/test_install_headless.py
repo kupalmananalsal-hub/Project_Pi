@@ -67,9 +67,15 @@ class InstallHeadlessTest(unittest.TestCase):
         self.assertEqual(re.findall(r"[\w.-]+\.service\.d/[\w.-]*", self.code),
                          ["thermal-backend.service.d/10-local.conf"])
 
-    def test_backend_env_is_created_only_if_absent_in_open_mode(self):
-        self.assertIn('if [[ ! -e "${BACKEND_CONF}" ]]; then', self.code)
-        self.assertIn("PROJECT_PI_API_AUTH=open", self.code)
+    def test_backend_env_is_never_overwritten_and_never_defaults_to_open(self):
+        self.assertIn('if [[ -e "${BACKEND_CONF}" ]]; then', self.code)
+        self.assertEqual(self.code.count("${BACKEND_CONF}|"), 1)
+        # open is only ever written next to the isolation acknowledgment.
+        open_block = self.code[self.code.index('echo "PROJECT_PI_API_AUTH=open"'):][:200]
+        self.assertIn("PROJECT_PI_OPEN_MODE_ACK=${OPEN_MODE_ACK}", open_block)
+        self.assertIn('[[ "${API_AUTH}" == open && "${VERIFIED_ISOLATION}" -ne 1 ]]', self.code)
+        # The staged backend.env is only ever shown redacted.
+        self.assertIn('<(redact "${src}")', self.code)
 
     def test_hotspot_config_needs_explicit_flag(self):
         block = self.code[self.code.index('if [[ "${CONFIGURE_HOTSPOT}" -eq 1 ]]; then'):]

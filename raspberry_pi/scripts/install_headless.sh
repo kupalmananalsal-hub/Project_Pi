@@ -16,6 +16,10 @@
 #                         this upgrade (ROLLBACK_COMMIT, or HEAD for a reinstall). If
 #                         --apply fails it is reported next to the current HEAD; the
 #                         installer never changes the git checkout itself.
+#   --api-auth=MODE       required with --apply: required (bearer token; generated if
+#                         backend.env is created) or open (NO authentication; also needs
+#                         --i-verified-network-isolation). An existing backend.env is never
+#                         changed and must already give this mode, or --apply refuses.
 #
 # It never installs or upgrades packages and never runs nmcli. Every replaced file is
 # backed up to /var/lib/project-pi/install-backups/<UTC timestamp>/ first, and a failure
@@ -29,6 +33,8 @@ RESTART=0
 CONFIGURE_HOTSPOT=0
 ACCEPT_ENV_DRIFT=0
 ROLLBACK_COMMIT=""
+API_AUTH=""
+VERIFIED_ISOLATION=0
 for arg in "$@"; do
   case "${arg}" in
     --dry-run) MODE=dry-run ;;
@@ -37,6 +43,8 @@ for arg in "$@"; do
     --configure-hotspot) CONFIGURE_HOTSPOT=1 ;;
     --accept-env-drift) ACCEPT_ENV_DRIFT=1 ;;
     --rollback-commit=*) ROLLBACK_COMMIT="${arg#*=}" ;;
+    --api-auth=*) API_AUTH="${arg#*=}" ;;
+    --i-verified-network-isolation) VERIFIED_ISOLATION=1 ;;
     *) echo "Unknown option: ${arg}" >&2; exit 2 ;;
   esac
 done
@@ -64,6 +72,7 @@ BACKEND_CONF="${ROOT}/etc/project-pi/backend.env"
 THERMAL_DROPIN="${UNIT_DIR}/thermal-backend.service.d/10-local.conf"
 LEGACY_VOSK_UNIT=kws-alert-vosk.service
 LEGACY_TOKEN=project-pi-local-token
+OPEN_MODE_ACK=isolated-network-verified
 BACKUP_ROOT="${ROOT}/var/lib/project-pi/install-backups"
 BACKUP_DIR="${BACKUP_ROOT}/$(date -u +%Y%m%dT%H%M%SZ)"
 STAGE="$(mktemp -d)"
@@ -138,22 +147,70 @@ for unit in "${UNITS[@]}"; do
   TARGETS+=("${SYSTEMD_SRC}/${unit}|${UNIT_DIR}/${unit}|644")
 done
 
-# Created once, never overwritten: it holds the admin's choice of API auth mode.
-if [[ ! -e "${BACKEND_CONF}" ]]; then
-  cat >"${STAGE}/backend.env" <<'EOF'
-# PROJECT_PI_API_AUTH=open: NO authentication. Every /api and /ws route, including
-# refresh, reboot, shutdown, model deploy and alerts, is open to anyone on the network;
-# the old app's built-in token is not security. Use open only on an isolated hotspot.
-#
-# To require a token (new app only: old APKs are then refused), set required, set a
-# random token of 16+ characters, restart thermal-backend and kws-alert, and enter
-# the token in each phone's Settings:
-#   python3 -c 'import secrets; print(secrets.token_hex(32))'
-PROJECT_PI_API_AUTH=open
-#PROJECT_PI_API_TOKEN=
-PROJECT_PI_CAREGIVER_CREDENTIALS=/var/lib/project-pi/backend/caregivers.json
-PROJECT_PI_CORS_ORIGINS=http://localhost,http://127.0.0.1
-EOF
+# API auth: the mode the backend will actually run, by its own rules (backend/main.py).
+# Missing or incomplete configuration runs "locked"; it never falls back to open.
+env_value() { sed -n "s/^$1=//p" "$2" | tail -n 1 | tr -d '"'"'"'\r' | xargs; }
+effective_auth_mode() {
+  local conf="$1" mode token ack
+  mode="$(env_value PROJECT_PI_API_AUTH "${conf}" | tr '[:upper:]' '[:lower:]')"
+  token="$(env_value PROJECT_PI_API_TOKEN "${conf}")"
+  ack="$(env_value PROJECT_PI_OPEN_MODE_ACK "${conf}")"
+  if [[ "${mode}" == required && ${#token} -ge 16 && "${token}" != "${LEGACY_TOKEN}" ]]; then
+    echo required
+  elif [[ "${mode}" == open && "${ack}" == "${OPEN_MODE_ACK}" ]]; then
+    echo open
+  else
+    echo locked
+  fi
+}
+# Secrets are never shown: token values are replaced in every diff.
+redact() { sed -E 's/^(PROJECT_PI_API_TOKEN=).+/\1<redacted>/' "$1"; }
+
+if [[ -n "${API_AUTH}" && "${API_AUTH}" != required && "${API_AUTH}" != open ]]; then
+  echo "--api-auth must be required or open." >&2
+  exit 2
+fi
+if [[ "${API_AUTH}" == open && "${VERIFIED_ISOLATION}" -ne 1 ]]; then
+  echo "--api-auth=open means NO authentication for anyone on the network. It needs" \
+    "--i-verified-network-isolation (an isolated hotspot only, never shared Wi-Fi)." >&2
+  exit 2
+fi
+if [[ -e "${BACKEND_CONF}" ]]; then
+  # Never overwritten: the requested mode must be what the file really gives.
+  ACTUAL_AUTH="$(effective_auth_mode "${BACKEND_CONF}")"
+  echo "API AUTH   ${BACKEND_CONF} exists (kept): backend would run ${ACTUAL_AUTH}"
+  if [[ "${MODE}" == apply && "${ACTUAL_AUTH}" != "${API_AUTH}" ]]; then
+    echo "Refusing --apply: --api-auth=${API_AUTH:-<none>} but ${BACKEND_CONF} gives" \
+      "${ACTUAL_AUTH}; the installer never edits it. Fix the file by hand (see" \
+      "docs/m1_m2_upgrade_and_rollback.md, API authentication). Nothing was changed." >&2
+    exit 2
+  fi
+elif [[ -z "${API_AUTH}" ]]; then
+  echo "API AUTH   ${BACKEND_CONF} missing: --apply needs --api-auth=required (shared" \
+    "networks) or --api-auth=open --i-verified-network-isolation"
+  if [[ "${MODE}" == apply ]]; then
+    echo "Refusing --apply without --api-auth. Nothing was changed." >&2
+    exit 2
+  fi
+else
+  {
+    echo "# Created once by install_headless.sh; never overwritten. Root-owned 600: holds secrets."
+    if [[ "${API_AUTH}" == required ]]; then
+      echo "# Every /api and /ws request needs this bearer token (new app: Settings). Read it on"
+      echo "# the Pi console only: sudo sed -n 's/^PROJECT_PI_API_TOKEN=//p' ${BACKEND_CONF#"${ROOT}"}"
+      echo "PROJECT_PI_API_AUTH=required"
+      echo "PROJECT_PI_API_TOKEN=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+    else
+      echo "# NO authentication: every route, including refresh, reboot, shutdown and model"
+      echo "# deploy, is open to anyone on the network. Isolated hotspot only."
+      echo "PROJECT_PI_API_AUTH=open"
+      echo "PROJECT_PI_OPEN_MODE_ACK=${OPEN_MODE_ACK}"
+    fi
+    echo "PROJECT_PI_CAREGIVER_CREDENTIALS=/var/lib/project-pi/backend/caregivers.json"
+    echo "PROJECT_PI_CORS_ORIGINS=http://localhost,http://127.0.0.1"
+  } >"${STAGE}/backend.env"
+  echo "API AUTH   ${BACKEND_CONF} will be created: ${API_AUTH}" \
+    "$([[ "${API_AUTH}" == required ]] && echo "(random token generated, never displayed)")"
   TARGETS+=("${STAGE}/backend.env|${BACKEND_CONF}|600")
 fi
 
@@ -216,6 +273,9 @@ for target in "${TARGETS[@]}"; do
   CHANGED+=("${target}")
   if [[ "${dest}" == "${HOTSPOT_CONF}" ]]; then
     echo "           (contents not shown: contains the hotspot password)"
+  elif [[ "${dest}" == "${BACKEND_CONF}" ]]; then
+    diff -u --label /dev/null --label "${dest} (new, token redacted)" /dev/null \
+      <(redact "${src}") || true
   elif [[ -e "${dest}" ]]; then
     diff -u --label "${dest}" --label "${dest} (new)" "${dest}" "${src}" || true
   else

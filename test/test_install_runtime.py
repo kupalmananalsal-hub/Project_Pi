@@ -4,6 +4,7 @@ systemctl, visudo, id and the network tools are mocked; systemctl keeps unit sta
 files so stop/mask/enable are observable. Linux-compatible; also runs under Git Bash.
 """
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -127,10 +128,13 @@ class InstallerRuntimeTest(unittest.TestCase):
         log = self.state / "log"
         return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
 
-    def run_installer(self, *args, fail=None, noop=None, rollback_commit="before"):
+    def run_installer(self, *args, fail=None, noop=None, rollback_commit="before",
+                      api_auth="required"):
         if "--apply" in args and rollback_commit:
             sha = self.before_sha if rollback_commit == "before" else rollback_commit
             args = (*args, f"--rollback-commit={sha}")
+        if "--apply" in args and api_auth:
+            args = (*args, f"--api-auth={api_auth}")
         env = dict(os.environ,
                    PATH=f"{self.stubs.as_posix()}{os.pathsep}{os.environ.get('PATH', '')}",
                    PROJECT_PI_INSTALL_ROOT=self.root.as_posix(),
@@ -174,8 +178,9 @@ class InstallerRuntimeTest(unittest.TestCase):
         self.assertEqual(unit.read_bytes(),
                          (self.repo / "raspberry_pi/systemd/kws-alert.service").read_bytes())
         self.assertEqual(self.git("rev-parse", "HEAD"), self.after_sha)  # success: code untouched
-        self.assertIn("PROJECT_PI_API_AUTH=open",
-                      (self.root / "etc/project-pi/backend.env").read_text(encoding="utf-8"))
+        env = (self.root / "etc/project-pi/backend.env").read_text(encoding="utf-8")
+        self.assertIn("PROJECT_PI_API_AUTH=required\n", env)
+        self.assertNotIn("PROJECT_PI_API_AUTH=open", env)
         dropin = (self.root / "etc/systemd/system/thermal-backend.service.d/10-local.conf"
                   ).read_text(encoding="utf-8")
         self.assertIn("Environment=THERMAL_REFRESH_HZ=4", dropin)
@@ -184,12 +189,78 @@ class InstallerRuntimeTest(unittest.TestCase):
         self.assertFalse(any(c.startswith("restart") for c in self.calls()))
         self.assertFalse((self.root / "etc/project-pi/hotspot.env").exists())
 
+    EXISTING_TOKEN = "existing-test-token-0123456789abcdef"
+
+    def generated_token(self):
+        env = (self.root / "etc/project-pi/backend.env").read_text(encoding="utf-8")
+        return re.search(r"^PROJECT_PI_API_TOKEN=(.*)$", env, re.M).group(1)
+
+    def test_required_mode_generates_a_token_that_is_never_displayed(self):
+        result = self.run_installer("--apply")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        token = self.generated_token()
+        self.assertRegex(token, r"^[0-9a-f]{64}$")
+        self.assertNotIn(token, result.stdout + result.stderr)
+        self.assertIn("PROJECT_PI_API_TOKEN=<redacted>", result.stdout)
+        if os.name != "nt":
+            self.assertEqual((self.root / "etc/project-pi/backend.env").stat().st_mode & 0o777, 0o600)
+        for path in self.root.rglob("*"):  # not in backups or anywhere else
+            if path.is_file() and path.name != "backend.env":
+                self.assertNotIn(token, path.read_text(encoding="utf-8", errors="ignore"), path)
+        # A second run never regenerates or shows it.
+        again = self.run_installer("--apply")
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(self.generated_token(), token)
+        self.assertNotIn(token, again.stdout + again.stderr)
+
+    def test_apply_needs_an_explicit_auth_mode(self):
+        result = self.run_installer("--apply", api_auth=None)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Refusing --apply without --api-auth", result.stderr)
+        self.assertEqual(self.files(), [])
+        result = self.run_installer("--apply", api_auth="open")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--i-verified-network-isolation", result.stderr)
+        self.assertEqual(self.files(), [])
+        result = self.run_installer("--apply", api_auth="sometimes")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.files(), [])
+
+    def test_open_mode_needs_the_isolation_acknowledgment(self):
+        result = self.run_installer("--apply", "--i-verified-network-isolation", api_auth="open")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        env = (self.root / "etc/project-pi/backend.env").read_text(encoding="utf-8")
+        self.assertIn("PROJECT_PI_API_AUTH=open\n", env)
+        self.assertIn("PROJECT_PI_OPEN_MODE_ACK=isolated-network-verified\n", env)
+        self.assertNotIn("PROJECT_PI_API_TOKEN=", env)
+
+    def test_existing_backend_env_must_already_give_the_requested_mode(self):
+        cases = [
+            ("PROJECT_PI_API_AUTH=open\n", "required", "gives locked"),  # open, no ack
+            ("PROJECT_PI_API_AUTH=required\nPROJECT_PI_API_TOKEN=short\n", "required", "gives locked"),
+            ("PROJECT_PI_API_AUTH=required\nPROJECT_PI_API_TOKEN=project-pi-local-token\n",
+             "required", "gives locked"),
+            (f"PROJECT_PI_API_AUTH=required\nPROJECT_PI_API_TOKEN={self.EXISTING_TOKEN}\n",
+             "open", "gives required"),
+            ("# no mode at all\n", "required", "gives locked"),
+        ]
+        for text, requested, reason in cases:
+            conf = self.put("etc/project-pi/backend.env", text)
+            extra = ("--i-verified-network-isolation",) if requested == "open" else ()
+            result = self.run_installer("--apply", *extra, api_auth=requested)
+            self.assertEqual(result.returncode, 2, (text, result.stdout + result.stderr))
+            self.assertIn(reason, result.stderr)
+            self.assertEqual(conf.read_text(encoding="utf-8"), text)  # never edited
+            self.assertNotIn(self.EXISTING_TOKEN, result.stdout + result.stderr)
+        self.assertEqual(self.files(), ["etc/project-pi/backend.env"])
+
     def legacy_pi(self):
         """The deployed Pi's shape: old units, a local drop-in, a running legacy KWS."""
         self.put("etc/systemd/system/thermal-backend.service",
                  '[Service]\nEnvironment="LGPIO_CHIP=11"\n')
         self.put("etc/systemd/system/kws-alert-vosk.service", "[Service]\nExecStart=/bin/true\n")
-        self.put("etc/project-pi/backend.env", "PROJECT_PI_API_AUTH=open\n# mine\n")
+        self.put("etc/project-pi/backend.env", "PROJECT_PI_API_AUTH=required\n"
+                 f"PROJECT_PI_API_TOKEN={self.EXISTING_TOKEN}\n# mine\n")
         self.put("etc/project-pi/hotspot.env", "PROJECT_PI_HOTSPOT_SSID=keep-me\n")
         self.set_state("active", "kws-alert-vosk.service", "thermal-backend.service")
         self.set_state("enabled", "kws-alert-vosk.service")
