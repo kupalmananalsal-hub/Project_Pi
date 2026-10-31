@@ -986,6 +986,9 @@ class TrainingApiTest(unittest.TestCase):
                 outbox["quarantined_possibly_critical"] = 1
                 self.assertIn("alert rejected by backend",
                               module.health_monitor.failing_components())
+                outbox.update(quarantined_possibly_critical=0, quarantine_critical_evictions=1)
+                self.assertIn("alert rejected by backend",
+                              module.health_monitor.failing_components())
             finally:
                 self.cleanup(module, previous)
 

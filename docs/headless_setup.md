@@ -20,22 +20,27 @@ SSH in once, clone or pull the repo, then run:
 ```bash
 cd ~/Project_Pi
 sudo bash raspberry_pi/scripts/install_headless.sh            # dry run: review the report
-sudo bash raspberry_pi/scripts/install_headless.sh --apply --restart
+sudo bash raspberry_pi/scripts/install_headless.sh --apply --restart \
+  --rollback-commit="$(git rev-parse HEAD)"   # the code to restore if --apply fails
 ```
 
 The default is a dry run that writes nothing: it reports package drift against
 `raspberry_pi/requirements/*.lock.txt`, and every target file as NEW / IDENTICAL /
 CHANGED with a diff. `--apply` backs up each replaced file to
 `/var/lib/project-pi/install-backups/<UTC timestamp>/` first and refuses on package
-drift unless `--accept-env-drift`; services restart only with `--restart`. The
-installer never installs packages and never runs `nmcli`.
+drift unless `--accept-env-drift`; services restart only with `--restart`. If any
+step fails it rolls back every file and unit change and returns the checkout to
+`--rollback-commit`. The installer never installs packages and never runs `nmcli`.
+When updating code, pass the commit that ran before the update instead (see
+[m1_m2_upgrade_and_rollback.md](m1_m2_upgrade_and_rollback.md), steps 0–3).
 
 To have the boot script join the hotspot (a fresh Pi with no Wi-Fi profile), add
 `--configure-hotspot` with the password; no password is shipped:
 
 ```bash
 sudo PROJECT_PI_HOTSPOT_SSID=Teddy PROJECT_PI_HOTSPOT_PASSWORD='<hotspot password>' \
-  bash raspberry_pi/scripts/install_headless.sh --apply --configure-hotspot
+  bash raspberry_pi/scripts/install_headless.sh --apply --configure-hotspot \
+  --rollback-commit="$(git rev-parse HEAD)"
 ```
 
 That writes `/etc/project-pi/hotspot.env` (mode `600`, not in git) with

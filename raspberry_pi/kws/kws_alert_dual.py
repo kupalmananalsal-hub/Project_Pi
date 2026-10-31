@@ -45,7 +45,8 @@ MAX_PENDING_ALERTS = 500
 # Hard limits: only here are certain_critical events evicted (error + health fault).
 HARD_MAX_PENDING_ALERTS = 5000
 HARD_MAX_PENDING_BYTES = 5 * 1024 * 1024
-# Permanently rejected (4xx) events kept for review; oldest dropped beyond this, with an error.
+# Permanently rejected (4xx) events kept for review. Beyond this soft limit only
+# certain_suppressed records are dropped; the hard limits above apply to the rest.
 MAX_QUARANTINED_ALERTS = 500
 # Pre-PR #9 outbox location (tmpfs); merged into the durable outbox on startup.
 LEGACY_ALERT_QUEUE_PATH = Path("/tmp/project_pi_alerts.jsonl")
@@ -182,6 +183,7 @@ class AlertPoster:
         self._worker_thread: threading.Thread | None = None
         self.evictions = 0
         self.critical_evictions = 0
+        self.quarantine_critical_evictions = 0
         # Events the backend permanently rejected (4xx); kept for review, never retried.
         self.quarantine_path = queue_path.with_name(f"{queue_path.stem}.rejected.jsonl")
         self.quarantined, _ = self._read_events(self.quarantine_path)
@@ -314,6 +316,7 @@ class AlertPoster:
                 "quarantined": len(self.quarantined),
                 "quarantined_possibly_critical": sum(
                     1 for e in self.quarantined if e.get("retention_tier", 2) >= 2),
+                "quarantine_critical_evictions": self.quarantine_critical_evictions,
                 "quarantine_path": str(self.quarantine_path),
             }
 
@@ -325,12 +328,29 @@ class AlertPoster:
             "rejected_detail": detail,
             "rejected_at": datetime.now(timezone.utc).isoformat(),
         })
-        while len(self.quarantined) > MAX_QUARANTINED_ALERTS:
-            dropped = self.quarantined.pop(0)
+        # Beyond the soft limit only certain_suppressed records go; possibly-critical ones are
+        # evicted only at the outbox hard limits, lowest tier and oldest first, with a fault.
+        sizes = [len(json.dumps(e)) + 1 for e in self.quarantined]
+        total = sum(sizes)
+        while self.quarantined:
+            over_hard = (len(self.quarantined) > HARD_MAX_PENDING_ALERTS
+                         or total > HARD_MAX_PENDING_BYTES)
+            if not over_hard and len(self.quarantined) <= MAX_QUARANTINED_ALERTS:
+                break
+            index = min(range(len(self.quarantined)),
+                        key=lambda i: (self.quarantined[i].get("retention_tier", 2), i))
+            dropped_tier = self.quarantined[index].get("retention_tier", 2)
+            if not over_hard and dropped_tier >= 2:
+                break
+            dropped = self.quarantined.pop(index)
+            total -= sizes.pop(index)
+            if dropped_tier >= 2:
+                self.quarantine_critical_evictions += 1
             trace_alert("outbox", dropped.get("event_id"), "quarantine_evicted",
-                        retention_tier=RETENTION_TIER_NAMES.get(dropped.get("retention_tier"), "unknown"))
-            print(f"ERROR: alert quarantine full; oldest rejected event {dropped.get('event_id')} "
-                  "evicted", file=sys.stderr, flush=True)
+                        retention_tier=RETENTION_TIER_NAMES.get(dropped_tier, "unknown"))
+            print(f"{'ERROR' if dropped_tier >= 2 else 'WARNING'}: alert quarantine full; "
+                  f"rejected {RETENTION_TIER_NAMES.get(dropped_tier, 'unknown')} event "
+                  f"{dropped.get('event_id')} evicted", file=sys.stderr, flush=True)
         self._write_jsonl(self.quarantine_path, self.quarantined)
         trace_alert("http_post", event.get("event_id"), "quarantined",
                     keyword=event.get("keyword"), status_code=status_code,

@@ -28,7 +28,8 @@ cmd="$1"; shift
 case "$cmd" in
   cat) f="$PROJECT_PI_INSTALL_ROOT/etc/systemd/system/$1"; [[ -f "$f" ]] && cat "$f"; exit 0 ;;
   is-active) has active "$1" && exit 0; exit 3 ;;
-  is-enabled) has enabled "$1" && exit 0; exit 1 ;;
+  is-enabled) has masked "$1" && { echo masked; exit 1; }
+              has enabled "$1" && { echo enabled; exit 0; }; echo disabled; exit 1 ;;
   stop) del active "$1" ;;
   start|restart) for u in "$@"; do add active "$u"; done ;;
   enable) for u in "$@"; do add enabled "$u"; done ;;
@@ -75,6 +76,24 @@ class InstallerRuntimeTest(unittest.TestCase):
         for venv, lock in (("kws-env", "kws-env.lock.txt"),
                            ("thermal-env-sys", "thermal-env-sys.lock.txt")):
             self.fake_venv(venv, f'cat "{(LOCKS / lock).as_posix()}"')
+        # A throwaway checkout with two commits, so code rollback never touches this repo.
+        self.repo = base / "Project_Pi"
+        for part in ("scripts", "systemd", "sudoers", "requirements"):
+            shutil.copytree(PROJECT_ROOT / "raspberry_pi" / part, self.repo / "raspberry_pi" / part)
+        self.git("init", "-q")
+        self.git("config", "core.autocrlf", "false")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "before upgrade")
+        self.before_sha = self.git("rev-parse", "HEAD")
+        (self.repo / "VERSION").write_text("new\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "the upgrade")
+        self.after_sha = self.git("rev-parse", "HEAD")
+
+    def git(self, *args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                               "-C", str(self.repo), *args], check=True, capture_output=True,
+                              text=True).stdout.strip()
 
     def write_stub(self, name, body, directory=None):
         path = (directory or self.stubs) / name
@@ -104,11 +123,14 @@ class InstallerRuntimeTest(unittest.TestCase):
         log = self.state / "log"
         return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
 
-    def run_installer(self, *args, fail=None):
+    def run_installer(self, *args, fail=None, rollback_commit="before"):
+        if "--apply" in args and rollback_commit:
+            sha = self.before_sha if rollback_commit == "before" else rollback_commit
+            args = (*args, f"--rollback-commit={sha}")
         env = dict(os.environ,
                    PATH=f"{self.stubs.as_posix()}{os.pathsep}{os.environ.get('PATH', '')}",
                    PROJECT_PI_INSTALL_ROOT=self.root.as_posix(),
-                   PROJECT_PI_REPO=PROJECT_ROOT.as_posix(),
+                   PROJECT_PI_REPO=self.repo.as_posix(),
                    STUB_STATE=self.state.as_posix())
         env.pop("STUB_FAIL", None)
         if fail:
@@ -143,7 +165,8 @@ class InstallerRuntimeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         unit = self.root / "etc/systemd/system/kws-alert.service"
         self.assertEqual(unit.read_bytes(),
-                         (PROJECT_ROOT / "raspberry_pi/systemd/kws-alert.service").read_bytes())
+                         (self.repo / "raspberry_pi/systemd/kws-alert.service").read_bytes())
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.after_sha)  # success: code untouched
         self.assertIn("PROJECT_PI_API_AUTH=open",
                       (self.root / "etc/project-pi/backend.env").read_text(encoding="utf-8"))
         dropin = (self.root / "etc/systemd/system/thermal-backend.service.d/10-local.conf"
@@ -211,6 +234,38 @@ class InstallerRuntimeTest(unittest.TestCase):
         self.assertIn("kws-alert-vosk.service", self.state_of("enabled"))
         self.assertIn("kws-alert-vosk.service", self.state_of("active"))
         self.assertIn("# mine", (self.root / "etc/project-pi/backend.env").read_text(encoding="utf-8"))
+        # The previous application code is back, detached (a pull cannot move it forward).
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.before_sha)
+        self.assertEqual(subprocess.run(["git", "-C", str(self.repo), "symbolic-ref", "-q", "HEAD"],
+                                        capture_output=True).returncode, 1)
+
+    def test_apply_requires_a_valid_rollback_commit_before_any_write(self):
+        result = self.run_installer("--apply", rollback_commit=None)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--apply needs --rollback-commit", result.stderr)
+        result = self.run_installer("--apply", rollback_commit="0" * 40)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("is not a commit", result.stderr)
+        self.assertEqual(self.files(), [])
+        self.assertEqual(self.calls(), [])
+
+    def test_reinstall_rollback_keeps_an_existing_mask(self):
+        # A previous install already masked the legacy unit (symlink, no unit file).
+        self.put("etc/systemd/system/thermal-backend.service", '[Service]\nEnvironment="LGPIO_CHIP=11"\n')
+        self.set_state("masked", "kws-alert-vosk.service")
+        result = self.run_installer("--apply", fail="enable project-pi-boot")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("kws-alert-vosk.service", self.state_of("masked"))
+        self.assertFalse(any(c.split()[0] in {"mask", "unmask"} for c in self.calls()))
+
+    def test_rollback_never_discards_local_code_changes(self):
+        self.legacy_pi()
+        (self.repo / "VERSION").write_text("edited on the Pi\n", encoding="utf-8")
+        result = self.run_installer("--apply", fail="enable project-pi-boot")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("application code was NOT restored", result.stderr)
+        self.assertEqual((self.repo / "VERSION").read_text(encoding="utf-8"), "edited on the Pi\n")
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.after_sha)
 
     def test_failure_after_mask_rolls_back_files_and_legacy_unit(self):
         self.legacy_pi()

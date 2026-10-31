@@ -12,6 +12,9 @@
 #                         manage the NetworkManager hotspot profile
 #   --accept-env-drift    with --apply: proceed although the venvs differ from
 #                         raspberry_pi/requirements/*.lock.txt
+#   --rollback-commit=SHA required with --apply: the application commit to restore if
+#                         --apply fails (the ROLLBACK_COMMIT recorded before the
+#                         upgrade, or the current HEAD for a reinstall)
 #
 # It never installs or upgrades packages and never runs nmcli. Every replaced file is
 # backed up to /var/lib/project-pi/install-backups/<UTC timestamp>/ first, and a failure
@@ -24,6 +27,7 @@ MODE=dry-run
 RESTART=0
 CONFIGURE_HOTSPOT=0
 ACCEPT_ENV_DRIFT=0
+ROLLBACK_COMMIT=""
 for arg in "$@"; do
   case "${arg}" in
     --dry-run) MODE=dry-run ;;
@@ -31,6 +35,7 @@ for arg in "$@"; do
     --restart) RESTART=1 ;;
     --configure-hotspot) CONFIGURE_HOTSPOT=1 ;;
     --accept-env-drift) ACCEPT_ENV_DRIFT=1 ;;
+    --rollback-commit=*) ROLLBACK_COMMIT="${arg#*=}" ;;
     *) echo "Unknown option: ${arg}" >&2; exit 2 ;;
   esac
 done
@@ -64,6 +69,31 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "${STAGE}"' EXIT
 
 echo "Project Pi installer (${MODE}) from ${REPO}"
+
+# The application code is the checkout itself; git runs as its owner, never as root.
+REPO_OWNER="$(stat -c %U "${REPO}")"
+repo_git() {
+  if [[ -n "${ROOT}" || "$(id -un)" == "${REPO_OWNER}" ]]; then
+    git -C "${REPO}" "$@"
+  else
+    runuser -u "${REPO_OWNER}" -- git -C "${REPO}" "$@"
+  fi
+}
+CODE_HEAD_BEFORE="$(repo_git rev-parse HEAD)"
+ROLLBACK_SHA=""
+if [[ -n "${ROLLBACK_COMMIT}" ]]; then
+  if ! ROLLBACK_SHA="$(repo_git rev-parse --verify --quiet "${ROLLBACK_COMMIT}^{commit}")"; then
+    echo "--rollback-commit=${ROLLBACK_COMMIT} is not a commit in ${REPO}." >&2
+    exit 2
+  fi
+  echo "CODE       HEAD ${CODE_HEAD_BEFORE}; restored to ${ROLLBACK_SHA} if --apply fails"
+elif [[ "${MODE}" == "apply" ]]; then
+  echo "--apply needs --rollback-commit=SHA: the commit to restore if it fails (the" \
+    "ROLLBACK_COMMIT recorded before the upgrade, or HEAD for a reinstall)." >&2
+  exit 2
+else
+  echo "CODE       HEAD ${CODE_HEAD_BEFORE}; --apply will need --rollback-commit=SHA"
+fi
 
 # 1. Package drift: read-only comparison with the recorded Pi baseline.
 ENV_DRIFT=0
@@ -240,11 +270,21 @@ fi
 CREATED=()
 REPLACED=()
 NEWLY_ENABLED=()
-VOSK_WAS_ACTIVE=0
-VOSK_WAS_ENABLED=0
 VOSK_FILE_REMOVED=0
 VOSK_MASKED=0
 RESTART_ATTEMPTED=0
+# Prior legacy-unit state, read before anything changes (and before the ERR trap).
+VOSK_WAS_ACTIVE=0
+VOSK_WAS_ENABLED=0
+VOSK_WAS_MASKED=0
+if vosk_state="$(systemctl is-enabled "${LEGACY_VOSK_UNIT}")"; then :; fi
+case "${vosk_state}" in
+  enabled) VOSK_WAS_ENABLED=1 ;;
+  masked | masked-runtime) VOSK_WAS_MASKED=1 ;;
+esac
+if systemctl is-active --quiet "${LEGACY_VOSK_UNIT}"; then
+  VOSK_WAS_ACTIVE=1
+fi
 
 backup() {
   [[ -e "$1" ]] || return 0
@@ -271,6 +311,15 @@ rollback() {
   fi
   if [[ "${VOSK_FILE_REMOVED}" -eq 1 ]]; then
     cp -a "${BACKUP_DIR}/etc/systemd/system/${LEGACY_VOSK_UNIT}" "${UNIT_DIR}/${LEGACY_VOSK_UNIT}"
+  fi
+  # Previous application code: checked out detached, never by discarding local changes.
+  if [[ "${CODE_HEAD_BEFORE}" != "${ROLLBACK_SHA}" ]]; then
+    if repo_git checkout --quiet --detach "${ROLLBACK_SHA}"; then
+      echo "Restored application code to ${ROLLBACK_SHA} (detached)." >&2
+    else
+      echo "ERROR: application code was NOT restored. As ${REPO_OWNER}, run:" \
+        "git -C ${REPO} checkout --detach ${ROLLBACK_SHA}" >&2
+    fi
   fi
   systemctl daemon-reload
   if [[ "${VOSK_WAS_ENABLED}" -eq 1 ]]; then
@@ -303,11 +352,7 @@ done
 echo "Backups of replaced files: ${BACKUP_DIR}"
 
 # Single microphone owner. A failed stop aborts and rolls back instead of being hidden.
-if systemctl is-enabled --quiet "${LEGACY_VOSK_UNIT}"; then
-  VOSK_WAS_ENABLED=1
-fi
-if systemctl is-active --quiet "${LEGACY_VOSK_UNIT}"; then
-  VOSK_WAS_ACTIVE=1
+if [[ "${VOSK_WAS_ACTIVE}" -eq 1 ]]; then
   systemctl stop "${LEGACY_VOSK_UNIT}"
 fi
 legacy_unit_file="${UNIT_DIR}/${LEGACY_VOSK_UNIT}"
@@ -319,8 +364,11 @@ if [[ -f "${legacy_unit_file}" && ! -L "${legacy_unit_file}" ]]; then
   VOSK_FILE_REMOVED=1
 fi
 systemctl daemon-reload
-systemctl mask "${LEGACY_VOSK_UNIT}"
-VOSK_MASKED=1
+# Already masked (e.g. a re-run): leave it, so a rollback never unmasks it.
+if [[ "${VOSK_WAS_MASKED}" -eq 0 ]]; then
+  systemctl mask "${LEGACY_VOSK_UNIT}"
+  VOSK_MASKED=1
+fi
 if systemctl is-active --quiet "${LEGACY_VOSK_UNIT}"; then
   echo "ERROR: ${LEGACY_VOSK_UNIT} is still active; refusing to leave a second microphone owner." >&2
   false

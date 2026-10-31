@@ -83,7 +83,10 @@ outbox. It is never retried automatically (no retry loop) and never blocks later
 alerts. Each rejection is traced (`quarantined`) and logged; a `certain_critical`
 or `possible_critical` rejection is logged as an error and raises the health fault
 "alert rejected by backend", which stays raised (also across KWS restarts) until
-the file is reviewed. The file keeps the newest 500 rejections. To review: read
+the file is reviewed. Above 500 records only `certain_suppressed` ones are
+dropped; possibly-critical rejections are dropped only at the outbox hard limits
+(5,000 records or 5 MB), oldest first, each logged as an error and counted in the
+same health fault. To review: read
 the file; to re-send after fixing the cause, stop `kws-alert`, move the lines back
 into `alerts.jsonl`, delete `alerts.rejected.jsonl`, start `kws-alert`.
 
@@ -192,9 +195,14 @@ explain, or if the seeded `10-local.conf` does not show this Pi's `LGPIO_CHIP=11
 the detector model and metadata paths, and `THERMAL_REFRESH_HZ=4`. Then apply:
 
 ```bash
-sudo bash raspberry_pi/scripts/install_headless.sh --apply             # installs, restarts nothing
+sudo bash raspberry_pi/scripts/install_headless.sh --apply \
+  --rollback-commit="$(cat "$B/ROLLBACK_COMMIT")"                     # installs, restarts nothing
 sudo systemctl restart thermal-backend.service kws-alert.service      # or add --restart above
 ```
+
+`--rollback-commit` is required with `--apply`: it is the application commit
+restored if `--apply` fails (the one recorded in step 0; for a reinstall without a
+code change, pass the current `HEAD`).
 
 `--apply` refuses to run on package drift unless `--accept-env-drift` is given
 after review. It backs up every replaced file to
@@ -205,9 +213,12 @@ in `/etc/systemd/system/*.service.d/`, and stops then masks
 than leave a second microphone owner. `thesis-camera.service` is only reported.
 If any step of `--apply` fails (including the stop, the mask, enabling units or
 `--restart`), it rolls back: replaced files are restored from the backup, files it
-created are removed, units it newly enabled are disabled, and the legacy unit's
-file, mask, enabled and active state are restored; with `--restart` the old
-configuration is restarted. The backup is kept. It also warns, without changing
+created are removed, units it newly enabled are disabled, the legacy unit's file,
+mask, enabled and active state are restored (a mask that existed before, e.g. from
+an earlier install, is left in place), and the checkout is returned to
+`--rollback-commit` (detached, as the repo owner; if local edits would be
+overwritten, git refuses, nothing is discarded, and the installer prints the
+command to run). With `--restart` the old configuration is then restarted. The backup is kept. It also warns, without changing
 anything, if `hotspot.env` or `backend.env` is not root-owned `600` (the boot
 script refuses to source a `hotspot.env` that is not root-owned or is
 group/world-writable).

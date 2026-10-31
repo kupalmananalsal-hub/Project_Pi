@@ -266,10 +266,20 @@ class KwsEventIdTest(unittest.TestCase):
             try:
                 module.MAX_QUARANTINED_ALERTS = 2
                 poster = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
-                poster.session = self.StatusSession([422] * 3)
-                for index in range(3):
-                    poster.publish(f"kw{index}", 0.9, "vosk")
-                self.assertEqual([e["keyword"] for e in poster.quarantined], ["kw1", "kw2"])
+                poster.session = self.StatusSession([422] * 6)
+                for keyword, confidence in (("low1", 0.1), ("crit1", 0.9), ("poss1", 0.5),
+                                            ("low2", 0.1)):
+                    poster.publish(keyword, confidence, "vosk")
+                # Soft limit: only certain_suppressed records go; possibly-critical ones stay.
+                self.assertEqual([e["keyword"] for e in poster.quarantined], ["crit1", "poss1"])
+                self.assertEqual(poster.outbox_status()["quarantine_critical_evictions"], 0)
+                # Hard limit: lowest tier, oldest first, counted for the health fault.
+                module.HARD_MAX_PENDING_ALERTS = 2
+                poster.publish("crit2", 0.9, "vosk")
+                self.assertEqual([e["keyword"] for e in poster.quarantined], ["crit1", "crit2"])
+                poster.publish("crit3", 0.9, "vosk")
+                self.assertEqual([e["keyword"] for e in poster.quarantined], ["crit2", "crit3"])
+                self.assertEqual(poster.outbox_status()["quarantine_critical_evictions"], 2)
             finally:
                 restore_modules(previous)
 
