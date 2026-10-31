@@ -1,74 +1,91 @@
 #!/usr/bin/env bash
-# Read-only pre-upgrade gate. Run as thesis from the checkout after preupgrade_backup.sh:
+# Read-only pre-upgrade gate. Run as thesis after preupgrade_backup.sh:
 #
-#   bash raspberry_pi/scripts/preupgrade_inventory.sh --target=<reviewed SHA> --backup-dir=DIR
+#   bash <tools>/raspberry_pi/scripts/preupgrade_inventory.sh --repo=~/Project_Pi \
+#     --target=<reviewed SHA> --backup-dir=DIR
 #
-# Writes nothing. Exit 0 only when: tracked files have no local edits; every protected
-# asset (raspberry_pi/config/protected_assets.txt) exists, is not tracked by the target
-# commit (a checkout could then overwrite it) and has a verified backup in DIR. Other
-# local, ignored or untracked files (datasets, recordings, models) are only reported.
+# Writes nothing (git runs without optional locks). Exit 0 only when: the backup is
+# intact (SHA256SUMS, including the manifest it was made with); that manifest has no
+# provisional entries; tracked files have no local edits; every protected asset exists
+# and has a verified backup; and no local untracked or ignored file (protected or
+# not: models, datasets, recordings) sits at, or inside, a path the target commit
+# tracks, since a normal checkout overwrites or deletes such files. Other local files
+# are only reported. install_headless.sh --apply runs this same gate itself.
 # Never follow a failure with git clean, reset --hard or checkout -f.
 set -Eeuo pipefail
+export GIT_OPTIONAL_LOCKS=0
 
+REPO=""
 TARGET=""
 BACKUP_DIR=""
 for arg in "$@"; do
   case "${arg}" in
+    --repo=*) REPO="${arg#*=}" ;;
     --target=*) TARGET="${arg#*=}" ;;
     --backup-dir=*) BACKUP_DIR="${arg#*=}" ;;
     *) echo "Unknown option: ${arg}" >&2; exit 2 ;;
   esac
 done
-if [[ -z "${TARGET}" || -z "${BACKUP_DIR}" ]]; then
-  echo "Usage: $0 --target=SHA --backup-dir=DIR" >&2
+if [[ -z "${REPO}" || -z "${TARGET}" || -z "${BACKUP_DIR}" ]]; then
+  echo "Usage: $0 --repo=CHECKOUT --target=SHA --backup-dir=DIR" >&2
   exit 2
 fi
-
-REPO="$(git rev-parse --show-toplevel)"
-MANIFEST="${PROJECT_PI_PROTECTED_ASSETS:-${REPO}/raspberry_pi/config/protected_assets.txt}"
 PYTHON="${PYTHON:-python3}"
-if ! TARGET_SHA="$(git -C "${REPO}" rev-parse --verify --quiet "${TARGET}^{commit}")"; then
-  echo "FAIL     --target=${TARGET} is not a commit here (fetch it first)." >&2
-  exit 1
-fi
-echo "Inventory of ${REPO} at $(git -C "${REPO}" rev-parse HEAD) for target ${TARGET_SHA}"
+git_() { git -C "${REPO}" -c core.quotePath=false "$@"; }
 
 failures=0
 fail() { echo "FAIL     $*"; failures=$((failures + 1)); }
+block() {
+  echo "BLOCKED: ${failures} check(s) failed; do not upgrade. Nothing was changed."
+  exit 1
+}
 
-edits="$(git -C "${REPO}" status --porcelain --untracked-files=no)"
+if ! TARGET_SHA="$(git_ rev-parse --verify --quiet "${TARGET}^{commit}")"; then
+  fail "--target=${TARGET} is not a commit in ${REPO} (fetch it first)"
+  block
+fi
+echo "Inventory of ${REPO} at $(git_ rev-parse HEAD) for target ${TARGET_SHA}"
+
+# 1. The backup and the manifest it was made with, unchanged since.
+MANIFEST="${BACKUP_DIR}/protected_assets.txt"
+if [[ ! -f "${BACKUP_DIR}/SHA256SUMS" || ! -f "${MANIFEST}" ]] \
+    || ! (cd "${BACKUP_DIR}" && sha256sum --quiet -c SHA256SUMS >/dev/null 2>&1) \
+    || ! cut -c67- "${BACKUP_DIR}/SHA256SUMS" | grep -qxF protected_assets.txt; then
+  fail "${BACKUP_DIR}: not a complete backup from preupgrade_backup.sh, or changed since"
+  block
+fi
+if grep -q '^? ' "${MANIFEST}"; then
+  fail "the backup's manifest has provisional entries; confirm them on the Pi first"
+fi
+
+# 2. Tracked files unedited.
+edits="$(git_ status --porcelain --untracked-files=no)"
 if [[ -n "${edits}" ]]; then
   fail "tracked files have local edits:"
   printf '           %s\n' "${edits}"
 fi
 
+# 3. Protected assets present and backed up.
 declare -A PROTECTED=()
-sums="${BACKUP_DIR}/SHA256SUMS"
-if [[ ! -f "${sums}" ]] || ! (cd "${BACKUP_DIR}" && sha256sum --quiet -c SHA256SUMS >/dev/null 2>&1); then
-  fail "${sums} missing, or a backup copy changed since it was made"
-fi
 while IFS= read -r path; do
-  [[ -z "${path}" || "${path}" == \#* ]] && continue
+  [[ -z "${path}" || "${path}" == \#* || "${path}" == '? '* ]] && continue
   PROTECTED["${path}"]=1
   live="${REPO}/${path}"
   copy="${BACKUP_DIR}/${path}"
   if [[ ! -f "${live}" ]]; then
-    fail "${path}: missing (correct the manifest after checking the Pi)"
+    fail "${path}: missing"
     continue
   fi
-  if git -C "${REPO}" cat-file -e "${TARGET_SHA}:${path}" 2>/dev/null; then
-    fail "${path}: tracked by the target commit; a checkout would overwrite it"
-  fi
   # sha256sum lines: 64 hex, a space, then " " or "*" (binary mode), then the path.
-  if [[ ! -f "${copy}" ]] || ! cut -c67- "${sums}" 2>/dev/null | grep -qxF -- "${path}"; then
+  if [[ ! -f "${copy}" ]] || ! cut -c67- "${BACKUP_DIR}/SHA256SUMS" | grep -qxF -- "${path}"; then
     fail "${path}: no recorded backup in ${BACKUP_DIR}"
     continue
   fi
   if [[ "${path}" == *.db ]]; then
     # A live WAL database keeps changing: check the snapshot, never the live hash.
-    check="$("${PYTHON}" -c 'import sqlite3, sys; c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True); print(c.execute("PRAGMA integrity_check").fetchone()[0])' "${copy}" 2>&1 || true)"
+    check="$("${PYTHON}" -c 'import pathlib, sqlite3, sys; c = sqlite3.connect(pathlib.Path(sys.argv[1]).resolve().as_uri() + "?mode=ro", uri=True); print(c.execute("PRAGMA integrity_check").fetchone()[0])' "${copy}" 2>&1 || true)"
     if [[ "${check}" != ok ]]; then
-      fail "${path}: backup snapshot integrity_check returned ${check}"
+      fail "${path}: backup snapshot integrity_check returned ${check##*$'\n'}"
       continue
     fi
     echo "OK       ${path} (snapshot integrity ok, hash recorded)"
@@ -79,20 +96,33 @@ while IFS= read -r path; do
   fi
 done <"${MANIFEST}"
 
-# Everything else local is reported, never blocking: datasets, recordings, models.
-while IFS= read -r line; do
-  path="${line:3}"
+# 4. Every local untracked or ignored file against the target's tracked paths: same
+# path (overwritten) or inside a path the target tracks as a file (deleted).
+collisions="$(awk 'NR == FNR { tracked[$0] = 1; next }
+  { path = $0
+    while (path != "") {
+      if (path in tracked) { print $0; break }
+      if (index(path, "/") == 0) break
+      sub(/\/[^\/]*$/, "", path)
+    } }' <(git_ ls-tree -r --name-only "${TARGET_SHA}") <(git_ ls-files --others))"
+if [[ -n "${collisions}" ]]; then
+  while IFS= read -r path; do
+    fail "${path}: local file at a path ${TARGET_SHA:0:12} tracks; a checkout would overwrite or delete it"
+  done <<<"${collisions}"
+fi
+
+# 5. Everything else local is reported, never blocking.
+while IFS= read -r path; do
   [[ -n "${path}" && -z "${PROTECTED[${path}]:-}" ]] || continue
   echo "WARN     untracked, not in the manifest: ${path}"
-done < <(git -C "${REPO}" status --porcelain --untracked-files=all)
+done < <(git_ ls-files --others --exclude-standard)
 while IFS= read -r line; do
   path="${line:3}"
   [[ "${line:0:2}" == '!!' && -z "${PROTECTED[${path}]:-}" ]] || continue
   echo "LOCAL    ignored: ${path}"
-done < <(git -C "${REPO}" status --porcelain --ignored --untracked-files=normal)
+done < <(git_ status --porcelain --ignored --untracked-files=normal)
 
 if [[ "${failures}" -ne 0 ]]; then
-  echo "BLOCKED: ${failures} check(s) failed; do not upgrade. Nothing was changed."
-  exit 1
+  block
 fi
-echo "PASS: protected assets present, not tracked by ${TARGET_SHA}, backups verified."
+echo "PASS: backup ${BACKUP_DIR} verified for ${TARGET_SHA}; no local file collides."
