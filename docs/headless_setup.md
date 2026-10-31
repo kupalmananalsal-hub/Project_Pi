@@ -20,7 +20,7 @@ SSH in once, clone or pull the repo, then run:
 ```bash
 cd ~/Project_Pi
 sudo bash raspberry_pi/scripts/install_headless.sh            # dry run: review the report
-sudo bash raspberry_pi/scripts/install_headless.sh --apply --restart \
+sudo bash raspberry_pi/scripts/install_headless.sh --apply --restart --api-auth=required \
   --rollback-commit="$(git rev-parse HEAD)"   # the code that ran before; reported, never checked out
 ```
 
@@ -41,7 +41,7 @@ To have the boot script join the hotspot (a fresh Pi with no Wi-Fi profile), add
 
 ```bash
 sudo PROJECT_PI_HOTSPOT_SSID=Teddy PROJECT_PI_HOTSPOT_PASSWORD='<hotspot password>' \
-  bash raspberry_pi/scripts/install_headless.sh --apply --configure-hotspot \
+  bash raspberry_pi/scripts/install_headless.sh --apply --configure-hotspot --api-auth=required \
   --rollback-commit="$(git rev-parse HEAD)"
 ```
 
@@ -51,13 +51,17 @@ the current SSID/IPv4 and never creates, modifies or activates a profile.
 
 The installer also:
 
-- creates `/etc/project-pi/backend.env` (root, mode `600`) once, in
-  `PROJECT_PI_API_AUTH=open` mode: **no authentication**; the app needs no token,
-  and every `/api`/`/ws` route, including reboot, shutdown, refresh, model deploy
-  and alerts, is open to anyone on the network. Use it only on an isolated hotspot.
-  To require a token, see "Requiring authentication" in
-  [m1_m2_upgrade_and_rollback.md](m1_m2_upgrade_and_rollback.md) and enter the token
-  in each app under **Settings → Pi API token (optional)**.
+- creates `/etc/project-pi/backend.env` (root, mode `600`) once, in the mode given
+  by `--api-auth` (required with `--apply`). `required`: a random token is generated
+  and never printed; read it on the Pi console with
+  `sudo sed -n 's/^PROJECT_PI_API_TOKEN=//p' /etc/project-pi/backend.env` and enter it
+  in each app under **Settings → Pi API token (optional)**. `open` (**no
+  authentication**: every route, including reboot, shutdown, refresh and model
+  deploy, is open to anyone on the network) also needs
+  `--i-verified-network-isolation`, for an isolated hotspot only. A missing or
+  invalid `backend.env` makes the backend run locked (every request refused,
+  detection still running); see "Locked mode" in
+  [m1_m2_upgrade_and_rollback.md](m1_m2_upgrade_and_rollback.md).
 - creates `/etc/systemd/system/thermal-backend.service.d/10-local.conf` once, from
   the installed unit, for device-specific settings (`LGPIO_CHIP`, model paths,
   `THERMAL_REFRESH_HZ`, `MLX90640_VARIANT`); it never edits an existing drop-in.
@@ -105,8 +109,9 @@ iwgetid -r
 hostname -I
 
 # Backend health (the header is ignored in open mode and required in required mode;
-# never paste a token into a URL)
-sudo bash -c 'source /etc/project-pi/backend.env; curl -s -H "Authorization: Bearer $PROJECT_PI_API_TOKEN" http://127.0.0.1:8765/api/status' | python3 -m json.tool
+# the token goes through a pipe, never onto a command line or into a URL)
+sudo sed -n 's/^PROJECT_PI_API_TOKEN=/Authorization: Bearer /p' /etc/project-pi/backend.env \
+  | curl -s -H @- http://127.0.0.1:8765/api/status | python3 -m json.tool
 
 # Refresh API (same as mobile app)
 sudo bash -c 'source /etc/project-pi/backend.env; curl -s -X POST http://127.0.0.1:8765/api/refresh \
@@ -161,6 +166,10 @@ cp raspberry_pi/apk_server/index.html build/app/outputs/flutter-apk/index.html
 
 Phone browser: `http://10.129.205.32:8080/`
 
+The APK server is plain HTTP without authentication (the API token does not cover
+port 8080). On a shared network run it only during a supervised phone update:
+`sudo systemctl disable --now apk-server.service` afterwards.
+
 If the hotspot gives the Pi a different address, check `hostname -I` and use
 `http://<PI_IP>:8080/` instead.
 
@@ -185,8 +194,8 @@ flag exists, and it never reinstalls units, sudoers or root scripts.
 | Refresh returns 409 | App-triggered git deploy is off (no `/etc/project-pi/allow-app-git-deploy`); update with the upgrade procedure; restart without pull still works |
 | KWS not running | `systemctl status kws-alert`, `journalctl -u kws-alert -n 80` |
 | Refresh fails | `ls -l /usr/local/sbin/project-pi-refresh` (re-run installer if missing), `sudo visudo -cf /etc/sudoers.d/project-pi-thesis` |
-| App shows "The Pi requires an API token" | Required mode: enter the token from `/etc/project-pi/backend.env` in Settings, or set `PROJECT_PI_API_AUTH=open` in that file |
-| `thermal-backend` exits at start: `PROJECT_PI_API_AUTH=required but PROJECT_PI_API_TOKEN is missing…` (or an unknown mode) | Set a token of 16+ random characters in `/etc/project-pi/backend.env`, or set `PROJECT_PI_API_AUTH=open` |
+| App shows "The Pi refused the request (401)…" | Enter the token from `/etc/project-pi/backend.env` in Settings. If it is right, the API is locked: check `sudo cat /var/lib/project-pi/backend/auth_fault` |
+| `journalctl -u thermal-backend` shows `ERROR: API LOCKED: …` | Fix `/etc/project-pi/backend.env` as the message says (a 16+ character token with `required`; never switch to `open` on shared Wi-Fi), then restart `thermal-backend` and `kws-alert`. Alerts are held in the KWS outbox meanwhile |
 | Disk full | `df -h /`, `systemctl start project-pi-log-cleanup.service` |
 | Old `kws-alert-vosk.service` | Masked by `install_headless.sh --apply`; `kws-alert.service` declares `Conflicts=` with it |
 | `/api/status` shows `alert_outbox.pressure` or a "alert outbox overflow" fault | Alerts are not reaching the backend; `journalctl -u kws-alert | grep 'alert outbox'` lists each eviction |
@@ -238,7 +247,7 @@ seeds from the previously installed unit and never overwrites.
 /usr/local/sbin/project-pi-log-cleanup               # journal vacuum (root-owned copy of log_cleanup.sh)
 ~/Project_Pi/raspberry_pi/systemd/kws-alert.service  # canonical KWS unit (installed by install_headless.sh)
 /etc/project-pi/hotspot.env                          # SSID/password, PROJECT_PI_FORCE_HOTSPOT (root, 600; only with --configure-hotspot)
-/etc/project-pi/backend.env                          # API auth mode (open by default)/token, caregiver credentials path (root, 600)
+/etc/project-pi/backend.env                          # API auth mode/token (missing = locked), caregiver credentials path (root, 600)
 /etc/project-pi/allow-app-git-deploy                 # optional flag: lets /api/refresh git pull (absent by default)
 /etc/systemd/system/thermal-backend.service.d/10-local.conf  # device-specific thermal/GPIO settings (never overwritten)
 /var/lib/project-pi/install-backups/                 # installer backups of replaced files (root, 700)
