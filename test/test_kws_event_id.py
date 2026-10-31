@@ -427,6 +427,81 @@ class KwsEventIdTest(unittest.TestCase):
             finally:
                 restore_modules(previous)
 
+    @staticmethod
+    def failing_writes(poster, path_name):
+        """Make writes of one file fail like a full disk; returns a switch to restore them."""
+        real = poster._write_jsonl
+        state = {"fail": True}
+
+        def write(path, events):
+            if state["fail"] and Path(path).name == path_name:
+                raise OSError(28, "No space left on device")
+            real(path, events)
+        poster._write_jsonl = write
+        return state
+
+    def test_outbox_write_failure_is_a_fault_and_never_claimed_durable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_kws_module()
+            try:
+                poster = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
+                state = self.failing_writes(poster, "alerts.jsonl")
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    poster.publish("help", 0.95, "vosk")  # must not raise into detection
+                first = poster.pending[0]["event_id"]
+                self.assertIn("outbox", poster.outbox_status()["storage_errors"])
+                self.assertIn("NOT durable", stderr.getvalue())
+                self.assertFalse((Path(temp_dir) / "alerts.jsonl").exists())
+                # Storage recovers: the next write persists both, same ids, fault cleared.
+                state["fail"] = False
+                poster.publish("tulong", 0.95, "vosk")
+                on_disk = [json.loads(line)["event_id"] for line in
+                           (Path(temp_dir) / "alerts.jsonl").read_text(encoding="utf-8").splitlines()]
+                self.assertEqual(on_disk[0], first)
+                self.assertEqual(len(on_disk), 2)
+                self.assertEqual(poster.outbox_status()["storage_errors"], {})
+            finally:
+                restore_modules(previous)
+
+    def test_loss_ledger_write_failure_is_a_storage_fault(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_kws_module()
+            try:
+                poster = self.bounded_poster(module, temp_dir, soft=1, hard=5)
+
+                def fail(kind, event):
+                    raise OSError(28, "No space left on device")
+                poster._record_loss_locked = fail
+                with contextlib.redirect_stderr(io.StringIO()):
+                    poster.publish("poss1", 0.5, "vosk")
+                    poster.publish("poss2", 0.5, "vosk")
+                self.assertEqual(len(poster.pending), 2)  # kept, over the soft limit
+                self.assertIn("loss_ledger", poster.outbox_status()["storage_errors"])
+            finally:
+                restore_modules(previous)
+
+    def test_quarantine_write_failure_keeps_the_event_queued(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_kws_module()
+            try:
+                poster = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
+                poster.session = self.StatusSession([422, 422])
+                state = self.failing_writes(poster, "alerts.rejected.jsonl")
+                with contextlib.redirect_stderr(io.StringIO()):
+                    poster.publish("help", 0.95, "vosk")
+                event_id = poster.pending[0]["event_id"]
+                self.assertEqual(poster.quarantined, [])
+                self.assertIn("quarantine", poster.outbox_status()["storage_errors"])
+                state["fail"] = False
+                with contextlib.redirect_stderr(io.StringIO()):
+                    poster.flush()
+                self.assertEqual(poster.pending, [])
+                self.assertEqual([e["event_id"] for e in poster.quarantined], [event_id])
+                self.assertEqual(poster.outbox_status()["storage_errors"], {})
+            finally:
+                restore_modules(previous)
+
     def test_backend_401_holds_alerts_with_their_ids_and_reports_it(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             module, previous = load_kws_module()

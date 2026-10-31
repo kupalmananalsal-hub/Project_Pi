@@ -144,7 +144,8 @@ class DeliveryIntegrationTest(unittest.TestCase):
                 self.assertEqual(len(held), 1)
                 self.assertTrue(poster.outbox_status()["auth_rejected_since"])
                 self.assertNotIn(held[0], self.stored_ids())
-                # Valid configuration restored: the same event_id arrives exactly once.
+                # Valid configuration restored: the same event_id is stored once (retries
+                # are at-least-once; the backend deduplicates by event_id).
                 self.module.API_AUTH_MODE = "required"
                 poster.session.headers["Authorization"] = "Bearer integration-api-token"
                 poster.flush()

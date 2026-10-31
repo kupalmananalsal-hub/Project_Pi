@@ -1814,6 +1814,11 @@ class HealthMonitor:
                     f"rejected by the backend, {outbox.get('quarantine_critical_evictions', 0)} "
                     f"evicted at the hard limit; review {outbox.get('quarantine_path')}"
                 )
+            if outbox.get("storage_errors"):
+                failing["alert storage failing"] = (
+                    "KWS cannot write " + "; ".join(outbox["storage_errors"].values())
+                    + "; affected alerts are not durable and the outbox may exceed its limits"
+                )
             if outbox.get("auth_rejected_since"):
                 failing["alert delivery unauthorized"] = (
                     f"the backend has refused KWS alerts (HTTP 401) since "

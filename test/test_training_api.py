@@ -850,6 +850,19 @@ class TrainingApiTest(unittest.TestCase):
                     os.environ["STATE_DIRECTORY"] = old_state
                 self.cleanup(module, previous)
 
+    def test_kws_storage_failure_is_a_health_fault(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                module.read_shared_audio_status = lambda max_age_seconds: {"outbox": {
+                    "storage_errors": {"outbox": "/var/lib/project-pi/backend/alerts.jsonl: "
+                                                 "[Errno 28] No space left on device"}}}
+                failing = module.health_monitor.failing_components()
+                self.assertIn("No space left", failing["alert storage failing"])
+                self.assertIn("not durable", failing["alert storage failing"])
+            finally:
+                self.cleanup(module, previous)
+
     def test_kws_401_is_a_health_fault(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             module, previous = self.load_module(temp_dir)

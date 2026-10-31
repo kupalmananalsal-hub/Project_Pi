@@ -192,6 +192,8 @@ class AlertPoster:
         # Set while the backend answers 401: alerts are held, not delivered.
         self.auth_rejected_since: str | None = None
         self._next_auth_error_log = 0.0
+        # Failed durable writes, by file: while set, those alerts are NOT durable.
+        self.storage_errors: dict[str, str] = {}
         # Durable record of lost possibly-critical events: survives restarts until an
         # operator reviews it and moves it out of the state directory.
         self.loss_path = queue_path.with_name(f"{queue_path.stem}.losses.json")
@@ -305,11 +307,12 @@ class AlertPoster:
 
             with self.lock:
                 if self.pending and self.pending[0].get("event_id") == event.get("event_id"):
+                    # Durable in quarantine before it leaves the outbox; if the quarantine
+                    # cannot be written it stays queued and is retried later.
+                    if rejected and not self._try_quarantine_locked(
+                            self.pending[0], status_code, str(getattr(response, "text", ""))[:500]):
+                        return
                     sent = self.pending.pop(0)
-                    if rejected:
-                        # Durable in quarantine before it leaves the outbox.
-                        self._quarantine_locked(sent, status_code,
-                                                str(getattr(response, "text", ""))[:500])
                     self._persist_pending_locked()
                 else:
                     continue
@@ -348,6 +351,7 @@ class AlertPoster:
                 "critical_evictions": self.losses["outbox_hard_limit"],
                 "soft_limit_evictions": self.losses["outbox_soft_limit"],
                 "auth_rejected_since": self.auth_rejected_since,
+                "storage_errors": dict(self.storage_errors),
                 "soft_limit": MAX_PENDING_ALERTS,
                 "hard_limit": HARD_MAX_PENDING_ALERTS,
                 "hard_limit_bytes": HARD_MAX_PENDING_BYTES,
@@ -455,12 +459,32 @@ class AlertPoster:
     def _try_record_loss_locked(self, kind: str, event: dict[str, object]) -> bool:
         try:
             self._record_loss_locked(kind, event)
-            return True
         except OSError as exc:
-            print(f"ERROR: could not record the loss of {event.get('event_id')} in "
-                  f"{self.loss_path} ({exc}); keeping it instead of evicting it unrecorded",
-                  file=sys.stderr, flush=True)
+            self._storage_failed("loss_ledger", self.loss_path, exc,
+                                 f"kept {event.get('event_id')} instead of evicting it unrecorded")
             return False
+        self.storage_errors.pop("loss_ledger", None)
+        return True
+
+    def _try_quarantine_locked(self, event: dict[str, object], status_code: int,
+                               detail: str) -> bool:
+        before = list(self.quarantined)
+        try:
+            self._quarantine_locked(event, status_code, detail)
+        except OSError as exc:
+            # Memory goes back to what is on disk (a ledger entry already written for an
+            # eviction stays: it over-reports, never under-reports).
+            self.quarantined = before
+            self._storage_failed("quarantine", self.quarantine_path, exc,
+                                 f"{event.get('event_id')} kept in the outbox")
+            return False
+        self.storage_errors.pop("quarantine", None)
+        return True
+
+    def _storage_failed(self, name: str, path: Path, exc: OSError, consequence: str) -> None:
+        self.storage_errors[name] = f"{path}: {exc}"
+        print(f"ERROR: could not write {path} ({exc}); {consequence}. Alerts held only in "
+              "memory are NOT durable and are lost if KWS stops.", file=sys.stderr, flush=True)
 
     def reload_reviewed_state(self) -> None:
         """Pick up an operator moving reviewed loss/rejected files away, without a restart.
@@ -588,7 +612,14 @@ class AlertPoster:
         return pending, upgraded_pending
 
     def _persist_pending_locked(self) -> None:
-        self._write_jsonl(self.queue_path, self.pending)
+        try:
+            self._write_jsonl(self.queue_path, self.pending)
+        except OSError as exc:
+            # Detection keeps running and delivery keeps trying from memory.
+            self._storage_failed("outbox", self.queue_path, exc,
+                                 f"{len(self.pending)} alert(s) queued in memory only")
+            return
+        self.storage_errors.pop("outbox", None)
 
     @staticmethod
     def _write_jsonl(path: Path, events: list[dict[str, object]]) -> None:
