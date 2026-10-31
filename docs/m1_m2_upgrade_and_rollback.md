@@ -37,7 +37,7 @@ the local drop-in) and claims nothing about their accuracy.
 | Root-run scripts | `pi_refresh.sh`, `headless_boot.sh`, `log_cleanup.sh` run from the thesis-writable repo | Root-owned copies `/usr/local/sbin/project-pi-{refresh,boot,log-cleanup}`, installed only by `install_headless.sh --apply` |
 | sudoers | thesis may run repo scripts as root | Exact commands only (see `raspberry_pi/sudoers/project-pi-thesis`); no repo paths |
 | Unit files | Re-copied from the repo by the boot service on every boot | Installed only by `install_headless.sh --apply` |
-| Installer | Writes immediately, upgrades packages, runs nmcli, restarts services | Dry run by default (NEW / IDENTICAL / CHANGED with diffs, package drift report); `--apply` backs up every replaced file first and rolls back every file and unit change if any step fails; restarts only with `--restart`; never installs packages; never touches NetworkManager |
+| Installer | Writes immediately, upgrades packages, runs nmcli, restarts services | Dry run by default (NEW / IDENTICAL / CHANGED with diffs, package drift report); `--apply` refuses unless the pre-upgrade backup gate passes (it re-runs the read-only inventory itself), backs up every replaced file first and rolls back every file and unit change if any step fails; restarts only with `--restart`; never installs packages; never touches NetworkManager |
 | Startup | Detection units waited for `network-online.target` and the boot script (up to 120 s network wait plus `apt-get update`) | `thermal-backend` and `kws-alert` depend only on `sound.target` (KWS also on the backend): they start without Wi-Fi or internet. The boot script waits for the network only when managing the hotspot and no longer runs `apt-get`; `project-pi-apt-update.timer` does that 15 min after boot, off the critical path |
 | `/api/refresh` | Root script does `git pull` and reinstalls units | `git_pull` refused (409) unless the root-owned `/etc/project-pi/allow-app-git-deploy` exists; restart without pull always works |
 | Wi-Fi | Boot script could create/modify/activate the hotspot profile | Changed only when `hotspot.env` sets `PROJECT_PI_FORCE_HOTSPOT=1`; otherwise the boot logs the current SSID/IPv4 and changes nothing |
@@ -171,31 +171,74 @@ systemctl show -p Environment thermal-backend.service | tr ' ' '\n' | grep THERM
 ls -la raspberry_pi/backend/alerts.db* dataset/thermal/models/thermal_human_shape*  # confirm the manifest paths
 ```
 
-If any of the four protected files is elsewhere, correct
-`raspberry_pi/config/protected_assets.txt` locally before the backup; never move
-the file to fit the manifest.
 
 If `PROJECT_PI_CAREGIVER_CREDENTIALS` was already set (drop-in), note its path:
 `EnvironmentFile=` values take precedence over `Environment=`, so after the
 upgrade `backend.env` must point at the same file (step 4).
 
-Back up the protected production files (an authorized step; it writes only into a
-new `$B`), then run the read-only gate against the commit you will deploy:
+### 0a. Get the reviewed preflight tools without changing the checkout
+
+The backup and inventory scripts are new in the reviewed commit and do not exist in
+the deployed `1a5c309` checkout. Extract them from git's object store into a
+separate directory; the working tree, branch and running services do not change
+(`git fetch` only adds objects under `.git`). This is itself part of the separately
+authorized upgrade, not a read-only step.
+
+```bash
+cd ~/Project_Pi
+git fetch origin
+git merge-base --is-ancestor <REVIEWED_COMMIT> origin/main || echo "STOP: not on origin/main"
+T=~/project-pi-preflight/<REVIEWED_COMMIT>
+mkdir -p "$T"
+TOOLS="raspberry_pi/scripts/preupgrade_backup.sh raspberry_pi/scripts/preupgrade_inventory.sh raspberry_pi/config/protected_assets.txt"
+git archive <REVIEWED_COMMIT> $TOOLS | tar -x -C "$T"
+for f in $TOOLS; do                     # each extracted file is byte-identical to the reviewed blob
+  [ "$(git rev-parse "<REVIEWED_COMMIT>:$f")" = "$(git hash-object "$T/$f")" ] || echo "STOP: $f differs"
+done
+```
+
+### 0b. Confirm the protected-file paths (read-only)
+
+`protected_assets.txt` marks the two thermal model paths `? ` (provisional): the
+audit gave only file names. Both scripts refuse a manifest with `? ` entries, so
+this step cannot be skipped. Check each path with the `ls -la` above, then make the
+confirmed copy (the reviewed file stays unchanged):
+
+```bash
+sed 's/^? //' "$T/raspberry_pi/config/protected_assets.txt" > "$T/protected_assets.confirmed.txt"
+grep -v '^#' "$T/protected_assets.confirmed.txt" | while read -r p; do ls -la "$p" || echo "STOP: $p"; done
+```
+
+If a file is elsewhere, put its real path in the confirmed copy; never move the file
+to fit the manifest.
+
+### 0c. Back up, then run the gate
+
+Back up the protected production files (authorized; it writes only into a new `$B`),
+then run the read-only gate against the commit you will deploy:
 
 ```bash
 B=~/project-pi-backups/pre-m1m2-$(date +%Y%m%d-%H%M)
-bash raspberry_pi/scripts/preupgrade_backup.sh --backup-dir="$B"   # also writes $B/ROLLBACK_COMMIT
-git fetch origin
-bash raspberry_pi/scripts/preupgrade_inventory.sh --target=<REVIEWED_COMMIT> --backup-dir="$B"
+bash "$T/raspberry_pi/scripts/preupgrade_backup.sh" --repo="$HOME/Project_Pi" \
+  --manifest="$T/protected_assets.confirmed.txt" --backup-dir="$B"   # also writes $B/ROLLBACK_COMMIT
+bash "$T/raspberry_pi/scripts/preupgrade_inventory.sh" --repo="$HOME/Project_Pi" \
+  --target=<REVIEWED_COMMIT> --backup-dir="$B"
 ```
 
-The backup takes a consistent snapshot of the live WAL database with SQLite's
-online backup API and checks it with `PRAGMA integrity_check`; the other files are
-copied and hashed (`$B/SHA256SUMS`). The live database is never hashed (it keeps
-changing). The inventory writes nothing and must print `PASS`: tracked files
-unedited, each protected file present, not tracked by `<REVIEWED_COMMIT>` (a checkout
-would overwrite it) and backed up. Other local files (datasets, recordings) are
-listed as `LOCAL`/`WARN` and do not block. On `BLOCKED`, stop; never use
+The backup opens the live database read-only (SQLite URI `mode=ro`: a missing file is
+never created, the database file is never written), takes a consistent snapshot with
+SQLite's online backup API and checks it with `PRAGMA integrity_check`; the other
+files are copied. The manifest used is copied into `$B`, and `$B/SHA256SUMS` covers
+every copy and that manifest. The live database is never hashed (it keeps changing).
+If the database was closed, SQLite creates empty `-wal`/`-shm` files next to it; the
+backup reports them and leaves them (harmless).
+
+The inventory writes nothing and must print `PASS`: backup intact, manifest
+confirmed, tracked files unedited, each protected file present and backed up, and no
+local untracked or **ignored** file (models, datasets, recordings included) at a
+path `<REVIEWED_COMMIT>` tracks, or inside one it tracks as a file: a plain
+`git switch` overwrites or deletes such files, no force needed. Other local files
+are listed as `LOCAL`/`WARN` and do not block. On `BLOCKED`, stop; never use
 `git clean`, `git reset --hard` or `git checkout -f`.
 
 Also back up the system configuration:
@@ -234,8 +277,8 @@ later pull would fail). The Pi stays on a `main` branch that tracks `origin/main
 
 ```bash
 cd ~/Project_Pi
-bash raspberry_pi/scripts/preupgrade_inventory.sh --target=<REVIEWED_COMMIT> --backup-dir="$B"  # PASS again
-git fetch origin
+bash "$T/raspberry_pi/scripts/preupgrade_inventory.sh" --repo="$HOME/Project_Pi" \
+  --target=<REVIEWED_COMMIT> --backup-dir="$B"                      # PASS again, right before
 git merge-base --is-ancestor <REVIEWED_COMMIT> origin/main || echo "STOP: not on origin/main"
 git switch main                                       # creates a tracking main from origin/main if absent
 git branch --set-upstream-to=origin/main main
@@ -265,9 +308,14 @@ the model, metadata and threshold settings recorded in step 0, and
 
 ```bash
 sudo bash raspberry_pi/scripts/install_headless.sh --apply --api-auth=required \
-  --rollback-commit="$(cat "$B/ROLLBACK_COMMIT")"                     # installs, restarts nothing
+  --backup-dir="$B" --rollback-commit="$(cat "$B/ROLLBACK_COMMIT")"   # installs, restarts nothing
 sudo systemctl restart thermal-backend.service kws-alert.service      # backend, then KWS, together
 ```
+
+`--backup-dir` is required with `--apply`: the installer runs the inventory itself
+(as `thesis`, against the now checked-out `HEAD`) and refuses, with nothing changed,
+unless it passes and the backup was made at `--rollback-commit`. There is no PASS
+file to forge, and no option to skip it.
 
 `--api-auth` is required with `--apply`. `required` (the choice on any shared Wi-Fi)
 creates `backend.env` with a random 64-hex token that is never printed: every diff
@@ -280,7 +328,8 @@ short or legacy token, or no mode all count as locked).
 The restart switches the Pi from today's state straight to `required`; it is never
 in open mode on the shared network. From then until each phone has the token
 (step 5) phones cannot connect; KWS keeps any alerts in its durable outbox and
-delivers them, with the same `event_id`, once delivery is authorized.
+retries them, with the same `event_id`, once delivery is authorized (see "Delivery
+guarantees").
 
 `--rollback-commit` is required with `--apply`: the application commit that ran
 before this upgrade (the one recorded in step 0; for a reinstall without a code
@@ -396,9 +445,46 @@ while locked, so the fault is visible only on the Pi:
   60 s, with the number of alerts held in the outbox; health faults "API
   authentication locked" and "alert delivery unauthorized" are stored locally.
 
-Alerts are held, not delivered: KWS keeps them in its durable outbox with their
-`event_id` and delivers each exactly once after `backend.env` is fixed and
-`thermal-backend` then `kws-alert` are restarted.
+Alerts are held, not delivered: KWS keeps them in its outbox with their `event_id`
+and retries them after `backend.env` is fixed and `thermal-backend` then
+`kws-alert` are restarted (see "Delivery guarantees").
+
+## Delivery guarantees (what is tested, and what is not)
+
+- KWS → backend is **at-least-once**: an alert leaves the outbox only after the
+  backend answers 2xx (or a non-retryable 4xx moves it to quarantine). A lost
+  acknowledgement, a crash after the backend stored it, or a restart can send it
+  again. The backend looks the `event_id` up in `alerts.db` (unique index) before
+  any side effect, so a repeat is stored and broadcast once while that row exists
+  (tested, including after a 401 period); a different payload under the same
+  `event_id` is refused with 409. That is deduplication, not exactly-once transport.
+- The outbox is durable only while its writes succeed. A failed write (for example a
+  full disk) is logged as `NOT durable` and raises the health fault "alert storage
+  failing"; affected alerts are then held in memory only and are lost if KWS stops.
+- Evictions at the limits are recorded in the loss ledger first; an eviction whose
+  record cannot be written does not happen (the outbox exceeds its limit instead).
+- Phone presentation is separate (see `docs/phase3_delivery_design.md`): there is
+  no exactly-once physical alert guarantee.
+
+## Network and transport security
+
+Bearer-token authentication refuses clients without the token; it does **not**
+encrypt anything. The backend and the apps use plain HTTP and WebSocket: anyone who
+can observe the Wi-Fi traffic (an open network, or any member of a shared WPA2-PSK
+network who captures the handshake) can read the token, alerts, thermal frames and
+audio levels, and reuse the token. Authentication therefore does not make a shared
+network safe.
+
+Deployment requires one of:
+
+- **A trusted, isolated network**: the Pi's own hotspot (or a dedicated access
+  point) with a private WPA2/WPA3 password, joined only by the project phones; or
+- **Encrypted transport** (TLS in front of the backend, or a VPN). PR #9 does not
+  provide this; it would be separate, reviewed work.
+
+Until one of these is verified, deploying on the existing shared Wi-Fi stays
+blocked, in `required` and `open` mode alike. The APK server (port 8080, plain HTTP,
+no authentication) falls under the same rule.
 
 ## Open mode: what is exposed
 

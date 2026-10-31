@@ -21,8 +21,14 @@ SSH in once, clone or pull the repo, then run:
 cd ~/Project_Pi
 sudo bash raspberry_pi/scripts/install_headless.sh            # dry run: review the report
 sudo bash raspberry_pi/scripts/install_headless.sh --apply --restart --api-auth=required \
-  --rollback-commit="$(git rev-parse HEAD)"   # the code that ran before; reported, never checked out
+  --backup-dir="$B" --rollback-commit="$(git rev-parse HEAD)"   # the code that ran before
 ```
+
+`--backup-dir` is the pre-upgrade backup from `preupgrade_backup.sh`; the installer
+re-runs the read-only `preupgrade_inventory.sh` on it and refuses `--apply` unless it
+passes (procedure: [m1_m2_upgrade_and_rollback.md](m1_m2_upgrade_and_rollback.md),
+step 0). Bearer tokens travel over plain HTTP: use a trusted isolated network (or
+encrypted transport, not provided here); see "Network and transport security" there.
 
 The default is a dry run that writes nothing: it reports package drift against
 `raspberry_pi/requirements/*.lock.txt`, and every target file as NEW / IDENTICAL /
@@ -42,7 +48,7 @@ To have the boot script join the hotspot (a fresh Pi with no Wi-Fi profile), add
 ```bash
 sudo PROJECT_PI_HOTSPOT_SSID=Teddy PROJECT_PI_HOTSPOT_PASSWORD='<hotspot password>' \
   bash raspberry_pi/scripts/install_headless.sh --apply --configure-hotspot --api-auth=required \
-  --rollback-commit="$(git rev-parse HEAD)"
+  --backup-dir="$B" --rollback-commit="$(git rev-parse HEAD)"
 ```
 
 That writes `/etc/project-pi/hotspot.env` (mode `600`, not in git) with
