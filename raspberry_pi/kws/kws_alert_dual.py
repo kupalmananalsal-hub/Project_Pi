@@ -49,6 +49,9 @@ HARD_MAX_PENDING_BYTES = 5 * 1024 * 1024
 LOSS_LEDGER_RECENT = 100
 # How often KWS notices an operator acknowledging reviewed loss/rejected files.
 REVIEW_CHECK_SECONDS = 5.0
+AUTH_ERROR_LOG_SECONDS = 60.0
+# Loss ledger counters: possibly-critical events evicted from the outbox or quarantine.
+LOSS_KINDS = ("outbox_soft_limit", "outbox_hard_limit", "quarantine_hard_limit")
 # Permanently rejected (4xx) events kept for review. Beyond this soft limit only
 # certain_suppressed records are dropped; the hard limits above apply to the rest.
 MAX_QUARANTINED_ALERTS = 500
@@ -186,6 +189,9 @@ class AlertPoster:
         self._worker_stop = threading.Event()
         self._worker_thread: threading.Thread | None = None
         self.evictions = 0
+        # Set while the backend answers 401: alerts are held, not delivered.
+        self.auth_rejected_since: str | None = None
+        self._next_auth_error_log = 0.0
         # Durable record of lost possibly-critical events: survives restarts until an
         # operator reviews it and moves it out of the state directory.
         self.loss_path = queue_path.with_name(f"{queue_path.stem}.losses.json")
@@ -281,6 +287,7 @@ class AlertPoster:
                 payload = {k: v for k, v in event.items() if k != "retention_tier"}
                 response = self.session.post(self.backend_url, json=payload, timeout=1.0)
                 status_code = int(getattr(response, "status_code", 200))
+                self._note_auth_status(status_code, pending_count)
                 # Other 4xx (400, 409 conflict, 422) never succeed on retry and would block the
                 # queue head forever: they are quarantined, not retried and not discarded.
                 rejected = 400 <= status_code < 500 and status_code not in (401, 408, 429)
@@ -310,6 +317,24 @@ class AlertPoster:
                 trace_alert("http_post", sent.get("event_id"), "succeeded",
                             keyword=sent["keyword"], status_code=status_code)
 
+    def _note_auth_status(self, status_code: int, pending_count: int) -> None:
+        # 401 is retried (the event and its event_id stay queued), but never quietly.
+        if status_code != 401:
+            self.auth_rejected_since = None
+            return
+        if self.auth_rejected_since is None:
+            self.auth_rejected_since = datetime.now(timezone.utc).isoformat()
+        now = time.monotonic()
+        if now >= self._next_auth_error_log:
+            self._next_auth_error_log = now + AUTH_ERROR_LOG_SECONDS
+            print(
+                f"ERROR: backend refused alerts with HTTP 401 since {self.auth_rejected_since}; "
+                f"{pending_count} alert(s) held in {self.queue_path}, NOT delivered. Check "
+                "PROJECT_PI_API_AUTH / PROJECT_PI_API_TOKEN in /etc/project-pi/backend.env.",
+                file=sys.stderr,
+                flush=True,
+            )
+
     def outbox_status(self) -> dict[str, object]:
         if time.monotonic() >= self._next_review_check:
             self.reload_reviewed_state()
@@ -321,6 +346,8 @@ class AlertPoster:
                 "evictions": self.evictions,
                 # Persisted counts: they stay non-zero until the loss ledger is cleared.
                 "critical_evictions": self.losses["outbox_hard_limit"],
+                "soft_limit_evictions": self.losses["outbox_soft_limit"],
+                "auth_rejected_since": self.auth_rejected_since,
                 "soft_limit": MAX_PENDING_ALERTS,
                 "hard_limit": HARD_MAX_PENDING_ALERTS,
                 "hard_limit_bytes": HARD_MAX_PENDING_BYTES,
@@ -355,10 +382,11 @@ class AlertPoster:
             dropped_tier = self.quarantined[index].get("retention_tier", 2)
             if not over_hard and dropped_tier >= 2:
                 break
+            if dropped_tier >= 2 and not self._try_record_loss_locked(
+                    "quarantine_hard_limit", self.quarantined[index]):
+                break
             dropped = self.quarantined.pop(index)
             total -= sizes.pop(index)
-            if dropped_tier >= 2:
-                self._record_loss_locked("quarantine_hard_limit", dropped)
             trace_alert("outbox", dropped.get("event_id"), "quarantine_evicted",
                         retention_tier=RETENTION_TIER_NAMES.get(dropped_tier, "unknown"))
             print(f"{'ERROR' if dropped_tier >= 2 else 'WARNING'}: alert quarantine full; "
@@ -385,10 +413,11 @@ class AlertPoster:
             candidates = [i for i, e in enumerate(self.pending) if e["retention_tier"] < 3]
             if not candidates:
                 break
-            self._evict_locked(
+            if not self._evict_locked(
                 min(candidates, key=lambda i: (self.pending[i]["retention_tier"], i)),
                 "outbox_soft_limit",
-            )
+            ):
+                return evicted
             evicted = True
         sizes = [len(json.dumps(event)) + 1 for event in self.pending]
         total = sum(sizes)
@@ -397,27 +426,41 @@ class AlertPoster:
         ):
             index = min(range(len(self.pending)),
                         key=lambda i: (self.pending[i]["retention_tier"], i))
+            if not self._evict_locked(index, "outbox_hard_limit"):
+                return evicted
             total -= sizes.pop(index)
-            self._evict_locked(index, "outbox_hard_limit")
             evicted = True
         return evicted
 
-    def _evict_locked(self, index: int, reason: str) -> None:
-        event = self.pending.pop(index)
+    def _evict_locked(self, index: int, reason: str) -> bool:
+        event = self.pending[index]
         tier = event["retention_tier"]
+        # Possibly-critical: recorded durably before it leaves the outbox, or not removed.
+        if tier >= 2 and not self._try_record_loss_locked(reason, event):
+            return False
+        self.pending.pop(index)
         self.evictions += 1
-        if tier == 3:
-            self._record_loss_locked("outbox_hard_limit", event)
         trace_alert("outbox", event.get("event_id"), "evicted", reason=reason,
                     retention_tier=RETENTION_TIER_NAMES[tier])
         print(
-            f"{'ERROR' if tier == 3 else 'WARNING'}: alert outbox {reason}: evicted "
+            f"{'ERROR' if tier >= 2 else 'WARNING'}: alert outbox {reason}: evicted "
             f"{RETENTION_TIER_NAMES[tier]} event {event.get('event_id')} "
             f"({event.get('keyword')!r}, confidence={event.get('confidence')}); "
             f"{len(self.pending)} still queued",
             file=sys.stderr,
             flush=True,
         )
+        return True
+
+    def _try_record_loss_locked(self, kind: str, event: dict[str, object]) -> bool:
+        try:
+            self._record_loss_locked(kind, event)
+            return True
+        except OSError as exc:
+            print(f"ERROR: could not record the loss of {event.get('event_id')} in "
+                  f"{self.loss_path} ({exc}); keeping it instead of evicting it unrecorded",
+                  file=sys.stderr, flush=True)
+            return False
 
     def reload_reviewed_state(self) -> None:
         """Pick up an operator moving reviewed loss/rejected files away, without a restart.
@@ -450,13 +493,12 @@ class AlertPoster:
         return sorted(self.loss_path.parent.glob(f"{self.loss_path.name}.unreadable-*"))
 
     def _read_losses(self) -> dict[str, object]:
-        losses: dict[str, object] = {"outbox_hard_limit": 0, "quarantine_hard_limit": 0,
-                                     "recent": []}
+        losses: dict[str, object] = {**{kind: 0 for kind in LOSS_KINDS}, "recent": []}
         if not self.loss_path.exists():
             return losses
         try:
             stored = json.loads(self.loss_path.read_text(encoding="utf-8"))
-            for key in ("outbox_hard_limit", "quarantine_hard_limit"):
+            for key in LOSS_KINDS:
                 losses[key] = int(stored.get(key, 0))
             losses["recent"] = list(stored.get("recent", []))[-LOSS_LEDGER_RECENT:]
         except (OSError, ValueError, TypeError, AttributeError) as exc:
@@ -469,7 +511,8 @@ class AlertPoster:
         return losses
 
     def _record_loss_locked(self, kind: str, event: dict[str, object]) -> None:
-        self.losses[kind] = int(self.losses[kind]) + 1
+        # Built aside and kept only once durable, so a failed write changes nothing.
+        losses = {**self.losses, kind: int(self.losses[kind]) + 1}
         recent = list(self.losses["recent"])
         recent.append({
             "kind": kind,
@@ -481,15 +524,16 @@ class AlertPoster:
             "timestamp": event.get("timestamp"),
             "lost_at": datetime.now(timezone.utc).isoformat(),
         })
-        self.losses["recent"] = recent[-LOSS_LEDGER_RECENT:]
+        losses["recent"] = recent[-LOSS_LEDGER_RECENT:]
         self.loss_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self.loss_path.with_name(f"{self.loss_path.name}.tmp")
         with temp_path.open("w", encoding="utf-8") as handle:
-            json.dump(self.losses, handle)
+            json.dump(losses, handle)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, self.loss_path)
         self._fsync_dir(self.loss_path.parent)
+        self.losses = losses
         self._review_seen = self._review_signature()
 
     def _merge_legacy_locked(self, legacy_path: Path | None) -> Path | None:

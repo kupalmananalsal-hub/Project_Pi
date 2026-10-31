@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -377,6 +379,75 @@ class KwsEventIdTest(unittest.TestCase):
                     [json.loads(line)["keyword"] for line in
                      (Path(temp_dir) / "alerts.jsonl").read_text(encoding="utf-8").splitlines()],
                     ["crit1", "crit2", "crit3", "crit4"])
+                # Both possible_critical evictions are durable losses (the suppressed one is not).
+                self.assertEqual(status["soft_limit_evictions"], 2)
+                ledger = json.loads((Path(temp_dir) / "alerts.losses.json").read_text(encoding="utf-8"))
+                self.assertEqual([(r["kind"], r["keyword"], r["retention_tier"]) for r in ledger["recent"]],
+                                 [("outbox_soft_limit", "poss1", "possible_critical"),
+                                  ("outbox_soft_limit", "poss2", "possible_critical")])
+                restarted = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
+                self.assertEqual(restarted.outbox_status()["soft_limit_evictions"], 2)
+            finally:
+                restore_modules(previous)
+
+    def test_unrecordable_loss_keeps_the_event_instead_of_evicting_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_kws_module()
+            try:
+                poster = self.bounded_poster(module, temp_dir, soft=1, hard=2)
+
+                def fail(kind, event):
+                    raise OSError("disk full")
+                poster._record_loss_locked = fail
+                for keyword in ("poss1", "poss2", "crit1"):
+                    poster.publish(keyword, 0.5 if keyword.startswith("poss") else 0.9, "vosk")
+                # Over both limits, but nothing possibly-critical disappeared unrecorded.
+                self.assertEqual([e["keyword"] for e in poster.pending], ["poss1", "poss2", "crit1"])
+                self.assertEqual(poster.outbox_status()["soft_limit_evictions"], 0)
+                self.assertEqual(poster.outbox_status()["evictions"], 0)
+            finally:
+                restore_modules(previous)
+
+    def test_unrecordable_quarantine_loss_keeps_the_record(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_kws_module()
+            try:
+                module.MAX_QUARANTINED_ALERTS = 1
+                module.HARD_MAX_PENDING_ALERTS = 1
+                poster = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
+                poster.session = self.StatusSession([422] * 2)
+
+                def fail(kind, event):
+                    raise OSError("disk full")
+                poster._record_loss_locked = fail
+                poster.publish("crit1", 0.9, "vosk")
+                poster.publish("crit2", 0.9, "vosk")
+                self.assertEqual([e["keyword"] for e in poster.quarantined], ["crit1", "crit2"])
+            finally:
+                restore_modules(previous)
+
+    def test_backend_401_holds_alerts_with_their_ids_and_reports_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_kws_module()
+            try:
+                poster = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
+                poster.session = self.StatusSession([401, 401, 200])
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    poster.publish("help", 0.9, "vosk")  # first post: 401
+                event_id = poster.pending[0]["event_id"]
+                self.assertEqual([e["event_id"] for e in poster.pending], [event_id])
+                self.assertEqual(poster.quarantined, [])  # 401 is retried, never quarantined
+                since = poster.outbox_status()["auth_rejected_since"]
+                self.assertTrue(since)
+                self.assertIn("HTTP 401", stderr.getvalue())
+                poster.flush()
+                self.assertEqual(poster.outbox_status()["auth_rejected_since"], since)
+                # Valid auth restored: the same event is delivered and the fault clears.
+                poster.flush()
+                self.assertEqual(poster.pending, [])
+                self.assertEqual([p["event_id"] for p in poster.session.posts], [event_id] * 3)
+                self.assertIsNone(poster.outbox_status()["auth_rejected_since"])
             finally:
                 restore_modules(previous)
 
