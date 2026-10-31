@@ -303,6 +303,40 @@ class InstallerRuntimeTest(unittest.TestCase):
         self.assertIn("NOT VERIFIED: kws-alert-vosk.service active", result.stderr)
         self.assertIn("ROLLBACK INCOMPLETE", result.stderr)
 
+    def assert_wrong_metadata_not_verified(self, result):
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("NOT VERIFIED: ", result.stderr)
+        self.assertIn("thermal-backend.service matches its backup (contents, owner, group, mode)",
+                      result.stderr)
+        self.assertIn("ROLLBACK INCOMPLETE", result.stderr)
+        self.assertNotIn("ROLLBACK VERIFIED", result.stderr)
+        # The contents themselves were restored.
+        self.assertIn("LGPIO_CHIP=11", (self.root / "etc/systemd/system/thermal-backend.service"
+                                        ).read_text(encoding="utf-8"))
+
+    def test_restored_contents_with_wrong_mode_are_not_verified(self):
+        # Simulated metadata (NTFS cannot hold modes): stat reports a wrong mode for the
+        # restored file only, never for its backup.
+        self.write_stub("stat", '#!/usr/bin/env bash\nout="$(/usr/bin/stat "$@")" || exit\n'
+                                'last="${!#}"\n'
+                                'if [[ "$2" == *%G* && "$last" == */etc/systemd/system/thermal-backend.service'
+                                ' && "$last" != *install-backups* ]]; then out="${out% *} 666"; fi\n'
+                                'echo "$out"\n')
+        self.legacy_pi()
+        self.assert_wrong_metadata_not_verified(
+            self.run_installer("--apply", fail="enable project-pi-boot"))
+
+    @unittest.skipIf(os.name == "nt", "NTFS cannot hold POSIX modes; runs on Linux")
+    def test_restored_file_chmod_mismatch_is_not_verified_on_linux(self):
+        # A real restore that copies contents but leaves mode 600 behind.
+        self.write_stub("cp", '#!/usr/bin/env bash\n/usr/bin/cp "$@" || exit\nlast="${!#}"\n'
+                              'if [[ "$last" == */etc/systemd/system/thermal-backend.service'
+                              ' && "$last" != *install-backups* ]]; then chmod 600 "$last"; fi\n')
+        self.legacy_pi()
+        (self.root / "etc/systemd/system/thermal-backend.service").chmod(0o644)
+        self.assert_wrong_metadata_not_verified(
+            self.run_installer("--apply", fail="enable project-pi-boot"))
+
     def test_failure_after_mask_rolls_back_files_and_legacy_unit(self):
         self.legacy_pi()
         self.assert_rolled_back(self.run_installer("--apply", fail="enable project-pi-boot"))

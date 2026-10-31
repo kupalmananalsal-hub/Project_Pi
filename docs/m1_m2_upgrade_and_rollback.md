@@ -92,23 +92,33 @@ dropped; possibly-critical rejections are dropped only at the outbox hard limits
 Every possibly-critical event that is lost (a `certain_critical` outbox eviction at
 the hard limit, or a possibly-critical quarantine eviction) is counted, with a
 summary of the event, in `/var/lib/project-pi/backend/alerts.losses.json`, written
-and fsynced at the moment of loss. The counts survive KWS restarts and power cuts
-and keep the health fault raised until an operator resolves them; the file keeps
-the last 100 summaries but its counts are never trimmed. An unreadable ledger is
-moved aside (`*.unreadable-<time>`) and itself raises the fault.
+at the moment of loss (temporary file fsynced, atomic rename, then the directory
+fsynced). The counts survive KWS restarts and keep the health fault raised until an
+operator acknowledges them; the file keeps the last 100 summaries but its counts
+are never trimmed. Power-cut survival relies on ext4 honouring these fsyncs and has
+only been tested on Windows, not by cutting power on the Pi. An unreadable ledger
+is moved aside unmodified (`alerts.losses.json.unreadable-<ns>`); as long as such a
+file is in the state directory the fault stays raised, across any number of
+restarts.
 
 ### Reviewing rejected and lost alerts (operator only)
 
 Nothing is ever re-sent automatically. As `thesis`:
 
-1. Read `alerts.rejected.jsonl` and `alerts.losses.json` and record what happened.
-2. Archive both (`cp -a` to the evidence folder); they are the only trace of these
-   events.
-3. Re-sending a rejected event is a per-event decision, made only after fixing
+1. Read `alerts.rejected.jsonl`, `alerts.losses.json` and any
+   `alerts.losses.json.unreadable-*` and record what happened.
+2. Acknowledge by **moving** (not deleting) the reviewed files out of
+   `/var/lib/project-pi/backend/` into a reviewed folder, e.g.
+   `mkdir -p /var/lib/project-pi/backend/reviewed-$(date -u +%Y%m%dT%H%M%SZ)` and
+   `mv` them there; they are the only trace of these events. No restart is needed:
+   the running KWS notices the change within 5 seconds and drops the cleared counts
+   from its next status, and the backend's next health check clears the fault.
+   KWS's own writes never count as an acknowledgment.
+3. If a new rejection or loss arrives while you move the file, KWS rewrites the
+   file with everything it still holds, so the fault comes back: review again.
+4. Re-sending a rejected event is a per-event decision, made only after fixing
    the cause: stop `kws-alert`, append the chosen lines to `alerts.jsonl`, start
    `kws-alert`. Never bulk-copy the file back.
-4. Clear the faults by deleting the reviewed files; KWS recreates them on the next
-   rejection or loss.
 
 ## Compatibility rules that set the order
 
@@ -238,7 +248,8 @@ created are removed, units it newly enabled are disabled, the legacy unit's file
 mask, enabled and active state are restored (a mask that existed before, e.g. from
 an earlier install, is left in place), and with `--restart` the old configuration
 is restarted. Each step that fails is recorded, the rest still run, and the end
-state is then checked (files equal their backups, created files gone, unit
+state is then checked (files equal their backups in contents, owner, group and
+mode, created files gone, unit
 enable/mask/active states, services active after a restart). The outcome is one of:
 
 - `ROLLBACK VERIFIED` (exit 1): every installer change was undone and checked.
@@ -384,7 +395,7 @@ sudo systemctl restart thermal-backend.service kws-alert.service
 - Only the outbox (`alerts.jsonl`) is carried back to the old path.
   `alerts.rejected.jsonl` and `alerts.losses.json` stay untouched in
   `/var/lib/project-pi/backend/`; the old KWS does not read them. Never append them
-  to the old outbox: review and archive them as in "Reviewing rejected and lost
+  to the old outbox: review and acknowledge them as in "Reviewing rejected and lost
   alerts" before deciding to re-send anything.
 - Leave `/etc/project-pi/backend.env`, `/var/lib/project-pi/backend/` and the
   `/usr/local/sbin/project-pi-*` helpers in place; the old units do not use them.

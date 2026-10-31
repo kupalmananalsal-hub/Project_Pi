@@ -47,6 +47,8 @@ HARD_MAX_PENDING_ALERTS = 5000
 HARD_MAX_PENDING_BYTES = 5 * 1024 * 1024
 # Lost-event summaries kept in the loss ledger (the counts there are never trimmed).
 LOSS_LEDGER_RECENT = 100
+# How often KWS notices an operator acknowledging reviewed loss/rejected files.
+REVIEW_CHECK_SECONDS = 5.0
 # Permanently rejected (4xx) events kept for review. Beyond this soft limit only
 # certain_suppressed records are dropped; the hard limits above apply to the rest.
 MAX_QUARANTINED_ALERTS = 500
@@ -184,13 +186,15 @@ class AlertPoster:
         self._worker_stop = threading.Event()
         self._worker_thread: threading.Thread | None = None
         self.evictions = 0
-        # Durable record of lost possibly-critical events: survives restarts and power cuts
-        # until an operator reviews it and deletes the file.
+        # Durable record of lost possibly-critical events: survives restarts until an
+        # operator reviews it and moves it out of the state directory.
         self.loss_path = queue_path.with_name(f"{queue_path.stem}.losses.json")
         self.losses = self._read_losses()
         # Events the backend permanently rejected (4xx); kept for review, never retried.
         self.quarantine_path = queue_path.with_name(f"{queue_path.stem}.rejected.jsonl")
         self.quarantined, _ = self._read_events(self.quarantine_path)
+        self._review_seen = self._review_signature()
+        self._next_review_check = time.monotonic() + REVIEW_CHECK_SECONDS
         self.pending, changed = self._read_events(self.queue_path)
         with self.lock:
             migrated_from = self._merge_legacy_locked(legacy_queue_path)
@@ -307,6 +311,8 @@ class AlertPoster:
                             keyword=sent["keyword"], status_code=status_code)
 
     def outbox_status(self) -> dict[str, object]:
+        if time.monotonic() >= self._next_review_check:
+            self.reload_reviewed_state()
         with self.lock:
             pending = len(self.pending)
             return {
@@ -322,7 +328,7 @@ class AlertPoster:
                 "quarantined_possibly_critical": sum(
                     1 for e in self.quarantined if e.get("retention_tier", 2) >= 2),
                 "quarantine_critical_evictions": self.losses["quarantine_hard_limit"],
-                "loss_ledger_unreadable": self.losses["unreadable_ledgers"],
+                "loss_ledger_unreadable": len(self._review_seen[2]),
                 "loss_ledger_path": str(self.loss_path),
                 "quarantine_path": str(self.quarantine_path),
             }
@@ -359,6 +365,7 @@ class AlertPoster:
                   f"rejected {RETENTION_TIER_NAMES.get(dropped_tier, 'unknown')} event "
                   f"{dropped.get('event_id')} evicted", file=sys.stderr, flush=True)
         self._write_jsonl(self.quarantine_path, self.quarantined)
+        self._review_seen = self._review_signature()
         trace_alert("http_post", event.get("event_id"), "quarantined",
                     keyword=event.get("keyword"), status_code=status_code,
                     retention_tier=RETENTION_TIER_NAMES.get(tier, "unknown"))
@@ -412,21 +419,51 @@ class AlertPoster:
             flush=True,
         )
 
+    def reload_reviewed_state(self) -> None:
+        """Pick up an operator moving reviewed loss/rejected files away, without a restart.
+
+        Only a change KWS did not make itself triggers a reload, so a failed write of our
+        own never lowers the in-memory counts.
+        """
+        with self.lock:
+            self._next_review_check = time.monotonic() + REVIEW_CHECK_SECONDS
+            if self._review_signature() == self._review_seen:
+                return
+            self.losses = self._read_losses()
+            self.quarantined, _ = self._read_events(self.quarantine_path)
+            self._review_seen = self._review_signature()
+
+    def _review_signature(self) -> tuple[object, ...]:
+        def stamp(path: Path) -> tuple[int, int] | None:
+            try:
+                info = path.stat()
+            except FileNotFoundError:
+                return None
+            return info.st_mtime_ns, info.st_size
+
+        return (stamp(self.loss_path), stamp(self.quarantine_path),
+                tuple(p.name for p in self._unreadable_ledgers()))
+
+    def _unreadable_ledgers(self) -> list[Path]:
+        # The kept-aside damaged ledgers are the durable fault: it lasts across restarts
+        # until the operator moves them out of this directory.
+        return sorted(self.loss_path.parent.glob(f"{self.loss_path.name}.unreadable-*"))
+
     def _read_losses(self) -> dict[str, object]:
         losses: dict[str, object] = {"outbox_hard_limit": 0, "quarantine_hard_limit": 0,
-                                     "unreadable_ledgers": 0, "recent": []}
+                                     "recent": []}
         if not self.loss_path.exists():
             return losses
         try:
             stored = json.loads(self.loss_path.read_text(encoding="utf-8"))
-            for key in ("outbox_hard_limit", "quarantine_hard_limit", "unreadable_ledgers"):
+            for key in ("outbox_hard_limit", "quarantine_hard_limit"):
                 losses[key] = int(stored.get(key, 0))
             losses["recent"] = list(stored.get("recent", []))[-LOSS_LEDGER_RECENT:]
         except (OSError, ValueError, TypeError, AttributeError) as exc:
-            # Never let a damaged ledger read as "no losses": keep it aside and count it.
-            aside = self.loss_path.with_name(f"{self.loss_path.name}.unreadable-{int(time.time())}")
+            # Never let a damaged ledger read as "no losses": keep it aside, unmodified.
+            aside = self.loss_path.with_name(f"{self.loss_path.name}.unreadable-{time.time_ns()}")
             os.replace(self.loss_path, aside)
-            losses["unreadable_ledgers"] = 1
+            self._fsync_dir(aside.parent)
             print(f"ERROR: alert loss ledger unreadable ({exc}); moved to {aside}",
                   file=sys.stderr, flush=True)
         return losses
@@ -452,6 +489,8 @@ class AlertPoster:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, self.loss_path)
+        self._fsync_dir(self.loss_path.parent)
+        self._review_seen = self._review_signature()
 
     def _merge_legacy_locked(self, legacy_path: Path | None) -> Path | None:
         if legacy_path is None or not legacy_path.exists():
@@ -524,6 +563,18 @@ class AlertPoster:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
+        AlertPoster._fsync_dir(path.parent)
+
+    @staticmethod
+    def _fsync_dir(directory: Path) -> None:
+        # Makes the rename itself durable on POSIX; Windows cannot fsync a directory.
+        if os.name != "posix":
+            return
+        fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     @staticmethod
     def _has_event_id(event: dict[str, object]) -> bool:

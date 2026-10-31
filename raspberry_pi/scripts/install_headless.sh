@@ -313,6 +313,10 @@ check() {
 unit_masked() { [[ "$(systemctl is-enabled "$1")" == masked* ]]; }
 unit_not_masked() { ! unit_masked "$1"; }
 unit_not_enabled() { ! systemctl is-enabled --quiet "$1"; }
+# Restored = same contents, owner, group and mode as the backup (sudoers and root helpers).
+same_as_backup() {
+  cmp -s "$1" "$2" && [[ "$(stat -c '%U:%G %a' "$1")" == "$(stat -c '%U:%G %a' "$2")" ]]
+}
 
 rollback() {
   local status=$?
@@ -348,7 +352,8 @@ rollback() {
   fi
 
   for dest in "${REPLACED[@]}"; do
-    check "${dest} matches its backup" cmp -s "${BACKUP_DIR}${dest#"${ROOT}"}" "${dest}"
+    check "${dest} matches its backup (contents, owner, group, mode)" \
+      same_as_backup "${BACKUP_DIR}${dest#"${ROOT}"}" "${dest}"
   done
   for dest in "${CREATED[@]}"; do
     check "${dest} removed" test ! -e "${dest}"
@@ -362,7 +367,8 @@ rollback() {
     check "${LEGACY_VOSK_UNIT} unmasked" unit_not_masked "${LEGACY_VOSK_UNIT}"
   fi
   if [[ "${VOSK_FILE_REMOVED}" -eq 1 ]]; then
-    check "${UNIT_DIR}/${LEGACY_VOSK_UNIT} restored" test -f "${UNIT_DIR}/${LEGACY_VOSK_UNIT}"
+    check "${UNIT_DIR}/${LEGACY_VOSK_UNIT} restored (contents, owner, group, mode)" \
+      same_as_backup "${BACKUP_DIR}/etc/systemd/system/${LEGACY_VOSK_UNIT}" "${UNIT_DIR}/${LEGACY_VOSK_UNIT}"
   fi
   if [[ "${VOSK_WAS_ENABLED}" -eq 1 ]]; then
     check "${LEGACY_VOSK_UNIT} enabled" systemctl is-enabled --quiet "${LEGACY_VOSK_UNIT}"

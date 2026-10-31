@@ -289,8 +289,8 @@ class KwsEventIdTest(unittest.TestCase):
                 self.assertEqual(restarted.outbox_status()["quarantine_critical_evictions"], 2)
                 ledger = json.loads((Path(temp_dir) / "alerts.losses.json").read_text(encoding="utf-8"))
                 self.assertEqual([r["keyword"] for r in ledger["recent"]], ["poss1", "crit1"])
-                # Only the operator's explicit resolution (deleting the ledger) clears it.
-                (Path(temp_dir) / "alerts.losses.json").unlink()
+                # Only the operator's explicit resolution (moving the ledger away) clears it.
+                (Path(temp_dir) / "alerts.losses.json").rename(Path(temp_dir) / "reviewed.json")
                 cleared = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
                 self.assertEqual(cleared.outbox_status()["quarantine_critical_evictions"], 0)
             finally:
@@ -401,7 +401,50 @@ class KwsEventIdTest(unittest.TestCase):
                 (Path(temp_dir) / "alerts.losses.json").write_text("{not json", encoding="utf-8")
                 poster = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
                 self.assertEqual(poster.outbox_status()["loss_ledger_unreadable"], 1)
-                self.assertEqual(len(list(Path(temp_dir).glob("alerts.losses.json.unreadable-*"))), 1)
+                asides = list(Path(temp_dir).glob("alerts.losses.json.unreadable-*"))
+                self.assertEqual(len(asides), 1)
+                self.assertEqual(asides[0].read_text(encoding="utf-8"), "{not json")  # unmodified
+                # Still a fault after more restarts, with no ledger file left in place.
+                for _ in range(2):
+                    restarted = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
+                    self.assertEqual(restarted.outbox_status()["loss_ledger_unreadable"], 1)
+                # Acknowledged by moving the evidence out of the state directory.
+                reviewed = Path(temp_dir) / "reviewed"
+                reviewed.mkdir()
+                asides[0].rename(reviewed / asides[0].name)
+                restarted = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
+                self.assertEqual(restarted.outbox_status()["loss_ledger_unreadable"], 0)
+            finally:
+                restore_modules(previous)
+
+    def test_operator_acknowledgment_is_picked_up_without_a_restart(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_kws_module()
+            try:
+                state = Path(temp_dir)
+                module.MAX_QUARANTINED_ALERTS = 1
+                module.HARD_MAX_PENDING_ALERTS = 1
+                poster = self.make_poster(module, state / "alerts.jsonl")
+                poster.session = self.StatusSession([422] * 2)
+                poster.publish("crit1", 0.9, "vosk")
+                poster.publish("crit2", 0.9, "vosk")
+                status = poster.outbox_status()
+                self.assertEqual(status["quarantined_possibly_critical"], 1)
+                self.assertEqual(status["quarantine_critical_evictions"], 1)
+                # KWS's own writes never count as an acknowledgment.
+                poster.reload_reviewed_state()
+                self.assertEqual(poster.outbox_status()["quarantine_critical_evictions"], 1)
+                (state / "reviewed").mkdir()
+                for name in ("alerts.losses.json", "alerts.rejected.jsonl"):
+                    (state / name).rename(state / "reviewed" / name)
+                poster.reload_reviewed_state()
+                status = poster.outbox_status()
+                self.assertEqual(status["quarantined_possibly_critical"], 0)
+                self.assertEqual(status["quarantine_critical_evictions"], 0)
+                # outbox_status itself notices within REVIEW_CHECK_SECONDS.
+                (state / "alerts.losses.json").write_text("{bad", encoding="utf-8")
+                poster._next_review_check = 0
+                self.assertEqual(poster.outbox_status()["loss_ledger_unreadable"], 1)
             finally:
                 restore_modules(previous)
 

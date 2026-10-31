@@ -105,6 +105,9 @@ class InstallHeadlessTest(unittest.TestCase):
         for line in rollback.replace("\\\n", " ").splitlines():
             if re.match(r"\s*(cp|rm|systemctl)\s", line):
                 self.fail(f"unrecorded restoration command: {line.strip()}")
+        # Restored files are verified on metadata too, not only contents.
+        self.assertIn("stat -c '%U:%G %a'", self.code)
+        self.assertNotRegex(rollback, r'check "[^"]*" cmp ')
 
     def test_every_restart_is_gated_by_the_restart_flag(self):
         lines = self.code.splitlines()
