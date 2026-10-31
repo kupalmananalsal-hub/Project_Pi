@@ -101,6 +101,65 @@ class DeliveryIntegrationTest(unittest.TestCase):
             with self.assertRaises(WebSocketDisconnect):
                 ws.receive_json()
 
+    def kws_poster(self, token):
+        """The real KWS AlertPoster, posting over real HTTP with its env-provided token."""
+        from test.test_kws_event_id import load_kws_module, restore_modules as restore_kws
+        old = os.environ.get("PROJECT_PI_API_TOKEN")
+        os.environ["PROJECT_PI_API_TOKEN"] = token
+        try:
+            kws, previous = load_kws_module()
+            self.addCleanup(restore_kws, previous)
+            poster = kws.AlertPoster("http://testserver/api/alerts",
+                                     Path(self.temp.name) / "outbox.jsonl")
+        finally:
+            if old is None:
+                os.environ.pop("PROJECT_PI_API_TOKEN", None)
+            else:
+                os.environ["PROJECT_PI_API_TOKEN"] = old
+        client = TestClient(self.module.app, headers=dict(poster.session.headers))
+        self.addCleanup(client.close)
+        poster.session = client
+        return poster
+
+    def stored_ids(self):
+        return [a["event_id"] for a in self.module.alert_store.list_recent()]
+
+    def test_kws_posts_with_the_shared_token_in_required_mode(self):
+        poster = self.kws_poster("integration-api-token")
+        poster.publish("help", 0.95, "vosk")
+        self.assertEqual(poster.pending, [])
+        self.assertEqual(len(self.stored_ids()), 1)
+        self.assertIsNone(poster.outbox_status()["auth_rejected_since"])
+
+    def test_kws_alerts_are_held_on_401_and_delivered_once_auth_is_fixed(self):
+        for configure in ("wrong token", "locked"):
+            with self.subTest(configure):
+                if configure == "locked":
+                    self.module.API_AUTH_MODE = ""  # backend.env missing
+                    poster = self.kws_poster("integration-api-token")
+                else:
+                    poster = self.kws_poster("a-mismatched-token-0123456789")
+                poster.publish("help", 0.95, "vosk")
+                held = [e["event_id"] for e in poster.pending]
+                self.assertEqual(len(held), 1)
+                self.assertTrue(poster.outbox_status()["auth_rejected_since"])
+                self.assertNotIn(held[0], self.stored_ids())
+                # Valid configuration restored: the same event_id arrives exactly once.
+                self.module.API_AUTH_MODE = "required"
+                poster.session.headers["Authorization"] = "Bearer integration-api-token"
+                poster.flush()
+                self.assertEqual(poster.pending, [])
+                self.assertEqual(self.stored_ids().count(held[0]), 1)
+                self.assertIsNone(poster.outbox_status()["auth_rejected_since"])
+
+    def test_locked_backend_refuses_caregiver_protocol_v2(self):
+        self.module.API_AUTH_MODE = ""
+        anonymous = TestClient(self.module.app)
+        self.addCleanup(anonymous.close)
+        with self.assertRaises(WebSocketDisconnect):
+            with anonymous.websocket_connect("/ws/alerts?protocol=2") as ws:
+                self.hello(ws, "phone-a")
+
     def test_post_persist_ack_restart_and_two_phone_replay(self):
         first = self.post("integration-critical")["event"]
         with self.client.websocket_connect("/ws/alerts?protocol=2") as ws:

@@ -409,27 +409,30 @@ class ConnectionController extends Notifier<PiConnectionState> {
     throw lastError ?? StateError('Unable to connect to Pi.');
   }
 
-  String _friendlyError(Object error) {
-    if (error is DioException && error.response?.statusCode == 401) {
-      return 'The Pi requires an API token (authentication is on). Enter it in Settings.';
-    }
-    if (error is DioException) {
-      switch (error.type) {
-        case DioExceptionType.connectionTimeout:
-        case DioExceptionType.receiveTimeout:
-        case DioExceptionType.sendTimeout:
-          return 'Connection timed out.';
-        case DioExceptionType.cancel:
-          return 'Connection cancelled.';
-        case DioExceptionType.badResponse:
-        case DioExceptionType.badCertificate:
-        case DioExceptionType.connectionError:
-        case DioExceptionType.unknown:
-          return 'Unable to connect to Raspberry Pi.';
-      }
-    }
-    return 'Unable to connect to Raspberry Pi.';
+  String _friendlyError(Object error) => piConnectionErrorMessage(error);
+}
+
+String piConnectionErrorMessage(Object error) {
+  if (error is DioException && error.response?.statusCode == 401) {
+    return 'The Pi refused the request (401). Enter its API token in Settings. If the '
+        'token is right, the Pi API is locked by its configuration: check it on the Pi.';
   }
+  if (error is DioException) {
+    switch (error.type) {
+      case DioExceptionType.connectionTimeout:
+      case DioExceptionType.receiveTimeout:
+      case DioExceptionType.sendTimeout:
+        return 'Connection timed out.';
+      case DioExceptionType.cancel:
+        return 'Connection cancelled.';
+      case DioExceptionType.badResponse:
+      case DioExceptionType.badCertificate:
+      case DioExceptionType.connectionError:
+      case DioExceptionType.unknown:
+        return 'Unable to connect to Raspberry Pi.';
+    }
+  }
+  return 'Unable to connect to Raspberry Pi.';
 }
 
 class _ResolvedTarget {

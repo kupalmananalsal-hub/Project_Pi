@@ -20,6 +20,7 @@ class FakeSession:
     def __init__(self):
         self.posts = []
         self.fail = True
+        self.headers = {}
 
     def post(self, url, json, timeout):
         del url, timeout
