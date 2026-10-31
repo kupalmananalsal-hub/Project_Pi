@@ -21,7 +21,7 @@ SSH in once, clone or pull the repo, then run:
 cd ~/Project_Pi
 sudo bash raspberry_pi/scripts/install_headless.sh            # dry run: review the report
 sudo bash raspberry_pi/scripts/install_headless.sh --apply --restart \
-  --rollback-commit="$(git rev-parse HEAD)"   # the code to restore if --apply fails
+  --rollback-commit="$(git rev-parse HEAD)"   # the code that ran before; reported, never checked out
 ```
 
 The default is a dry run that writes nothing: it reports package drift against
@@ -29,8 +29,10 @@ The default is a dry run that writes nothing: it reports package drift against
 CHANGED with a diff. `--apply` backs up each replaced file to
 `/var/lib/project-pi/install-backups/<UTC timestamp>/` first and refuses on package
 drift unless `--accept-env-drift`; services restart only with `--restart`. If any
-step fails it rolls back every file and unit change and returns the checkout to
-`--rollback-commit`. The installer never installs packages and never runs `nmcli`.
+step fails it undoes every file and unit change, checks the result and reports
+`ROLLBACK VERIFIED` or `ROLLBACK INCOMPLETE` with the failed operations; it never
+changes the git checkout (it reports `HEAD` and `--rollback-commit`). The installer
+never installs packages and never runs `nmcli`.
 When updating code, pass the commit that ran before the update instead (see
 [m1_m2_upgrade_and_rollback.md](m1_m2_upgrade_and_rollback.md), steps 0–3).
 
@@ -242,5 +244,6 @@ seeds from the previously installed unit and never overwrites.
 /var/lib/project-pi/install-backups/                 # installer backups of replaced files (root, 700)
 /var/lib/project-pi/backend/alerts.jsonl             # KWS outbox of undelivered alerts (thesis, 700 dir)
 /var/lib/project-pi/backend/alerts.rejected.jsonl    # alerts the backend rejected (4xx), kept for review
+/var/lib/project-pi/backend/alerts.losses.json       # durable count of lost possibly-critical alerts
 /var/lib/project-pi/backend/caregivers.json          # caregiver phone verifiers
 ```

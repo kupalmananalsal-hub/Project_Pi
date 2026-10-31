@@ -45,6 +45,8 @@ MAX_PENDING_ALERTS = 500
 # Hard limits: only here are certain_critical events evicted (error + health fault).
 HARD_MAX_PENDING_ALERTS = 5000
 HARD_MAX_PENDING_BYTES = 5 * 1024 * 1024
+# Lost-event summaries kept in the loss ledger (the counts there are never trimmed).
+LOSS_LEDGER_RECENT = 100
 # Permanently rejected (4xx) events kept for review. Beyond this soft limit only
 # certain_suppressed records are dropped; the hard limits above apply to the rest.
 MAX_QUARANTINED_ALERTS = 500
@@ -182,8 +184,10 @@ class AlertPoster:
         self._worker_stop = threading.Event()
         self._worker_thread: threading.Thread | None = None
         self.evictions = 0
-        self.critical_evictions = 0
-        self.quarantine_critical_evictions = 0
+        # Durable record of lost possibly-critical events: survives restarts and power cuts
+        # until an operator reviews it and deletes the file.
+        self.loss_path = queue_path.with_name(f"{queue_path.stem}.losses.json")
+        self.losses = self._read_losses()
         # Events the backend permanently rejected (4xx); kept for review, never retried.
         self.quarantine_path = queue_path.with_name(f"{queue_path.stem}.rejected.jsonl")
         self.quarantined, _ = self._read_events(self.quarantine_path)
@@ -309,14 +313,17 @@ class AlertPoster:
                 "pending": pending,
                 "pressure": pending >= MAX_PENDING_ALERTS or self.evictions > 0,
                 "evictions": self.evictions,
-                "critical_evictions": self.critical_evictions,
+                # Persisted counts: they stay non-zero until the loss ledger is cleared.
+                "critical_evictions": self.losses["outbox_hard_limit"],
                 "soft_limit": MAX_PENDING_ALERTS,
                 "hard_limit": HARD_MAX_PENDING_ALERTS,
                 "hard_limit_bytes": HARD_MAX_PENDING_BYTES,
                 "quarantined": len(self.quarantined),
                 "quarantined_possibly_critical": sum(
                     1 for e in self.quarantined if e.get("retention_tier", 2) >= 2),
-                "quarantine_critical_evictions": self.quarantine_critical_evictions,
+                "quarantine_critical_evictions": self.losses["quarantine_hard_limit"],
+                "loss_ledger_unreadable": self.losses["unreadable_ledgers"],
+                "loss_ledger_path": str(self.loss_path),
                 "quarantine_path": str(self.quarantine_path),
             }
 
@@ -345,7 +352,7 @@ class AlertPoster:
             dropped = self.quarantined.pop(index)
             total -= sizes.pop(index)
             if dropped_tier >= 2:
-                self.quarantine_critical_evictions += 1
+                self._record_loss_locked("quarantine_hard_limit", dropped)
             trace_alert("outbox", dropped.get("event_id"), "quarantine_evicted",
                         retention_tier=RETENTION_TIER_NAMES.get(dropped_tier, "unknown"))
             print(f"{'ERROR' if dropped_tier >= 2 else 'WARNING'}: alert quarantine full; "
@@ -393,7 +400,7 @@ class AlertPoster:
         tier = event["retention_tier"]
         self.evictions += 1
         if tier == 3:
-            self.critical_evictions += 1
+            self._record_loss_locked("outbox_hard_limit", event)
         trace_alert("outbox", event.get("event_id"), "evicted", reason=reason,
                     retention_tier=RETENTION_TIER_NAMES[tier])
         print(
@@ -404,6 +411,47 @@ class AlertPoster:
             file=sys.stderr,
             flush=True,
         )
+
+    def _read_losses(self) -> dict[str, object]:
+        losses: dict[str, object] = {"outbox_hard_limit": 0, "quarantine_hard_limit": 0,
+                                     "unreadable_ledgers": 0, "recent": []}
+        if not self.loss_path.exists():
+            return losses
+        try:
+            stored = json.loads(self.loss_path.read_text(encoding="utf-8"))
+            for key in ("outbox_hard_limit", "quarantine_hard_limit", "unreadable_ledgers"):
+                losses[key] = int(stored.get(key, 0))
+            losses["recent"] = list(stored.get("recent", []))[-LOSS_LEDGER_RECENT:]
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            # Never let a damaged ledger read as "no losses": keep it aside and count it.
+            aside = self.loss_path.with_name(f"{self.loss_path.name}.unreadable-{int(time.time())}")
+            os.replace(self.loss_path, aside)
+            losses["unreadable_ledgers"] = 1
+            print(f"ERROR: alert loss ledger unreadable ({exc}); moved to {aside}",
+                  file=sys.stderr, flush=True)
+        return losses
+
+    def _record_loss_locked(self, kind: str, event: dict[str, object]) -> None:
+        self.losses[kind] = int(self.losses[kind]) + 1
+        recent = list(self.losses["recent"])
+        recent.append({
+            "kind": kind,
+            "event_id": event.get("event_id"),
+            "keyword": event.get("keyword"),
+            "confidence": event.get("confidence"),
+            "source": event.get("source"),
+            "retention_tier": RETENTION_TIER_NAMES.get(event.get("retention_tier"), "unknown"),
+            "timestamp": event.get("timestamp"),
+            "lost_at": datetime.now(timezone.utc).isoformat(),
+        })
+        self.losses["recent"] = recent[-LOSS_LEDGER_RECENT:]
+        self.loss_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.loss_path.with_name(f"{self.loss_path.name}.tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
+            json.dump(self.losses, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, self.loss_path)
 
     def _merge_legacy_locked(self, legacy_path: Path | None) -> Path | None:
         if legacy_path is None or not legacy_path.exists():

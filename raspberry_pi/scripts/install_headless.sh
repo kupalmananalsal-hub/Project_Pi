@@ -12,9 +12,10 @@
 #                         manage the NetworkManager hotspot profile
 #   --accept-env-drift    with --apply: proceed although the venvs differ from
 #                         raspberry_pi/requirements/*.lock.txt
-#   --rollback-commit=SHA required with --apply: the application commit to restore if
-#                         --apply fails (the ROLLBACK_COMMIT recorded before the
-#                         upgrade, or the current HEAD for a reinstall)
+#   --rollback-commit=SHA required with --apply: the application commit that ran before
+#                         this upgrade (ROLLBACK_COMMIT, or HEAD for a reinstall). If
+#                         --apply fails it is reported next to the current HEAD; the
+#                         installer never changes the git checkout itself.
 #
 # It never installs or upgrades packages and never runs nmcli. Every replaced file is
 # backed up to /var/lib/project-pi/install-backups/<UTC timestamp>/ first, and a failure
@@ -86,10 +87,10 @@ if [[ -n "${ROLLBACK_COMMIT}" ]]; then
     echo "--rollback-commit=${ROLLBACK_COMMIT} is not a commit in ${REPO}." >&2
     exit 2
   fi
-  echo "CODE       HEAD ${CODE_HEAD_BEFORE}; restored to ${ROLLBACK_SHA} if --apply fails"
+  echo "CODE       HEAD ${CODE_HEAD_BEFORE}; rollback commit ${ROLLBACK_SHA} (reported, never checked out)"
 elif [[ "${MODE}" == "apply" ]]; then
-  echo "--apply needs --rollback-commit=SHA: the commit to restore if it fails (the" \
-    "ROLLBACK_COMMIT recorded before the upgrade, or HEAD for a reinstall)." >&2
+  echo "--apply needs --rollback-commit=SHA: the commit that ran before this upgrade (the" \
+    "ROLLBACK_COMMIT recorded in step 0, or HEAD for a reinstall), reported if --apply fails." >&2
   exit 2
 else
   echo "CODE       HEAD ${CODE_HEAD_BEFORE}; --apply will need --rollback-commit=SHA"
@@ -292,47 +293,108 @@ backup() {
   cp -a "$1" "${BACKUP_DIR}${1#"${ROOT}"}"
 }
 
+ROLLBACK_FAILURES=()
+# One restoration step: a failure is recorded, never hidden, and the others still run.
+step() {
+  local description="$1"
+  shift
+  if ! "$@"; then
+    ROLLBACK_FAILURES+=("FAILED: ${description}")
+  fi
+}
+# One check of the end state: recovery counts only if the result is verified.
+check() {
+  local description="$1"
+  shift
+  if ! "$@"; then
+    ROLLBACK_FAILURES+=("NOT VERIFIED: ${description}")
+  fi
+}
+unit_masked() { [[ "$(systemctl is-enabled "$1")" == masked* ]]; }
+unit_not_masked() { ! unit_masked "$1"; }
+unit_not_enabled() { ! systemctl is-enabled --quiet "$1"; }
+
 rollback() {
   local status=$?
   trap - ERR
   set +e
-  echo "ERROR: --apply failed (exit ${status}); rolling back every change it made." >&2
+  echo "ERROR: --apply failed (exit ${status}); undoing the installer's own changes." >&2
   for unit in "${NEWLY_ENABLED[@]}"; do
-    systemctl disable "${unit}"
+    step "disable ${unit}" systemctl disable "${unit}"
   done
   for dest in "${REPLACED[@]}"; do
-    cp -a "${BACKUP_DIR}${dest#"${ROOT}"}" "${dest}"
+    step "restore ${dest}" cp -a "${BACKUP_DIR}${dest#"${ROOT}"}" "${dest}"
   done
   for dest in "${CREATED[@]}"; do
-    rm -f "${dest}"
+    step "remove ${dest}" rm -f "${dest}"
   done
   if [[ "${VOSK_MASKED}" -eq 1 ]]; then
-    systemctl unmask "${LEGACY_VOSK_UNIT}"
+    step "unmask ${LEGACY_VOSK_UNIT}" systemctl unmask "${LEGACY_VOSK_UNIT}"
   fi
   if [[ "${VOSK_FILE_REMOVED}" -eq 1 ]]; then
-    cp -a "${BACKUP_DIR}/etc/systemd/system/${LEGACY_VOSK_UNIT}" "${UNIT_DIR}/${LEGACY_VOSK_UNIT}"
+    step "restore ${UNIT_DIR}/${LEGACY_VOSK_UNIT}" \
+      cp -a "${BACKUP_DIR}/etc/systemd/system/${LEGACY_VOSK_UNIT}" "${UNIT_DIR}/${LEGACY_VOSK_UNIT}"
   fi
-  # Previous application code: checked out detached, never by discarding local changes.
-  if [[ "${CODE_HEAD_BEFORE}" != "${ROLLBACK_SHA}" ]]; then
-    if repo_git checkout --quiet --detach "${ROLLBACK_SHA}"; then
-      echo "Restored application code to ${ROLLBACK_SHA} (detached)." >&2
-    else
-      echo "ERROR: application code was NOT restored. As ${REPO_OWNER}, run:" \
-        "git -C ${REPO} checkout --detach ${ROLLBACK_SHA}" >&2
-    fi
-  fi
-  systemctl daemon-reload
+  step "systemctl daemon-reload" systemctl daemon-reload
   if [[ "${VOSK_WAS_ENABLED}" -eq 1 ]]; then
-    systemctl enable "${LEGACY_VOSK_UNIT}"
+    step "re-enable ${LEGACY_VOSK_UNIT}" systemctl enable "${LEGACY_VOSK_UNIT}"
   fi
   if [[ "${VOSK_WAS_ACTIVE}" -eq 1 ]]; then
-    systemctl start "${LEGACY_VOSK_UNIT}"
+    step "start ${LEGACY_VOSK_UNIT}" systemctl start "${LEGACY_VOSK_UNIT}"
   fi
   if [[ "${RESTART_ATTEMPTED}" -eq 1 ]]; then
-    systemctl restart thermal-backend.service kws-alert.service
+    step "restart thermal-backend.service kws-alert.service" \
+      systemctl restart thermal-backend.service kws-alert.service
   fi
-  echo "Rolled back. Replaced files were restored from ${BACKUP_DIR}; the backup is kept." >&2
-  exit 1
+
+  for dest in "${REPLACED[@]}"; do
+    check "${dest} matches its backup" cmp -s "${BACKUP_DIR}${dest#"${ROOT}"}" "${dest}"
+  done
+  for dest in "${CREATED[@]}"; do
+    check "${dest} removed" test ! -e "${dest}"
+  done
+  for unit in "${NEWLY_ENABLED[@]}"; do
+    check "${unit} not enabled" unit_not_enabled "${unit}"
+  done
+  if [[ "${VOSK_WAS_MASKED}" -eq 1 ]]; then
+    check "${LEGACY_VOSK_UNIT} still masked" unit_masked "${LEGACY_VOSK_UNIT}"
+  elif [[ "${VOSK_MASKED}" -eq 1 ]]; then
+    check "${LEGACY_VOSK_UNIT} unmasked" unit_not_masked "${LEGACY_VOSK_UNIT}"
+  fi
+  if [[ "${VOSK_FILE_REMOVED}" -eq 1 ]]; then
+    check "${UNIT_DIR}/${LEGACY_VOSK_UNIT} restored" test -f "${UNIT_DIR}/${LEGACY_VOSK_UNIT}"
+  fi
+  if [[ "${VOSK_WAS_ENABLED}" -eq 1 ]]; then
+    check "${LEGACY_VOSK_UNIT} enabled" systemctl is-enabled --quiet "${LEGACY_VOSK_UNIT}"
+  fi
+  if [[ "${VOSK_WAS_ACTIVE}" -eq 1 ]]; then
+    check "${LEGACY_VOSK_UNIT} active" systemctl is-active --quiet "${LEGACY_VOSK_UNIT}"
+  fi
+  if [[ "${RESTART_ATTEMPTED}" -eq 1 ]]; then
+    check "thermal-backend.service active" systemctl is-active --quiet thermal-backend.service
+    check "kws-alert.service active" systemctl is-active --quiet kws-alert.service
+  fi
+
+  # The installer never changes the checkout: the code is reported, not rolled back.
+  local head_now
+  head_now="$(repo_git rev-parse HEAD)"
+  echo "CODE: the installer did not change ${REPO}; HEAD is ${head_now}," \
+    "recorded rollback commit ${ROLLBACK_SHA}." >&2
+  if [[ "${head_now}" != "${ROLLBACK_SHA}" ]]; then
+    echo "CODE MISMATCH: installer-managed files are back to their pre-install state, but the" \
+      "application code is still ${head_now}. Restoring ${ROLLBACK_SHA} is a separate," \
+      "authorized step (docs/m1_m2_upgrade_and_rollback.md, Rollback)." >&2
+  fi
+  if [[ "${#ROLLBACK_FAILURES[@]}" -eq 0 ]]; then
+    echo "ROLLBACK VERIFIED: every installer change was undone and its end state checked." \
+      "Backup kept in ${BACKUP_DIR}." >&2
+    exit 1
+  fi
+  echo "ROLLBACK INCOMPLETE: the previous system is NOT restored. Operations that failed" \
+    "or could not be verified:" >&2
+  printf '  - %s\n' "${ROLLBACK_FAILURES[@]}" >&2
+  echo "Backup kept in ${BACKUP_DIR}; restore the listed items by hand before restarting." >&2
+  exit 3
 }
 trap rollback ERR
 

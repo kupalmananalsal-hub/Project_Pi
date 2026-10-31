@@ -19,7 +19,11 @@ LOCKS = PROJECT_ROOT / "raspberry_pi" / "requirements"
 SYSTEMCTL = r'''#!/usr/bin/env bash
 # Mock systemctl: unit state lives in $STUB_STATE/{active,enabled,masked}.
 echo "$*" >> "$STUB_STATE/log"
-if [[ -n "${STUB_FAIL:-}" && "$*" == ${STUB_FAIL}* ]]; then exit 1; fi
+IFS='|' read -ra fails <<< "${STUB_FAIL:-}"
+for f in "${fails[@]}"; do [[ -n "$f" && "$*" == ${f}* ]] && exit 1; done
+# STUB_NOOP: report success but change nothing (a unit that "starts" and dies at once).
+IFS='|' read -ra noops <<< "${STUB_NOOP:-}"
+for n in "${noops[@]}"; do [[ -n "$n" && "$*" == ${n}* ]] && exit 0; done
 has() { grep -qxF "$2" "$STUB_STATE/$1" 2>/dev/null; }
 add() { has "$1" "$2" || echo "$2" >> "$STUB_STATE/$1"; }
 del() { touch "$STUB_STATE/$1"; grep -vxF "$2" "$STUB_STATE/$1" > "$STUB_STATE/$1.tmp" || true; mv "$STUB_STATE/$1.tmp" "$STUB_STATE/$1"; }
@@ -123,7 +127,7 @@ class InstallerRuntimeTest(unittest.TestCase):
         log = self.state / "log"
         return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
 
-    def run_installer(self, *args, fail=None, rollback_commit="before"):
+    def run_installer(self, *args, fail=None, noop=None, rollback_commit="before"):
         if "--apply" in args and rollback_commit:
             sha = self.before_sha if rollback_commit == "before" else rollback_commit
             args = (*args, f"--rollback-commit={sha}")
@@ -133,8 +137,11 @@ class InstallerRuntimeTest(unittest.TestCase):
                    PROJECT_PI_REPO=self.repo.as_posix(),
                    STUB_STATE=self.state.as_posix())
         env.pop("STUB_FAIL", None)
+        env.pop("STUB_NOOP", None)
         if fail:
             env["STUB_FAIL"] = fail
+        if noop:
+            env["STUB_NOOP"] = noop
         if os.name == "nt":  # Git Bash resolves stubs only via its own PATH syntax
             env["PATH"] = f"{self.stubs.as_posix()}:/usr/bin:/bin:{os.environ.get('PATH', '')}"
         return subprocess.run([shutil.which("bash"), INSTALLER.as_posix(), *args], env=env,
@@ -220,9 +227,19 @@ class InstallerRuntimeTest(unittest.TestCase):
         self.assertIn('Environment="LGPIO_CHIP=11"', dropin)
         self.assertIn("Environment=MLX90640_VARIANT=unverified", dropin)
 
+    def assert_code_untouched_and_reported(self, result):
+        # The installer never changes the checkout; it reports both commits instead.
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.after_sha)
+        self.assertEqual(self.git("symbolic-ref", "--short", "HEAD"),
+                         self.git("rev-parse", "--abbrev-ref", "HEAD"))  # still on its branch
+        self.assertIn(f"HEAD is {self.after_sha}", result.stderr)
+        self.assertIn(f"recorded rollback commit {self.before_sha}", result.stderr)
+        self.assertIn("CODE MISMATCH", result.stderr)
+
     def assert_rolled_back(self, result):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("Rolled back", result.stderr)
+        self.assertIn("ROLLBACK VERIFIED", result.stderr)
+        self.assertNotIn("ROLLBACK INCOMPLETE", result.stderr)
         self.assertIn("LGPIO_CHIP=11", (self.root / "etc/systemd/system/thermal-backend.service"
                                         ).read_text(encoding="utf-8"))
         for created in ("etc/systemd/system/kws-alert.service", "usr/local/sbin/project-pi-boot",
@@ -234,10 +251,7 @@ class InstallerRuntimeTest(unittest.TestCase):
         self.assertIn("kws-alert-vosk.service", self.state_of("enabled"))
         self.assertIn("kws-alert-vosk.service", self.state_of("active"))
         self.assertIn("# mine", (self.root / "etc/project-pi/backend.env").read_text(encoding="utf-8"))
-        # The previous application code is back, detached (a pull cannot move it forward).
-        self.assertEqual(self.git("rev-parse", "HEAD"), self.before_sha)
-        self.assertEqual(subprocess.run(["git", "-C", str(self.repo), "symbolic-ref", "-q", "HEAD"],
-                                        capture_output=True).returncode, 1)
+        self.assert_code_untouched_and_reported(result)
 
     def test_apply_requires_a_valid_rollback_commit_before_any_write(self):
         result = self.run_installer("--apply", rollback_commit=None)
@@ -255,28 +269,54 @@ class InstallerRuntimeTest(unittest.TestCase):
         self.set_state("masked", "kws-alert-vosk.service")
         result = self.run_installer("--apply", fail="enable project-pi-boot")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("ROLLBACK VERIFIED", result.stderr)
         self.assertIn("kws-alert-vosk.service", self.state_of("masked"))
         self.assertFalse(any(c.split()[0] in {"mask", "unmask"} for c in self.calls()))
 
-    def test_rollback_never_discards_local_code_changes(self):
+    def test_rollback_never_touches_the_checkout_or_local_edits(self):
         self.legacy_pi()
         (self.repo / "VERSION").write_text("edited on the Pi\n", encoding="utf-8")
         result = self.run_installer("--apply", fail="enable project-pi-boot")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("application code was NOT restored", result.stderr)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual((self.repo / "VERSION").read_text(encoding="utf-8"), "edited on the Pi\n")
-        self.assertEqual(self.git("rev-parse", "HEAD"), self.after_sha)
+        self.assert_code_untouched_and_reported(result)
+
+    def test_failed_restoration_is_reported_as_incomplete(self):
+        self.legacy_pi()
+        result = self.run_installer("--apply", fail="enable project-pi-boot|unmask")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("ROLLBACK INCOMPLETE", result.stderr)
+        self.assertNotIn("ROLLBACK VERIFIED", result.stderr)
+        self.assertIn("FAILED: unmask kws-alert-vosk.service", result.stderr)
+        self.assertIn("NOT VERIFIED: kws-alert-vosk.service unmasked", result.stderr)
+        # The steps that could be undone still were.
+        self.assertIn("LGPIO_CHIP=11", (self.root / "etc/systemd/system/thermal-backend.service"
+                                        ).read_text(encoding="utf-8"))
+
+    def test_rollback_checks_the_end_state_not_just_exit_codes(self):
+        self.legacy_pi()
+        # A start that exits 0 but leaves the legacy service down must not count as restored.
+        result = self.run_installer("--apply", fail="enable project-pi-boot",
+                                    noop="start kws-alert-vosk")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertNotIn("FAILED: start", result.stderr)
+        self.assertIn("NOT VERIFIED: kws-alert-vosk.service active", result.stderr)
+        self.assertIn("ROLLBACK INCOMPLETE", result.stderr)
 
     def test_failure_after_mask_rolls_back_files_and_legacy_unit(self):
         self.legacy_pi()
         self.assert_rolled_back(self.run_installer("--apply", fail="enable project-pi-boot"))
         self.assertNotIn("kws-alert.service", self.state_of("enabled"))
 
-    def test_failed_restart_rolls_back_and_restarts_old_configuration(self):
+    def test_failed_restart_is_retried_once_and_never_reported_as_restored(self):
         self.legacy_pi()
+        # The restart fails again during rollback: kws-alert never comes up.
         result = self.run_installer("--apply", "--restart", fail="restart thermal-backend")
-        self.assert_rolled_back(result)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertEqual(sum(c.startswith("restart thermal-backend") for c in self.calls()), 2)
+        self.assertIn("FAILED: restart thermal-backend.service kws-alert.service", result.stderr)
+        self.assertIn("NOT VERIFIED: kws-alert.service active", result.stderr)
+        self.assertIn("ROLLBACK INCOMPLETE", result.stderr)
 
     def test_restart_only_with_flag(self):
         result = self.run_installer("--apply", "--restart")

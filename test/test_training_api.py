@@ -977,6 +977,10 @@ class TrainingApiTest(unittest.TestCase):
                           "critical_evictions": 0}
                 module.read_shared_audio_status = lambda max_age_seconds=1.5: {"outbox": outbox}
                 self.assertEqual(module.health_monitor.failing_components(), {})
+                outbox["loss_ledger_unreadable"] = 1
+                self.assertIn("alert outbox overflow",
+                              module.health_monitor.failing_components())
+                outbox["loss_ledger_unreadable"] = 0
                 outbox["critical_evictions"] = 2
                 self.assertIn("alert outbox overflow",
                               module.health_monitor.failing_components())

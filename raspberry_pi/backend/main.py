@@ -1756,10 +1756,15 @@ class HealthMonitor:
             failing["keyword detection offline"] = "kws-alert.service is not publishing audio"
         else:
             outbox = audio_status.get("outbox") or {}
-            if outbox.get("critical_evictions"):
+            # Counts come from KWS's durable loss ledger: they survive restarts until an
+            # operator reviews and deletes it.
+            if outbox.get("critical_evictions") or outbox.get("loss_ledger_unreadable"):
                 failing["alert outbox overflow"] = (
-                    f"{outbox['critical_evictions']} undelivered certain_critical alert(s) "
-                    "evicted at the KWS outbox hard limit"
+                    f"{outbox.get('critical_evictions', 0)} undelivered certain_critical "
+                    "alert(s) evicted at the KWS outbox hard limit"
+                    + (", loss ledger was unreadable" if outbox.get("loss_ledger_unreadable")
+                       else "")
+                    + f"; review {outbox.get('loss_ledger_path')}"
                 )
             # Stays faulted until an operator reviews and clears the quarantine file.
             if outbox.get("quarantined_possibly_critical") or outbox.get(

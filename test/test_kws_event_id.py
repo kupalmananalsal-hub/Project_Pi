@@ -280,6 +280,19 @@ class KwsEventIdTest(unittest.TestCase):
                 poster.publish("crit3", 0.9, "vosk")
                 self.assertEqual([e["keyword"] for e in poster.quarantined], ["crit2", "crit3"])
                 self.assertEqual(poster.outbox_status()["quarantine_critical_evictions"], 2)
+
+                # The loss indicator survives a KWS restart (and power cut: fsynced file),
+                # even when the quarantine no longer holds any trace of the lost events.
+                (Path(temp_dir) / "alerts.rejected.jsonl").unlink()
+                restarted = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
+                self.assertEqual(restarted.quarantined, [])
+                self.assertEqual(restarted.outbox_status()["quarantine_critical_evictions"], 2)
+                ledger = json.loads((Path(temp_dir) / "alerts.losses.json").read_text(encoding="utf-8"))
+                self.assertEqual([r["keyword"] for r in ledger["recent"]], ["poss1", "crit1"])
+                # Only the operator's explicit resolution (deleting the ledger) clears it.
+                (Path(temp_dir) / "alerts.losses.json").unlink()
+                cleared = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
+                self.assertEqual(cleared.outbox_status()["quarantine_critical_evictions"], 0)
             finally:
                 restore_modules(previous)
 
@@ -376,6 +389,19 @@ class KwsEventIdTest(unittest.TestCase):
                     poster.publish(f"crit{index}", 0.95, "vosk")
                 self.assertEqual([e["keyword"] for e in poster.pending], ["crit2", "crit3", "crit4"])
                 self.assertEqual(poster.outbox_status()["critical_evictions"], 2)
+                restarted = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
+                self.assertEqual(restarted.outbox_status()["critical_evictions"], 2)
+            finally:
+                restore_modules(previous)
+
+    def test_unreadable_loss_ledger_is_kept_aside_and_still_reported(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module, previous = load_kws_module()
+            try:
+                (Path(temp_dir) / "alerts.losses.json").write_text("{not json", encoding="utf-8")
+                poster = self.make_poster(module, Path(temp_dir) / "alerts.jsonl")
+                self.assertEqual(poster.outbox_status()["loss_ledger_unreadable"], 1)
+                self.assertEqual(len(list(Path(temp_dir).glob("alerts.losses.json.unreadable-*"))), 1)
             finally:
                 restore_modules(previous)
 

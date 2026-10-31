@@ -89,6 +89,23 @@ class InstallHeadlessTest(unittest.TestCase):
         self.assertIn("thesis-camera.service", self.code)
         self.assertNotRegex(self.code, r"systemctl\s+(disable|stop|mask)\s+thesis-camera")
 
+    def test_installer_never_changes_the_git_checkout(self):
+        # Code rollback is a separate, authorized step; the installer only reads git.
+        git_calls = re.findall(r"repo_git\s+(\S+)|\bgit\s+(?:-C\s+\S+\s+)?(\S+)", self.code)
+        subcommands = {a or b for a, b in git_calls}
+        self.assertTrue(subcommands)
+        self.assertLessEqual(subcommands, {"rev-parse", '"$@"'}, subcommands)
+
+    def test_rollback_reports_verified_or_incomplete(self):
+        rollback = self.code[self.code.index("rollback() {"):self.code.index("trap rollback ERR")]
+        self.assertIn("ROLLBACK VERIFIED", rollback)
+        self.assertIn("ROLLBACK INCOMPLETE", rollback)
+        self.assertNotIn("Rolled back", rollback)
+        # Every restoration command goes through step(), so no failure is silent.
+        for line in rollback.replace("\\\n", " ").splitlines():
+            if re.match(r"\s*(cp|rm|systemctl)\s", line):
+                self.fail(f"unrecorded restoration command: {line.strip()}")
+
     def test_every_restart_is_gated_by_the_restart_flag(self):
         lines = self.code.splitlines()
         restarts = [i for i, line in enumerate(lines) if re.match(r"\s*systemctl restart", line)]

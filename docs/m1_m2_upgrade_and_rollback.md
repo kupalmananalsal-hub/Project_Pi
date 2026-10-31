@@ -34,7 +34,7 @@ detector model `thermal_human_detector.tflite` with its metadata threshold (0.05
 | KWS outbox | `/tmp/project_pi_alerts.jsonl` (tmpfs), truncated by log cleanup | `/var/lib/project-pi/backend/alerts.jsonl`, fsynced; the legacy file is merged in on first start and renamed `*.migrated`; bounded by retention tier (below) |
 | Thermal | Hard-coded 4 Hz; installed unit differs from the repo | Generic unit: detector model + metadata, no threshold override, no rate. Rate, variant and `LGPIO_CHIP` live in the local drop-in `thermal-backend.service.d/10-local.conf`, created once from the installed unit |
 | Caregiver credentials | `PROJECT_PI_CAREGIVER_CREDENTIALS` unset | Set in `backend.env` to `/var/lib/project-pi/backend/caregivers.json` |
-| Backend-rejected alerts | HTTP 4xx (except 401/408/429) silently dropped as "delivered" | Moved, fsynced, to `alerts.rejected.jsonl` (kept for review, max 500, never retried, never blocking later alerts); a possibly-critical rejection raises a health fault until reviewed |
+| Backend-rejected alerts | HTTP 4xx (except 401/408/429) silently dropped as "delivered" | Moved, fsynced, to `alerts.rejected.jsonl` (kept for review, never retried, never blocking later alerts; possibly-critical records dropped only at the hard limits, and every such loss counted in the durable `alerts.losses.json`); a possibly-critical rejection or any recorded loss raises a health fault until reviewed |
 | Health | Silent | One `system_fault` event (never critical/siren) per outage of KWS, thermal, a `certain_critical` outbox eviction, or a possibly-critical backend rejection |
 
 Unchanged and untouched by upgrade and rollback: `raspberry_pi/backend/alerts.db`
@@ -85,10 +85,30 @@ or `possible_critical` rejection is logged as an error and raises the health fau
 "alert rejected by backend", which stays raised (also across KWS restarts) until
 the file is reviewed. Above 500 records only `certain_suppressed` ones are
 dropped; possibly-critical rejections are dropped only at the outbox hard limits
-(5,000 records or 5 MB), oldest first, each logged as an error and counted in the
-same health fault. To review: read
-the file; to re-send after fixing the cause, stop `kws-alert`, move the lines back
-into `alerts.jsonl`, delete `alerts.rejected.jsonl`, start `kws-alert`.
+(5,000 records or 5 MB), oldest first, each logged as an error.
+
+### Durable loss ledger
+
+Every possibly-critical event that is lost (a `certain_critical` outbox eviction at
+the hard limit, or a possibly-critical quarantine eviction) is counted, with a
+summary of the event, in `/var/lib/project-pi/backend/alerts.losses.json`, written
+and fsynced at the moment of loss. The counts survive KWS restarts and power cuts
+and keep the health fault raised until an operator resolves them; the file keeps
+the last 100 summaries but its counts are never trimmed. An unreadable ledger is
+moved aside (`*.unreadable-<time>`) and itself raises the fault.
+
+### Reviewing rejected and lost alerts (operator only)
+
+Nothing is ever re-sent automatically. As `thesis`:
+
+1. Read `alerts.rejected.jsonl` and `alerts.losses.json` and record what happened.
+2. Archive both (`cp -a` to the evidence folder); they are the only trace of these
+   events.
+3. Re-sending a rejected event is a per-event decision, made only after fixing
+   the cause: stop `kws-alert`, append the chosen lines to `alerts.jsonl`, start
+   `kws-alert`. Never bulk-copy the file back.
+4. Clear the faults by deleting the reviewed files; KWS recreates them on the next
+   rejection or loss.
 
 ## Compatibility rules that set the order
 
@@ -200,9 +220,10 @@ sudo bash raspberry_pi/scripts/install_headless.sh --apply \
 sudo systemctl restart thermal-backend.service kws-alert.service      # or add --restart above
 ```
 
-`--rollback-commit` is required with `--apply`: it is the application commit
-restored if `--apply` fails (the one recorded in step 0; for a reinstall without a
-code change, pass the current `HEAD`).
+`--rollback-commit` is required with `--apply`: the application commit that ran
+before this upgrade (the one recorded in step 0; for a reinstall without a code
+change, pass the current `HEAD`). The installer only reads git: if `--apply` fails
+it reports this commit next to the current `HEAD`, and never changes the checkout.
 
 `--apply` refuses to run on package drift unless `--accept-env-drift` is given
 after review. It backs up every replaced file to
@@ -215,10 +236,20 @@ If any step of `--apply` fails (including the stop, the mask, enabling units or
 `--restart`), it rolls back: replaced files are restored from the backup, files it
 created are removed, units it newly enabled are disabled, the legacy unit's file,
 mask, enabled and active state are restored (a mask that existed before, e.g. from
-an earlier install, is left in place), and the checkout is returned to
-`--rollback-commit` (detached, as the repo owner; if local edits would be
-overwritten, git refuses, nothing is discarded, and the installer prints the
-command to run). With `--restart` the old configuration is then restarted. The backup is kept. It also warns, without changing
+an earlier install, is left in place), and with `--restart` the old configuration
+is restarted. Each step that fails is recorded, the rest still run, and the end
+state is then checked (files equal their backups, created files gone, unit
+enable/mask/active states, services active after a restart). The outcome is one of:
+
+- `ROLLBACK VERIFIED` (exit 1): every installer change was undone and checked.
+- `ROLLBACK INCOMPLETE` (exit 3): the previous system is **not** restored; the
+  exact failed or unverified operations are listed. Fix them by hand from the
+  backup before restarting anything.
+
+Either way the installer prints `CODE:` with the current `HEAD` and the recorded
+rollback commit, and `CODE MISMATCH` when they differ: the installer-managed files
+are back, but the application code is still the new one. Restoring the code is a
+separate, explicitly authorized step (Rollback, below). The backup is kept. It also warns, without changing
 anything, if `hotspot.env` or `backend.env` is not root-owned `600` (the boot
 script refuses to source a `hotspot.env` that is not root-owned or is
 group/world-writable).
@@ -320,7 +351,10 @@ The pull also needs the tracking `main` from step 2.
 ## Rollback
 
 Restores the previous code and system configuration; preserves SQLite data,
-recordings, models and datasets (none are modified by the upgrade).
+recordings, models and datasets (none are modified by the upgrade). This is a
+separate, explicitly authorized operation; the installer never performs it. After
+an `--apply` failure, first make sure it reported `ROLLBACK VERIFIED` (or fix the
+listed items), then decide whether to roll back the code as well.
 
 ```bash
 cd ~/Project_Pi
@@ -347,6 +381,11 @@ sudo systemctl restart thermal-backend.service kws-alert.service
 - `thermal-backend.service.d/10-local.conf` holds the same values the old unit had
   (plus a rate and variant the old code ignores), so it can stay.
 - Queued events carry a `retention_tier` field that the old backend ignores.
+- Only the outbox (`alerts.jsonl`) is carried back to the old path.
+  `alerts.rejected.jsonl` and `alerts.losses.json` stay untouched in
+  `/var/lib/project-pi/backend/`; the old KWS does not read them. Never append them
+  to the old outbox: review and archive them as in "Reviewing rejected and lost
+  alerts" before deciding to re-send anything.
 - Leave `/etc/project-pi/backend.env`, `/var/lib/project-pi/backend/` and the
   `/usr/local/sbin/project-pi-*` helpers in place; the old units do not use them.
   Remove them only once rollback is confirmed final.
