@@ -89,6 +89,10 @@ def wav_bytes(
 
 
 SERVICE_COMMANDS = {"sudo", "systemctl", "reboot", "shutdown", "poweroff"}
+# A shell can build any command at run time (cmd=systemctl; "$cmd" ...), so no shell
+# interpreter may be started at all, wrapped or not.
+SHELL_INTERPRETERS = {"sh", "bash", "dash", "ash", "zsh", "ksh", "mksh", "csh", "tcsh",
+                      "fish", "busybox", "pwsh", "powershell", "cmd"}
 
 
 def refuse_service_command(args, shell=False):
@@ -101,7 +105,11 @@ def refuse_service_command(args, shell=False):
             parts = shlex.split(word)
         except ValueError:
             parts = word.split()
-        if any(Path(part).name in SERVICE_COMMANDS for part in parts):
+        names = {part.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+                 for part in [word, *parts]}
+        if names & SHELL_INTERPRETERS:
+            raise AssertionError(f"test tried to start a shell interpreter: {args}")
+        if names & SERVICE_COMMANDS:
             raise AssertionError(f"test tried to run a real service command: {args}")
 
 
@@ -993,13 +1001,28 @@ class TrainingApiTest(unittest.TestCase):
                 for command in (["sudo", "-n", "systemctl", "restart", "kws-alert.service"],
                                 ["/usr/bin/systemctl", "restart", "thermal-backend.service"],
                                 ["env", "sudo", "reboot"],
-                                ["bash", "-c", "systemctl restart kws-alert.service"],
                                 ["/sbin/shutdown", "-h", "now"]):
                     for entry in ("run", "call", "check_call", "check_output", "Popen"):
                         with self.assertRaisesRegex(AssertionError, "real service command"):
                             getattr(module.subprocess, entry)(command)
                     with self.assertRaisesRegex(AssertionError, "real service command"):
                         asyncio.run(module.asyncio.create_subprocess_exec(*command))
+                # A shell can assemble the command at run time, so no shell starts at all:
+                # the marker proves the guard refused before any process ran.
+                marker = Path(temp_dir) / "shell-ran"
+                expanded = f'touch "{marker.as_posix()}"; cmd=systemctl; "$cmd" restart kws-alert.service'
+                for command in (["bash", "-c", expanded],
+                                ["bash", "-c", "systemctl restart kws-alert.service"],
+                                ["env", "bash", "-c", expanded],
+                                ["/bin/sh", "-c", expanded],
+                                ["dash", "-c", expanded],
+                                [r"C:\Program Files\Git\bin\bash.exe", "-c", expanded]):
+                    for entry in ("run", "call", "check_call", "check_output", "Popen"):
+                        with self.assertRaisesRegex(AssertionError, "shell interpreter"):
+                            getattr(module.subprocess, entry)(command)
+                    with self.assertRaisesRegex(AssertionError, "shell interpreter"):
+                        asyncio.run(module.asyncio.create_subprocess_exec(*command))
+                self.assertFalse(marker.exists())
                 # Shell execution fails closed, whatever the command.
                 for command, kwargs in (("systemctl restart kws-alert.service", {"shell": True}),
                                         ("echo harmless", {"shell": True}),
