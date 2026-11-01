@@ -61,6 +61,7 @@ import math
 import os
 import queue
 import random
+import re
 import shlex
 import socket
 import stat
@@ -74,7 +75,7 @@ import types
 import wave
 from array import array
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 KWS_DIR = Path(__file__).resolve().parent
 SAMPLE_RATE = 16000
@@ -456,22 +457,141 @@ class NetworkGuard:
         return False
 
 
-def read_resources(root: Path = Path("/")) -> dict[str, float | None]:
-    """Memory, swap, memory pressure and SoC temperature from /proc and /sys; None where unreadable."""
-    reading: dict[str, float | None] = {"mem_available_mib": None, "swap_used_pct": None,
+def _cgroup_memory_counter(directory: Path, limit_name: str, usage_name: str, version: int):
+    raw_limit = (directory / limit_name).read_text().strip()
+    raw_usage = (directory / usage_name).read_text().strip()
+    unlimited = (version == 2 and raw_limit == "max") or (version == 1 and raw_limit == "-1")
+    if not unlimited and not raw_limit.isdecimal():
+        raise ValueError(f"malformed {limit_name} at {directory}")
+    if not raw_usage.isdecimal():
+        raise ValueError(f"malformed {usage_name} at {directory}")
+    limit = None if unlimited else int(raw_limit)
+    if version == 1 and limit is not None and limit >= 2**60:
+        limit = None  # 64-bit kernel page-rounded unlimited sentinel
+    usage = int(raw_usage)
+    return {"raw_limit": raw_limit, "limit_bytes": limit, "usage_bytes": usage,
+            "headroom_bytes": None if limit is None else max(0, limit - usage)}
+
+
+def read_cgroup_memory(root: Path) -> dict[str, object]:
+    """Read the process's memory hierarchy and all visible ancestor headrooms.
+
+    Discovery/metric errors never fall back to host RAM. Namespace-hidden ancestors
+    cannot be recovered here; the launcher must separately verify host-side limits.
+    """
+    result = {"version": None, "ancestors": [], "headroom_bytes": None, "failures": [],
+              "visibility": "mounted hierarchy only; namespace-hidden ancestors require host verification"}
+    try:
+        membership = (root / "proc/self/cgroup").read_text(encoding="utf-8")
+        mounts = (root / "proc/self/mountinfo").read_text(encoding="utf-8")
+        groups = {}
+        for line in membership.splitlines():
+            hierarchy, controllers, path = line.split(":", 2)
+            if not hierarchy.isdecimal():
+                raise ValueError("malformed cgroup membership")
+            if "memory" in controllers.split(","):
+                groups[1] = path
+            elif hierarchy == "0" and not controllers:
+                groups[2] = path
+        memory_mounts = []
+
+        def absolute_path(text):
+            decoded = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), text)
+            path = PurePosixPath(decoded)
+            if not path.is_absolute() or ".." in path.parts:
+                raise ValueError("unsafe cgroup path")
+            return path
+
+        for line in mounts.splitlines():
+            left, right = line.split(" - ", 1)
+            fields, fs = left.split(), right.split()
+            if len(fields) < 6 or len(fs) < 3:
+                raise ValueError("malformed mountinfo")
+            version = 2 if fs[0] == "cgroup2" else 1 if fs[0] == "cgroup" and "memory" in fs[2].split(",") else None
+            if version:
+                memory_mounts.append((version, absolute_path(fields[3]), absolute_path(fields[4])))
+        if not groups and not memory_mounts:
+            return result  # no applicable controller; bare-metal host accounting
+        version = 1 if 1 in groups else 2
+        result["version"] = version
+        group = absolute_path(groups[version])
+        candidates = [(base, mount) for v, base, mount in memory_mounts
+                      if v == version and group.is_relative_to(base)]
+        if not candidates:
+            raise ValueError("memory cgroup mount unavailable for process")
+        # Prefer the widest visible hierarchy, not a bind mount hiding its parents.
+        base, mount = min(candidates, key=lambda pair: len(pair[0].parts))
+        result.update(process_cgroup=str(group), mount_root=str(base), mount_point=str(mount))
+        directory = mount / group.relative_to(base)
+        headrooms = []
+        while True:
+            physical = root.joinpath(*directory.parts[1:])
+            limit_name, usage_name = (("memory.max", "memory.current") if version == 2 else
+                                     ("memory.limit_in_bytes", "memory.usage_in_bytes"))
+            # The real v2 hierarchy root has no memory controller files. A child
+            # without delegated memory control can likewise have no such interface.
+            if version == 2 and not (physical / limit_name).exists() and not (physical / usage_name).exists():
+                controllers = (physical / "cgroup.controllers").read_text().split()
+                if directory != mount and "memory" in controllers:
+                    raise ValueError(f"memory metrics missing at {directory}")
+                result["ancestors"].append({"path": str(directory), "status": "no_memory_interface"})
+            else:
+                counter = _cgroup_memory_counter(physical, limit_name, usage_name, version)
+                entry = {"path": str(directory), **counter}
+                result["ancestors"].append(entry)
+                if counter["headroom_bytes"] is not None:
+                    headrooms.append(counter["headroom_bytes"])
+                if version == 1 and any((physical / name).exists() for name in (
+                        "memory.memsw.limit_in_bytes", "memory.memsw.usage_in_bytes")):
+                    combined = _cgroup_memory_counter(physical, "memory.memsw.limit_in_bytes",
+                                                     "memory.memsw.usage_in_bytes", version)
+                    entry["memory_and_swap"] = combined
+                    if combined["headroom_bytes"] is not None:
+                        headrooms.append(combined["headroom_bytes"])
+            if directory == mount:
+                break
+            directory = directory.parent
+        if base != PurePosixPath("/"):
+            raise ValueError("ancestor cgroups hidden by non-root mount")
+        if (root / "proc/self/cgroup").read_text(encoding="utf-8") != membership:
+            raise ValueError("process cgroup changed during sampling")
+        result["headroom_bytes"] = min(headrooms) if headrooms else None
+    except (OSError, ValueError, KeyError) as exc:
+        result["failures"].append(f"cgroup memory unavailable: {type(exc).__name__}: {exc}")
+    return result
+
+
+def read_resources(root: Path = Path("/")) -> dict[str, object]:
+    """Host and cgroup memory headroom, swap, pressure and temperature; fail closed."""
+    reading: dict[str, object] = {"mem_available_mib": None, "swap_used_pct": None,
                                         "memory_pressure_some_avg10": None, "temperature_c": None}
+    host_available = None
     try:
         info = {}
         for line in (root / "proc/meminfo").read_text(encoding="utf-8").splitlines():
             key, _, value = line.partition(":")
             if value.split():
                 info[key] = int(value.split()[0])  # kB
-        reading["mem_available_mib"] = round(info["MemAvailable"] / 1024, 1)
+        host_available = info["MemAvailable"] * 1024
+        if host_available < 0:
+            raise ValueError("negative host memory")
         swap_total = info.get("SwapTotal", 0)
         reading["swap_used_pct"] = (round(100 * (swap_total - info.get("SwapFree", 0)) / swap_total, 1)
                                     if swap_total else 0.0)
     except (OSError, KeyError, ValueError):
-        pass
+        host_available = None
+    cgroup = read_cgroup_memory(root)
+    memory_failures = list(cgroup["failures"])
+    if host_available is None:
+        memory_failures.append("host MemAvailable unreadable")
+    container_headroom = cgroup["headroom_bytes"]
+    effective = (min(host_available, container_headroom) if container_headroom is not None else host_available
+                 ) if not memory_failures else None
+    reading["mem_available_mib"] = effective / 1024**2 if effective is not None else None
+    reading["memory"] = {"host_available_bytes": host_available, "cgroup": cgroup,
+        "effective_headroom_bytes": effective, "failures": memory_failures,
+        "source": "unavailable" if memory_failures else f"min(host,cgroup-v{cgroup['version']})"
+                  if container_headroom is not None else "host"}
     try:  # "some avg10=0.00 avg60=0.00 avg300=0.00 total=0"
         first = (root / "proc/pressure/memory").read_text(encoding="utf-8").splitlines()[0]
         reading["memory_pressure_some_avg10"] = float(first.split()[1].partition("=")[2])
@@ -536,11 +656,17 @@ class ResourceWatchdog(threading.Thread):
         super().__init__(name="replay-resource-watchdog", daemon=True)
         self.kws, self.limits, self.root, self.interval_s = kws, limits, root, interval_s
         self.reason: str | None = None
+        self.last_reading: dict[str, object] | None = None
+        self.minimum_headroom_mib: float | None = None
         self.finished = threading.Event()
 
     def check(self) -> bool:
         reading = dict(read_resources(self.root))
         reading["throttled"] = read_throttled()
+        self.last_reading = reading
+        available = reading["mem_available_mib"]
+        if available is not None:
+            self.minimum_headroom_mib = min(self.minimum_headroom_mib, available) if self.minimum_headroom_mib is not None else available
         failures = limit_failures(reading, self.limits, RUNTIME_CHECKS)
         if failures:
             self.reason = "; ".join(failures)
@@ -554,9 +680,10 @@ class ResourceWatchdog(threading.Thread):
 
 
 class ReplayAborted(RuntimeError):
-    def __init__(self, reason: str, completed: int):
+    def __init__(self, reason: str, completed: int, resource_reading=None):
         super().__init__(f"replay aborted after {completed} run(s): {reason}")
         self.reason, self.completed = reason, completed
+        self.resource_reading = resource_reading
 
 
 def _run_once(kws, cache: EngineCache, recordings: list[array], gap_seconds: float,
@@ -623,10 +750,10 @@ def run_replay(kws, recordings: list[array], *, env: dict[str, str], gap_seconds
         with guard:
             for batch in batches:
                 if watchdog and watchdog.reason:
-                    raise ReplayAborted(watchdog.reason, len(runs))
+                    raise ReplayAborted(watchdog.reason, len(runs), watchdog.last_reading)
                 runs.append(_run_once(kws, cache, batch, gap_seconds, lead_in, speed))
                 if watchdog and watchdog.reason:
-                    raise ReplayAborted(watchdog.reason, len(runs))
+                    raise ReplayAborted(watchdog.reason, len(runs), watchdog.last_reading)
                 if runs[-1][2]["threads_not_stopped"]:
                     raise ReplayAborted("worker threads did not stop; do not reuse this process", len(runs))
                 missing = [name for name in require_engines if not cache.status[name]]
@@ -647,6 +774,8 @@ def run_replay(kws, recordings: list[array], *, env: dict[str, str], gap_seconds
             else:
                 os.environ[key] = value
     return runs, {"loaded": dict(cache.status), "openwakeword": cache.openwakeword,
+                  "resource_watchdog": {"last_reading": watchdog.last_reading,
+                      "minimum_headroom_mib": watchdog.minimum_headroom_mib} if watchdog else None,
                   "network_attempts": guard.attempts}
 
 
@@ -1172,19 +1301,23 @@ def main(argv: list[str] | None = None) -> int:
         if unverified:
             parser.error(f"--evidence-mode validated: {len(unverified)} of {len(items)} recordings lack a "
                          f"supported human-review assertion (first: {unverified[0]}); use --evidence-mode preliminary")
-    recordings = [read_wav(args.dataset_dir / str(item["path"])) for item in items]
-    for item in items:
-        item["audio_sha256"] = sha256_file(args.dataset_dir / str(item["path"]))
     if args.skip_resource_checks:
         preflight = {"reading": None, "failures": []}
         resource_status = "skipped"
     else:
         preflight = resource_preflight(limits)
         if preflight["failures"]:
+            args.out_dir.mkdir(parents=True, exist_ok=True)
+            (args.out_dir / "preflight_failed.json").write_text(json.dumps({
+                "valid_as_evidence": False, "resource_preflight": preflight,
+                "resource_limits": limits}, indent=2) + "\n", encoding="utf-8")
             print(json.dumps({"resource_preflight": preflight}, indent=2), file=sys.stderr)
             print("replay_eval: resource preflight failed; nothing was replayed", file=sys.stderr)
             return 3
         resource_status = "passed"
+    recordings = [read_wav(args.dataset_dir / str(item["path"])) for item in items]
+    for item in items:
+        item["audio_sha256"] = sha256_file(args.dataset_dir / str(item["path"]))
     if args.nice and hasattr(os, "nice"):
         os.nice(args.nice)
 
@@ -1227,6 +1360,8 @@ def main(argv: list[str] | None = None) -> int:
         args.out_dir.mkdir(parents=True, exist_ok=True)
         (args.out_dir / "aborted.json").write_text(json.dumps(
             {"aborted": exc.reason, "completed_runs": exc.completed, "started_at": started,
+             "resource_reading": exc.resource_reading, "resource_preflight": preflight,
+             "resource_limits": limits,
              "valid_as_evidence": False}, indent=2) + "\n", encoding="utf-8")
         print(f"replay_eval: {exc}", file=sys.stderr)
         return 3
@@ -1250,6 +1385,7 @@ def main(argv: list[str] | None = None) -> int:
         "resource_checks": resource_status,
         "resource_limits": limits,
         "resource_preflight": preflight["reading"],
+        "resource_watchdog": engines.pop("resource_watchdog", None),
         "gap_seconds": args.gap_seconds,
         "lead_in_seconds": args.lead_in_seconds,
         "dataset_dir": str(args.dataset_dir),

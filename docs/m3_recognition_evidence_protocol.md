@@ -153,6 +153,54 @@ OS memory/CPU quotas. No Pi replay or service control is authorized by this doc.
   after independently checking label evidence, model coverage and isolation.
 - Report the run's commit, configuration and model checksums with the numbers (all in `summary.json` under `run`).
 
+### Container-aware memory gate (C1.12)
+
+`mem_available_mib` now means effective allocation headroom: the minimum of host
+`MemAvailable` and `max(0, hard_limit - current_usage)` for **each visible memory
+cgroup ancestor**, using that ancestor's own aggregate usage. This includes sibling
+consumption at a parent; subtracting only the leaf's usage would overestimate space.
+Page cache is not subtracted from usage or assumed reclaimable. Values are not
+rounded upward across a safety threshold. Existing preflight/abort limits are unchanged.
+
+The reader resolves `/proc/self/cgroup` through `/proc/self/mountinfo`, including
+mount-path escapes, cgroup v2 `memory.max`/`memory.current`, and v1 memory-controller
+`memory.limit_in_bytes`/`memory.usage_in_bytes`. It checks every visible ancestor up
+to the mount root. Where v1 exposes `memory.memsw.limit_in_bytes` and
+`memory.memsw.usage_in_bytes`, their combined memory-and-swap headroom also constrains
+the minimum; an incomplete pair fails closed. Without either memsw file, that
+optional kernel interface is not assumed available. It prefers the widest applicable
+mount in hybrid layouts.
+V2 `max` and v1 `-1`/large 64-bit unlimited sentinels impose no finite cap; a zero
+limit means zero headroom. V1 usage is kernel-reported approximate accounting, not
+an exact allocation guarantee; older 32-bit sentinel values are conservatively
+treated as finite limits. Genuine root/inactive v2 cgroups can lack memory controls.
+
+Missing or unreadable discovery/required metrics, malformed values, unmappable paths,
+changing membership and explicitly clipped non-root hierarchy mounts make effective
+headroom unavailable and fail the required memory gate. The reader uses host-only
+memory only after reliable discovery establishes no finite applicable visible cap.
+`--skip-resource-checks` remains development-only and cannot produce validated evidence.
+
+**Visibility limit:** a cgroup namespace may conceal host ancestors even when it
+presents `/` as the mount root. No in-container reader can reconstruct those hidden
+limits or sibling usage. The launcher must independently verify all host-side ancestor
+limits and pressure before/during real replay. Do not treat passing visible-cgroup
+checks as proof of sufficient host resources. These are sampled guards, not atomic
+memory reservations or protection against sudden allocations/OOM. Hard OS limits,
+model working-set sizing, and target-device health verification remain mandatory.
+
+Preflight now precedes WAV loading and engine import. A failure exits 3 and saves
+`preflight_failed.json` with `valid_as_evidence=false`, limits and the full resource
+reading. Its `memory` object records host availability, source, effective bytes,
+cgroup paths, each sampled limit/usage/headroom, visibility and discovery failures.
+The same reader feeds the runtime watchdog; `summary.json` records its last reading
+and sampled minimum headroom. Resource aborts save the failing reading, preflight
+and limits in `aborted.json` and exit 3 without correctness metrics.
+
+Interface references: [Linux cgroup v2 memory controller](https://docs.kernel.org/admin-guide/cgroup-v2.html#memory)
+and [Linux cgroup v1 memory controller](https://docs.kernel.org/admin-guide/cgroup-v1/memory.html).
+These explain kernel accounting; they do not certify this implementation or the Pi.
+
 ### Model-content coverage and limits
 
 SHA-256 reads files in 1 MiB blocks. `run.model_content_provenance` records paths,

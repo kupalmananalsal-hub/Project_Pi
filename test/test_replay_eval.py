@@ -413,6 +413,9 @@ def fake_root(temp: Path, *, mem_kib=3_000_000, swap=(1_000_000, 900_000), temp_
               pressure="some avg10=0.10 avg60=0.00 avg300=0.00 total=1") -> Path:
     """A stand-in for / with the /proc and /sys files the resource checks read."""
     (temp / "proc/pressure").mkdir(parents=True, exist_ok=True)
+    (temp / "proc/self").mkdir(exist_ok=True)
+    (temp / "proc/self/cgroup").write_text("", encoding="utf-8")
+    (temp / "proc/self/mountinfo").write_text("", encoding="utf-8")
     (temp / "sys/class/thermal/thermal_zone0").mkdir(parents=True, exist_ok=True)
     (temp / "proc/meminfo").write_text(
         f"MemTotal:        8000000 kB\nMemAvailable:    {mem_kib} kB\n"
@@ -981,6 +984,291 @@ class ReviewCorrectionTests(unittest.TestCase):
             result = replay_eval.configuration_record(source,
                 {"PROJECT_PI_ROOT": str(root), "OPENWAKEWORD_MODELS": ""})
             self.assertEqual(result["model_content_provenance"]["openwakeword"]["status"], "hashed")
+
+
+def cgroup_fixture(root, *, version=2, membership="/worker", mount_root="/", mount="/sys/fs/cgroup"):
+    proc = root / "proc/self"
+    proc.mkdir(parents=True, exist_ok=True)
+    proc.joinpath("cgroup").write_text(
+        f"0::{membership}\n" if version == 2 else f"5:cpu,memory:{membership}\n")
+    proc.joinpath("mountinfo").write_text(
+        f"30 20 0:28 {mount_root} {mount} ro - "
+        + ("cgroup2 cgroup rw\n" if version == 2 else "cgroup cgroup rw,cpu,memory\n"))
+    base = root.joinpath(*Path(mount).parts[1:])
+    base.mkdir(parents=True, exist_ok=True)
+    set_cgroup_memory(base, "max" if version == 2 else str(2**63 - 4096), 0, version)
+    relative = membership.removeprefix(mount_root).lstrip("/") if mount_root != "/" else membership.lstrip("/")
+    leaf = base / relative
+    for directory in [*reversed(leaf.relative_to(base).parents), leaf.relative_to(base)]:
+        (base / directory).mkdir(parents=True, exist_ok=True)
+    return base, leaf
+
+
+def set_cgroup_memory(directory, limit, usage, version=2):
+    directory.mkdir(parents=True, exist_ok=True)
+    limit_name, usage_name = (("memory.max", "memory.current") if version == 2 else
+                              ("memory.limit_in_bytes", "memory.usage_in_bytes"))
+    (directory / limit_name).write_text(str(limit))
+    (directory / usage_name).write_text(str(usage))
+
+
+class ContainerMemoryTests(unittest.TestCase):
+    def preflight(self, root):
+        return replay_eval.resource_preflight(replay_eval.DEFAULT_LIMITS, root,
+            throttled_reader=lambda: 0, lag_reader=lambda: 1)
+
+    def test_healthy_container_and_host_minimum(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp), mem_kib=4 * 1024 * 1024)
+            _, leaf = cgroup_fixture(root)
+            set_cgroup_memory(leaf, 3 * 1024**3, 1024**3)
+            result = self.preflight(root)
+            self.assertEqual(result["failures"], [])
+            self.assertEqual(result["reading"]["mem_available_mib"], 2048)
+            self.assertEqual(result["reading"]["memory"]["host_available_bytes"], 4 * 1024**3)
+            # Host pressure still wins even when the container has ample headroom.
+            root.joinpath("proc/meminfo").write_text(
+                "MemAvailable: 716800 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n")
+            self.assertEqual(self.preflight(root)["reading"]["mem_available_mib"], 700)
+
+    def test_near_exhaustion_blocks_despite_ample_host_ram(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp), mem_kib=8 * 1024 * 1024)
+            _, leaf = cgroup_fixture(root)
+            set_cgroup_memory(leaf, 2 * 1024**3, 1900 * 1024**2)
+            result = self.preflight(root)
+            self.assertEqual(result["reading"]["mem_available_mib"], 148)
+            self.assertTrue(any("mem_available_mib=148" in reason for reason in result["failures"]))
+
+    def test_nested_ancestor_usage_not_leaf_usage_determines_headroom(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp))
+            _, leaf = cgroup_fixture(root, membership="/parent/worker")
+            set_cgroup_memory(leaf, 2 * 1024**3, 100 * 1024**2)
+            set_cgroup_memory(leaf.parent, 3 * 1024**3, 2800 * 1024**2)
+            reading = self.preflight(root)["reading"]
+            self.assertEqual(reading["mem_available_mib"], 272)
+            self.assertEqual(len(reading["memory"]["cgroup"]["ancestors"]), 3)
+
+    def test_unlimited_limits_use_host_but_still_check_ancestors(self):
+        for version, unlimited in ((2, "max"), (1, str(2**63 - 4096)), (1, "-1")):
+            with self.subTest(version=version, unlimited=unlimited), tempfile.TemporaryDirectory() as temp:
+                root = fake_root(Path(temp), mem_kib=2048 * 1024)
+                _, leaf = cgroup_fixture(root, version=version)
+                set_cgroup_memory(leaf, unlimited, 123, version)
+                result = self.preflight(root)
+                self.assertEqual(result["failures"], [])
+                self.assertEqual(result["reading"]["mem_available_mib"], 2048)
+
+    def test_v1_finite_limits_and_ancestor_usage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp))
+            _, leaf = cgroup_fixture(root, version=1, membership="/parent/worker")
+            set_cgroup_memory(leaf, 2 * 1024**3, 0, 1)
+            set_cgroup_memory(leaf.parent, 1024**3, 700 * 1024**2, 1)
+            result = self.preflight(root)
+            self.assertEqual(result["reading"]["mem_available_mib"], 324)
+            self.assertEqual(result["reading"]["memory"]["cgroup"]["version"], 1)
+
+    def test_v1_combined_memory_swap_cap_also_constrains_allocations(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp))
+            _, leaf = cgroup_fixture(root, version=1)
+            set_cgroup_memory(leaf, 2 * 1024**3, 0, 1)
+            (leaf / "memory.memsw.limit_in_bytes").write_text(str(2 * 1024**3))
+            (leaf / "memory.memsw.usage_in_bytes").write_text(str(1900 * 1024**2))
+            self.assertEqual(self.preflight(root)["reading"]["mem_available_mib"], 148)
+
+    def test_v1_incomplete_combined_memory_swap_metrics_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp))
+            _, leaf = cgroup_fixture(root, version=1)
+            set_cgroup_memory(leaf, 2 * 1024**3, 0, 1)
+            (leaf / "memory.memsw.limit_in_bytes").write_text(str(2 * 1024**3))
+            self.assertIsNone(self.preflight(root)["reading"]["mem_available_mib"])
+
+    def test_zero_and_overlimit_usage_are_zero_headroom(self):
+        for limit, usage in ((0, 0), (1024, 2048)):
+            with self.subTest(limit=limit), tempfile.TemporaryDirectory() as temp:
+                root = fake_root(Path(temp))
+                _, leaf = cgroup_fixture(root)
+                set_cgroup_memory(leaf, limit, usage)
+                self.assertEqual(self.preflight(root)["reading"]["mem_available_mib"], 0)
+
+    def test_missing_and_malformed_metrics_fail_closed(self):
+        for metric, value in (("memory.max", None), ("memory.current", None),
+                              ("memory.max", "garbage"), ("memory.current", "-1"),
+                              ("memory.current", "nan"), ("memory.max", "1.5")):
+            with self.subTest(metric=metric, value=value), tempfile.TemporaryDirectory() as temp:
+                root = fake_root(Path(temp))
+                _, leaf = cgroup_fixture(root)
+                set_cgroup_memory(leaf, 2 * 1024**3, 0)
+                if value is None:
+                    (leaf / metric).unlink()
+                else:
+                    (leaf / metric).write_text(value)
+                result = self.preflight(root)
+                self.assertIsNone(result["reading"]["mem_available_mib"])
+                self.assertTrue(result["reading"]["memory"]["failures"])
+                self.assertIn("mem_available_mib unreadable", result["failures"])
+
+    def test_unreadable_metrics_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp))
+            _, leaf = cgroup_fixture(root)
+            set_cgroup_memory(leaf, 2 * 1024**3, 0)
+            original = Path.read_text
+            def deny(path, *args, **kwargs):
+                if path == leaf / "memory.current":
+                    raise PermissionError("synthetic unreadable metric")
+                return original(path, *args, **kwargs)
+            with patch.object(Path, "read_text", deny):
+                self.assertIsNone(self.preflight(root)["reading"]["mem_available_mib"])
+
+    def test_discovery_errors_fail_closed(self):
+        for name, value in (("cgroup", None), ("mountinfo", None),
+                            ("cgroup", "malformed"), ("mountinfo", "malformed")):
+            with self.subTest(name=name, value=value), tempfile.TemporaryDirectory() as temp:
+                root = fake_root(Path(temp))
+                _, leaf = cgroup_fixture(root)
+                set_cgroup_memory(leaf, 2 * 1024**3, 0)
+                path = root / "proc/self" / name
+                path.unlink() if value is None else path.write_text(value)
+                self.assertIsNone(self.preflight(root)["reading"]["mem_available_mib"])
+
+    def test_no_memory_controller_uses_host(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = self.preflight(fake_root(Path(temp), mem_kib=2048 * 1024))
+            self.assertEqual(result["failures"], [])
+            self.assertEqual(result["reading"]["memory"]["source"], "host")
+            self.assertEqual(result["reading"]["mem_available_mib"], 2048)
+
+    def test_real_v2_root_without_limit_interface_uses_host(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp))
+            base, _ = cgroup_fixture(root, membership="/")
+            (base / "memory.max").unlink()
+            (base / "memory.current").unlink()
+            (base / "cgroup.controllers").write_text("cpu memory pids\n")
+            self.assertEqual(self.preflight(root)["failures"], [])
+
+    def test_escaped_mountpoint_and_hybrid_hierarchy_use_memory_controller(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp))
+            _, leaf = cgroup_fixture(root, version=1, mount="/sys/fs/cgroup/memory group")
+            set_cgroup_memory(leaf, 2 * 1024**3, 1024**3, 1)
+            info = root / "proc/self/mountinfo"
+            info.write_text(info.read_text().replace("memory group", r"memory\040group")
+                            + "31 20 0:29 / /sys/unified ro - cgroup2 cgroup rw\n")
+            group = root / "proc/self/cgroup"
+            group.write_text(group.read_text() + "0::/other\n")
+            self.assertEqual(self.preflight(root)["reading"]["mem_available_mib"], 1024)
+
+    def test_unsafe_paths_and_missing_mapping_fail_closed(self):
+        for membership in ("/../outside", "/different/worker"):
+            with self.subTest(membership=membership), tempfile.TemporaryDirectory() as temp:
+                root = fake_root(Path(temp))
+                cgroup_fixture(root)
+                (root / "proc/self/cgroup").write_text(f"0::{membership}\n")
+                if "different" in membership:
+                    info = root / "proc/self/mountinfo"
+                    info.write_text(info.read_text().replace("0:28 / ", "0:28 /other "))
+                self.assertIsNone(self.preflight(root)["reading"]["mem_available_mib"])
+
+    def test_missing_ancestor_usage_fails_even_with_healthy_leaf(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp))
+            _, leaf = cgroup_fixture(root, membership="/parent/worker")
+            set_cgroup_memory(leaf, 2 * 1024**3, 0)
+            set_cgroup_memory(leaf.parent, 3 * 1024**3, 0)
+            (leaf.parent / "memory.current").unlink()
+            self.assertIsNone(self.preflight(root)["reading"]["mem_available_mib"])
+
+    def test_hidden_ancestor_mount_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp))
+            _, leaf = cgroup_fixture(root, membership="/parent/worker", mount_root="/parent")
+            set_cgroup_memory(leaf, 2 * 1024**3, 0)
+            result = self.preflight(root)
+            self.assertIsNone(result["reading"]["mem_available_mib"])
+            self.assertTrue(any("ancestor" in s for s in result["reading"]["memory"]["failures"]))
+
+    def test_memory_crossing_abort_threshold_stops_watchdog(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp))
+            _, leaf = cgroup_fixture(root)
+            set_cgroup_memory(leaf, 2 * 1024**3, 0)
+            loop = types.SimpleNamespace(RUNNING=True)
+            watchdog = replay_eval.ResourceWatchdog(loop, replay_eval.DEFAULT_LIMITS, root)
+            with patch.object(replay_eval, "read_throttled", return_value=0):
+                self.assertFalse(watchdog.check())
+                set_cgroup_memory(leaf, 2 * 1024**3, 1800 * 1024**2)
+                self.assertTrue(watchdog.check())
+            self.assertFalse(loop.RUNNING)
+            self.assertIn("mem_available_mib=248", watchdog.reason)
+            self.assertEqual(watchdog.last_reading["memory"]["effective_headroom_bytes"], 248 * 1024**2)
+
+    def test_cli_preflight_failure_is_nonzero_and_saved_before_audio_load(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = ReplaySafetyTest()._dataset(root, "path,keyword\nnegative/random_speech/b.wav,\n")
+            sensor_root = fake_root(root / "sensors")
+            _, leaf = cgroup_fixture(sensor_root)
+            set_cgroup_memory(leaf, 256 * 1024**2, 100 * 1024**2)
+            preflight = self.preflight(sensor_root)
+            with patch.object(replay_eval, "resource_preflight", return_value=preflight), \
+                 patch.object(replay_eval, "read_wav") as audio, \
+                 patch.object(replay_eval, "import_kws") as engines:
+                self.assertEqual(replay_eval.main(args), 3)
+                audio.assert_not_called()
+                engines.assert_not_called()
+            report = json.loads((root / "out/preflight_failed.json").read_text())
+            self.assertFalse(report["valid_as_evidence"])
+            self.assertEqual(report["resource_preflight"]["reading"]["mem_available_mib"], 156)
+
+    def test_replay_propagates_cgroup_abort_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp))
+            _, leaf = cgroup_fixture(root)
+            set_cgroup_memory(leaf, 2 * 1024**3, 0)
+            kws, previous = load_kws_with_fake_engines()
+            monitor = replay_eval.ResourceWatchdog(kws, replay_eval.DEFAULT_LIMITS, root)
+            def cross_limit(*args):
+                set_cgroup_memory(leaf, 2 * 1024**3, 1800 * 1024**2)
+                monitor.check()
+                return None, None, {}
+            try:
+                with patch.object(replay_eval, "ResourceWatchdog", return_value=monitor), \
+                     patch.object(replay_eval, "_run_once", side_effect=cross_limit), \
+                     patch.object(replay_eval, "read_throttled", return_value=0):
+                    with self.assertRaises(replay_eval.ReplayAborted) as error:
+                        replay_eval.run_replay(kws, [tone(.1, 30)], env=fake_env(root),
+                            gap_seconds=0, lead_in=array("h"), abort_limits=replay_eval.DEFAULT_LIMITS,
+                            resource_root=root)
+            finally:
+                restore(previous)
+            self.assertEqual(error.exception.resource_reading["mem_available_mib"], 248)
+
+    def test_cli_resource_abort_retains_snapshot_and_nonzero_status(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = ReplaySafetyTest()._dataset(root, "path,keyword\nnegative/random_speech/b.wav,\n")
+            sensors = fake_root(root / "sensors")
+            _, leaf = cgroup_fixture(sensors)
+            set_cgroup_memory(leaf, 2 * 1024**3, 0)
+            healthy = self.preflight(sensors)
+            set_cgroup_memory(leaf, 2 * 1024**3, 1800 * 1024**2)
+            failed = replay_eval.read_resources(sensors)
+            with patch.object(replay_eval, "resource_preflight", return_value=healthy), \
+                 patch.object(replay_eval, "import_kws", return_value=types.SimpleNamespace()), \
+                 patch.object(replay_eval, "configuration_record", return_value={}), \
+                 patch.object(replay_eval, "run_replay", side_effect=replay_eval.ReplayAborted(
+                     "synthetic memory threshold crossed", 0, failed)):
+                self.assertEqual(replay_eval.main(args), 3)
+            report = json.loads((root / "out/aborted.json").read_text())
+            self.assertFalse(report["valid_as_evidence"])
+            self.assertEqual(report["resource_reading"]["mem_available_mib"], 248)
+            self.assertFalse((root / "out/predictions.csv").exists())
 
 
 if __name__ == "__main__":
