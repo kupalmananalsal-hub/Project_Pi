@@ -86,6 +86,26 @@ def wav_bytes(
         path.unlink(missing_ok=True)
 
 
+SERVICE_COMMANDS = {"sudo", "systemctl", "reboot", "shutdown", "poweroff"}
+
+
+def guarded_subprocess():
+    """The subprocess module, except that starting a service or power command raises."""
+    guard = types.ModuleType("subprocess")
+    guard.__dict__.update(subprocess.__dict__)
+
+    def refuse(real):
+        def call(args, *rest, **kwargs):
+            words = [args] if isinstance(args, str) else list(args)
+            if any(Path(str(word)).name in SERVICE_COMMANDS for word in words[:1]):
+                raise AssertionError(f"test tried to run a real service command: {args}")
+            return real(args, *rest, **kwargs)
+        return call
+    for name in ("run", "call", "check_call", "check_output", "Popen"):
+        setattr(guard, name, refuse(getattr(subprocess, name)))
+    return guard
+
+
 class TrainingApiTest(unittest.TestCase):
     def load_module(self, temp_dir):
         module, previous = load_backend_module(temp_dir)
@@ -99,6 +119,15 @@ class TrainingApiTest(unittest.TestCase):
             module.DATASET_DIR / "audio" / "openwakeword_models"
         )
         module.DATASET_ARCHIVES_DIR = module.DATASET_DIR / "archives"
+        # A test must never restart a real service: on a Linux host with passwordless
+        # sudo, restart_kws_alert_service() would run `sudo -n systemctl restart`. The
+        # restart is recorded instead, and any sudo/systemctl process start fails the test.
+        self.restart_requests = []
+        self.real_restart = module.restart_kws_alert_service
+        module.restart_kws_alert_service = lambda: (
+            self.restart_requests.append("kws-alert.service")
+            or {"skipped": True, "reason": "test double", "command": []})
+        module.subprocess = guarded_subprocess()
         return module, previous
 
     def cleanup(self, module, previous):
@@ -916,6 +945,24 @@ class TrainingApiTest(unittest.TestCase):
                 self.assertTrue(target_data.exists())
                 self.assertEqual(target_onnx.read_bytes(), onnx_content)
                 self.assertEqual(target_data.read_bytes(), data_content)
+                self.assertEqual(self.restart_requests, ["kws-alert.service"])
+            finally:
+                self.cleanup(module, previous)
+
+    def test_deploy_tests_can_never_restart_a_real_service(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            module, previous = self.load_module(temp_dir)
+            try:
+                # The production restart path, as it runs on Linux (os.name == "posix"),
+                # reaches only the guard: no sudo or systemctl process is started.
+                module.os = types.SimpleNamespace(**{**vars(os), "name": "posix"})
+                with self.assertRaisesRegex(AssertionError, "real service command"):
+                    self.real_restart()
+                for command in (["sudo", "-n", "systemctl", "restart", "kws-alert.service"],
+                                ["/usr/bin/systemctl", "restart", "thermal-backend.service"]):
+                    with self.assertRaisesRegex(AssertionError, "real service command"):
+                        module.subprocess.run(command)
+                self.assertEqual(self.restart_requests, [])
             finally:
                 self.cleanup(module, previous)
 
@@ -932,6 +979,7 @@ class TrainingApiTest(unittest.TestCase):
                 )
                 self.assertTrue(result["deployed"])
                 self.assertEqual(result["keyword"], "help")
+                self.assertEqual(self.restart_requests, ["kws-alert.service"])
             finally:
                 self.cleanup(module, previous)
 
@@ -956,6 +1004,7 @@ class TrainingApiTest(unittest.TestCase):
                     )
                 )
                 self.assertTrue(result["backed_up"])
+                self.assertEqual(self.restart_requests, ["kws-alert.service"] * 2)
                 backup_dir = module.OPENWAKEWORD_MODEL_DIR / "backup"
                 backups = list(backup_dir.glob("help_*.onnx"))
                 self.assertGreaterEqual(len(backups), 1)

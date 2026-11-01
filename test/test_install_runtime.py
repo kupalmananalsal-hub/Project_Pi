@@ -573,7 +573,7 @@ class InstallerRuntimeTest(unittest.TestCase):
 
 @unittest.skipUnless(bash_usable(), "needs bash with GNU coreutils")
 class BootOfflineTest(unittest.TestCase):
-    def run_boot(self, hotspot_text=None, mode=0o600):
+    def run_boot(self, hotspot_text=None, mode=0o600, untrusted_owner=False):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         base = Path(temp.name)
@@ -594,6 +594,10 @@ class BootOfflineTest(unittest.TestCase):
         if hotspot_text is not None:
             hotspot.write_text(hotspot_text, encoding="utf-8", newline="\n")
             hotspot.chmod(mode)
+            if untrusted_owner and os.name == "posix" and os.geteuid() == 0:
+                # As root the file would be root-owned (trusted): give the throwaway file
+                # to "nobody" so the untrusted-owner case really is untrusted.
+                os.chown(hotspot, 65534, 65534)
         env = dict(os.environ, PROJECT_PI_STATE_DIR=(base / "state").as_posix(),
                    PROJECT_PI_HOTSPOT_CONF=hotspot.as_posix(),
                    PATH=f"{stubs.as_posix()}:/usr/bin:/bin:{os.environ.get('PATH', '')}")
@@ -613,8 +617,9 @@ class BootOfflineTest(unittest.TestCase):
         self.assertLess(elapsed, 10)
 
     def test_hotspot_flag_in_untrusted_file_is_ignored(self):
-        # Owned by the (non-root) test user: root must not source it.
-        result, calls, _ = self.run_boot("PROJECT_PI_FORCE_HOTSPOT=1\n")
+        # Not owned by root (the test user's own file, or "nobody" when run as root):
+        # the boot script, which runs as root, must not source it.
+        result, calls, _ = self.run_boot("PROJECT_PI_FORCE_HOTSPOT=1\n", untrusted_owner=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("not root-owned", result.stdout)
         self.assertEqual(calls, [])
