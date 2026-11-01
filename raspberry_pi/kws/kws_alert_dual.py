@@ -760,7 +760,7 @@ class DetectionDispatcher:
         self._publish_generic(keyword, confidence, source, context)
 
     def note_vosk_text(self, text: str) -> None:
-        if detect_tagalog_keyword(text) is None:
+        if not looks_like_tulong(text):
             return
         with self.lock:
             self.last_tulong_hint_at = time.monotonic()
