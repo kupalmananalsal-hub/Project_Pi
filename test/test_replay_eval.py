@@ -8,7 +8,12 @@ import importlib.util
 import math
 import os
 import sys
+import json
+import queue
+import socket
+import stat
 import tempfile
+import time
 import types
 import unittest
 import wave
@@ -24,6 +29,7 @@ sys.path.insert(0, str(KWS_DIR))
 import replay_eval  # noqa: E402
 
 LOUD = 4000  # the fake openWakeWord "hears help" above this RMS
+LIVE_IO = []  # set if the loop ever reached the real microphone or HTTP client
 
 
 class FakeConfig:
@@ -31,7 +37,10 @@ class FakeConfig:
 
 
 class FakeConfigStore:
+    paths = []  # every settings file the loop was pointed at
+
     def __init__(self, path):
+        FakeConfigStore.paths.append(Path(path))
         self.config = FakeConfig()
 
     def load(self):
@@ -95,6 +104,8 @@ class FakeAudioPreprocessor:
 
 
 class FakeRecognizer:
+    delay_s = 0.0  # > 0 makes the Vosk worker slower than real time, so its queue overflows
+
     def __init__(self, model, rate):
         pass
 
@@ -102,6 +113,8 @@ class FakeRecognizer:
         pass
 
     def AcceptWaveform(self, data):
+        if FakeRecognizer.delay_s:
+            time.sleep(FakeRecognizer.delay_s)
         return False
 
     def PartialResult(self):
@@ -142,8 +155,8 @@ def load_kws_with_fake_engines(kws_dir=KWS_DIR, preprocessor=FakeAudioPreprocess
     stubs["noise_suppressor"].NoiseSuppressionConfigStore = FakeConfigStore
     stubs["noise_suppressor"].NoiseSuppressor = FakeNoiseSuppressor
     stubs["wav2vec2_verifier"].Wav2Vec2Verifier = object
-    stubs["pyaudio"].PyAudio = object
-    stubs["requests"].Session = object
+    stubs["pyaudio"].PyAudio = lambda: LIVE_IO.append("microphone opened")
+    stubs["requests"].Session = lambda: LIVE_IO.append("HTTP session created")
     stubs["snowboydetect"].SnowboyDetect = FakeSnowboy
     name = "kws_replay_under_test"
     previous = {key: sys.modules.get(key) for key in (*stubs, name)}
@@ -184,13 +197,13 @@ def fake_env(temp: Path) -> dict:
 
 
 def replay(recordings, items, *, kws_dir=KWS_DIR, isolate=True, gap=0.6,
-           preprocessor=FakeAudioPreprocessor):
+           preprocessor=FakeAudioPreprocessor, speed=1.0):
     kws, previous = load_kws_with_fake_engines(kws_dir, preprocessor)
     try:
         with tempfile.TemporaryDirectory() as temp:
             runs, engines = replay_eval.run_replay(
                 kws, recordings, env=fake_env(Path(temp)), gap_seconds=gap,
-                lead_in=replay_eval.dither(0.3), isolate=isolate)
+                lead_in=replay_eval.dither(0.3), isolate=isolate, speed=speed)
     finally:
         restore(previous)
     rows, lead_in_events, _tagged = replay_eval.score_rows(items, runs)
@@ -384,6 +397,443 @@ class ReplayHarnessTest(unittest.TestCase):
                                      kws_dir=os.environ["PROJECT_PI_M1M2_KWS_DIR"])
         self.assertEqual([r["score"] for r in rows], [1.0, 0.0])
         self.assertTrue(all(engines["loaded"].values()))
+
+
+def write_wav(path: Path, samples: array, rate: int = 16000) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(samples.tobytes())
+
+
+def fake_root(temp: Path, *, mem_kib=3_000_000, swap=(1_000_000, 900_000), temp_milli_c=55_000,
+              pressure="some avg10=0.10 avg60=0.00 avg300=0.00 total=1") -> Path:
+    """A stand-in for / with the /proc and /sys files the resource checks read."""
+    (temp / "proc/pressure").mkdir(parents=True, exist_ok=True)
+    (temp / "sys/class/thermal/thermal_zone0").mkdir(parents=True, exist_ok=True)
+    (temp / "proc/meminfo").write_text(
+        f"MemTotal:        8000000 kB\nMemAvailable:    {mem_kib} kB\n"
+        f"SwapTotal:       {swap[0]} kB\nSwapFree:        {swap[1]} kB\n", encoding="utf-8")
+    if pressure is not None:
+        (temp / "proc/pressure/memory").write_text(pressure + "\n", encoding="utf-8")
+    if temp_milli_c is not None:
+        (temp / "sys/class/thermal/thermal_zone0/temp").write_text(f"{temp_milli_c}\n", encoding="utf-8")
+    return temp
+
+
+def valid_run(**changes) -> dict:
+    run = {"evidence_mode": "validated", "speed": 1.0, "chunk_s": 0.08, "max_pacing_lag_s": 0.01,
+           "queue_drops": 0, "unprocessed_packets": 0, "threads_not_stopped": [], "network_attempts": [],
+           "noise_config_snapshot_unchanged": True, "required_engines": list(replay_eval.ENGINES),
+           "resource_checks": "passed"}
+    run.update(changes)
+    return run
+
+
+class ReplaySafetyTest(unittest.TestCase):
+    """C1.10 safeguards: dropped audio, frozen settings, evidence status, side effects, resources."""
+
+    def setUp(self):
+        LIVE_IO.clear()
+        FakeConfigStore.paths.clear()
+
+    def test_counting_put_latest_keeps_production_behaviour_and_counts_each_drop(self):
+        kws, previous = load_kws_with_fake_engines()
+        try:
+            production = queue.Queue(maxsize=2)
+            for packet in (1, 2, 3, 4):
+                kws.put_latest(production, packet)
+            cache = replay_eval.EngineCache(kws)
+            originals = cache.install()
+            cache.recorder = replay_eval.EventRecorder(lambda: 7.5)
+            counted = queue.Queue(maxsize=2)
+            for packet in (1, 2, 3, 4):
+                kws.put_latest(counted, packet)
+            for name, value in originals.items():
+                setattr(kws, name, value)
+        finally:
+            restore(previous)
+        self.assertEqual(list(counted.queue), list(production.queue))  # newest kept, oldest dropped
+        self.assertEqual(list(counted.queue), [3, 4])
+        self.assertEqual(cache.recorder.drops, [7.5, 7.5])  # two packets discarded, both counted
+        self.assertEqual(len(cache.queues), 1)
+
+    def test_slow_engine_drops_are_counted_attributed_and_invalidate_the_run(self):
+        FakeRecognizer.delay_s = 0.1  # Vosk worker far slower than the 8 ms chunks at speed 10
+        try:
+            rows, _, runs, _ = replay([tone(4.0, 12000)], [item("positive/help/a.wav", 1, "help")],
+                                      speed=10.0)
+        finally:
+            FakeRecognizer.delay_s = 0.0
+        pacing = runs[0][2]
+        self.assertGreater(pacing["queue_drops"], 0)
+        self.assertEqual(rows[0]["queue_drops"], pacing["queue_drops"])
+        self.assertEqual(pacing["threads_not_stopped"], [])
+        reasons = replay_eval.invalid_reasons(valid_run(queue_drops=pacing["queue_drops"],
+                                                        unprocessed_packets=pacing["unprocessed_packets"]))
+        self.assertTrue(any("dropped" in reason for reason in reasons))
+
+    def test_normal_run_has_no_drops_no_leftover_packets_and_no_lingering_threads(self):
+        _rows, _, runs, engines = replay([tone(0.6, 12000), tone(0.6, 30)],
+                                         [item("positive/help/a.wav", 1, "help"), item("negative/silence/b.wav", 0)])
+        for _timeline, _recorder, pacing in runs:
+            self.assertEqual((pacing["queue_drops"], pacing["unprocessed_packets"], pacing["threads_not_stopped"]),
+                             (0, 0, []))
+        self.assertEqual(engines["network_attempts"], [])
+        self.assertEqual(LIVE_IO, [])  # neither the microphone nor the HTTP client was created
+
+    def test_noise_settings_come_from_a_frozen_read_only_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            live = temp / "live" / "project_pi_noise_suppression.json"
+            live.parent.mkdir()
+            live.write_text('{"strength": 0.9}', encoding="utf-8")
+            captured = temp / "captured.json"
+            captured.write_bytes(live.read_bytes())
+            scratch = temp / "scratch"
+            scratch.mkdir()
+            env = {**fake_env(temp), "NOISE_SUPPRESSION_CONFIG_PATH": str(live)}
+            isolated, record = replay_eval.isolate_environment(env, scratch, captured)
+            snapshot = Path(isolated["NOISE_SUPPRESSION_CONFIG_PATH"])
+            live.write_text('{"strength": 0.1}', encoding="utf-8")  # the app changes live settings mid-run
+
+            kws, previous = load_kws_with_fake_engines()
+            try:
+                replay_eval.run_replay(kws, [tone(0.3, 30)], env=isolated, gap_seconds=0.3,
+                                       lead_in=replay_eval.dither(0.2))
+                effective = replay_eval.effective_noise_settings(kws, snapshot)
+            finally:
+                restore(previous)
+            self.assertEqual(snapshot.parent, scratch)
+            self.assertEqual(snapshot.read_text(encoding="utf-8"), '{"strength": 0.9}')
+            self.assertEqual(record["noise_config_snapshot_sha256"], replay_eval.sha256_file(snapshot))
+            self.assertFalse(snapshot.stat().st_mode & stat.S_IWUSR)  # read-only
+            self.assertIn(snapshot, FakeConfigStore.paths)
+            self.assertNotIn(live, FakeConfigStore.paths)  # the loop never opened the live file
+            self.assertEqual(set(effective), set(replay_eval.NOISE_CONFIG_FIELDS))
+            snapshot.chmod(stat.S_IREAD | stat.S_IWRITE)  # let the temporary directory be removed
+
+    def test_replay_writes_nothing_to_live_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            live = temp / "live"
+            live.mkdir()
+            for name in ("audio_status.json", "alerts.jsonl", "noise.json"):
+                (live / name).write_text("{}", encoding="utf-8")
+            before = {p.name: (p.stat().st_mtime_ns, p.read_bytes()) for p in live.iterdir()}
+            env = {**fake_env(temp),
+                   "PROJECT_PI_AUDIO_STATUS_PATH": str(live / "audio_status.json"),
+                   "ALERT_QUEUE_PATH": str(live / "alerts.jsonl"),
+                   "NOISE_SUPPRESSION_CONFIG_PATH": str(live / "noise.json"),
+                   "BACKEND_ALERT_URL": "http://127.0.0.1:8765/api/alerts",
+                   "PROJECT_PI_API_TOKEN": "not-a-real-token-but-must-be-cleared"}
+            scratch = temp / "scratch"
+            scratch.mkdir()
+            isolated, record = replay_eval.isolate_environment(env, scratch, live / "noise.json")
+            self.assertEqual(isolated["PROJECT_PI_API_TOKEN"], "")
+            self.assertEqual((isolated["HF_HUB_OFFLINE"], isolated["TRANSFORMERS_OFFLINE"]), ("1", "1"))
+            self.assertIn(":9/", isolated["BACKEND_ALERT_URL"])
+            for key in ("PROJECT_PI_AUDIO_STATUS_PATH", "ALERT_QUEUE_PATH", "NOISE_SUPPRESSION_CONFIG_PATH"):
+                self.assertEqual(Path(isolated[key]).parent, scratch)
+            kws, previous = load_kws_with_fake_engines()
+            try:
+                _runs, engines = replay_eval.run_replay(kws, [tone(0.6, 12000)], env=isolated,
+                                                        gap_seconds=0.3, lead_in=replay_eval.dither(0.2))
+            finally:
+                restore(previous)
+            after = {p.name: (p.stat().st_mtime_ns, p.read_bytes()) for p in live.iterdir()}
+            self.assertEqual(after, before)
+            self.assertTrue((scratch / "audio_status.json").exists())  # status went to scratch instead
+            self.assertEqual(LIVE_IO, [])
+            self.assertEqual(engines["network_attempts"], [])
+            Path(record["noise_config_snapshot"]).chmod(stat.S_IREAD | stat.S_IWRITE)
+
+    def test_network_guard_refuses_loopback_and_lookups_then_restores_sockets(self):
+        original_connect, original_lookup = socket.socket.connect, socket.getaddrinfo
+        with replay_eval.NetworkGuard() as guard:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                with self.assertRaises(PermissionError):
+                    sock.connect(("127.0.0.1", 8765))  # where the live backend listens
+            with self.assertRaises(PermissionError):
+                socket.getaddrinfo("huggingface.co", 443)
+        self.assertEqual(len(guard.attempts), 2)
+        self.assertIs(socket.socket.connect, original_connect)
+        self.assertIs(socket.getaddrinfo, original_lookup)
+
+    def test_missing_dependency_stops_before_anything_is_replayed(self):
+        saved = {name: sys.modules.get(name) for name in ("kws_alert_dual", "pyaudio", "vosk")}
+        sys.modules.pop("kws_alert_dual", None)
+        sys.modules["pyaudio"] = None  # importing it now raises ImportError
+        sys.modules["vosk"] = None
+        try:
+            with self.assertRaises(SystemExit) as raised:
+                replay_eval.import_kws()
+        finally:
+            restore(saved)
+        self.assertIn("missing dependency", str(raised.exception))
+        self.assertIn("Nothing was replayed", str(raised.exception))
+
+    def test_invalid_runs_are_never_valid_as_evidence(self):
+        self.assertEqual(replay_eval.invalid_reasons(valid_run()), [])
+        cases = {
+            "preliminary": valid_run(evidence_mode="preliminary"),
+            "speed": valid_run(speed=2.0),
+            "lag": valid_run(max_pacing_lag_s=0.2),
+            "dropped": valid_run(queue_drops=3),
+            "still queued": valid_run(unprocessed_packets=1),
+            "threads": valid_run(threads_not_stopped=["vosk"]),
+            "network": valid_run(network_attempts=["connect ('127.0.0.1', 8765)"]),
+            "snapshot": valid_run(noise_config_snapshot_unchanged=False),
+            "engines": valid_run(required_engines=["openwakeword"]),
+            "resource checks": valid_run(resource_checks="skipped"),
+        }
+        for expected, run in cases.items():
+            with self.subTest(expected):
+                reasons = replay_eval.invalid_reasons(run)
+                self.assertEqual(len(reasons), 1)
+                self.assertIn(expected, reasons[0])
+
+    def test_validated_mode_needs_every_label_human_verified(self):
+        items = [item("positive/help/a.wav", 1, "help"), item("negative/hi/b.wav", 0)]
+        self.assertEqual(replay_eval.unverified_items(items), ["positive/help/a.wav", "negative/hi/b.wav"])
+        items[0].update(review_status="verified", reviewed_label="positive")
+        items[1].update(review_status="machine_screened", reviewed_label="negative")
+        self.assertEqual(replay_eval.unverified_items(items), ["negative/hi/b.wav"])
+        items[1]["review_status"] = "verified"
+        self.assertEqual(replay_eval.unverified_items(items), [])
+        items[0]["reviewed_label"] = "negative"  # reviewer disagrees with the folder
+        self.assertEqual(replay_eval.unverified_items(items), ["positive/help/a.wav"])
+
+    def _dataset(self, root: Path, metadata: str) -> list[str]:
+        (root / "data").mkdir()
+        (root / "data/metadata.csv").write_text(metadata, encoding="utf-8")
+        write_wav(root / "data/positive/help/a.wav", tone(0.6, 12000))
+        write_wav(root / "data/negative/random_speech/b.wav", tone(0.6, 30))
+        (root / "effective.env").write_text(
+            "\n".join(f"{k}={v}" for k, v in fake_env(root).items()) + "\n", encoding="utf-8")
+        (root / "noise.json").write_text("{}", encoding="utf-8")
+        return ["--dataset-dir", str(root / "data"), "--env-file", str(root / "effective.env"),
+                "--noise-config", str(root / "noise.json"), "--out-dir", str(root / "out"),
+                "--gap-seconds", "0.6", "--lead-in-seconds", "0.3", "--nice", "0"]
+
+    def test_validated_mode_refuses_to_start_on_unreviewed_recordings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = self._dataset(root, "path,keyword,speaker_id,review_status\n"
+                                       "positive/help/a.wav,help,s1,not_reviewed\n"
+                                       "negative/random_speech/b.wav,,s2,machine_screened\n")
+            with self.assertRaises(SystemExit) as raised:
+                replay_eval.main([*args, "--evidence-mode", "validated", "--skip-resource-checks"])
+            self.assertEqual(raised.exception.code, 2)
+            self.assertFalse((root / "out").exists())  # nothing measured, nothing written
+
+    def test_preliminary_run_reports_detections_without_correctness_metrics(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = self._dataset(root, "path,keyword,speaker_id\n"
+                                       "positive/help/a.wav,help,s1\n"
+                                       "negative/random_speech/b.wav,,s2\n")
+            kws, previous = load_kws_with_fake_engines()
+            real_import = replay_eval.import_kws
+            replay_eval.import_kws = lambda: kws
+            try:
+                code = replay_eval.main([*args, "--skip-resource-checks"])
+            finally:
+                replay_eval.import_kws = real_import
+                restore(previous)
+            summary = json.loads((root / "out/summary.json").read_text(encoding="utf-8"))
+            header = (root / "out/preliminary_detections.csv").read_text(encoding="utf-8").splitlines()[0]
+            self.assertEqual(code, 0)
+            self.assertFalse((root / "out/predictions.csv").exists())
+            self.assertEqual(summary["evidence_status"], "preliminary")
+            self.assertIsNone(summary["metrics"])
+            for metric in ("exact_keyword", "any_distress", "per_keyword", "event_level"):
+                self.assertNotIn(metric, summary)
+            self.assertEqual(summary["detections"]["recordings"], 2)
+            self.assertEqual(summary["detections"]["recordings_with_any_alert"], 1)
+            self.assertNotIn("score", header.split(","))
+            self.assertIn("provisional_label", header.split(","))
+            self.assertFalse(summary["run"]["valid_as_evidence"])
+            self.assertIn("preliminary run: recording labels are not human-verified",
+                          summary["run"]["invalid_reasons"])
+            self.assertEqual(summary["run"]["noise_config_snapshot_sha256"],
+                             replay_eval.hashlib.sha256(b"{}").hexdigest())
+            self.assertTrue(summary["run"]["noise_config_snapshot_unchanged"])
+            self.assertEqual(len(summary["run"]["noise_settings_effective"]), 4)
+            snapshot = Path(summary["run"]["noise_config_snapshot"])
+            snapshot.chmod(stat.S_IREAD | stat.S_IWRITE)
+
+    def test_resource_preflight_passes_a_healthy_machine(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = replay_eval.resource_preflight(replay_eval.DEFAULT_LIMITS, fake_root(Path(temp)),
+                                                    throttled_reader=lambda: 0, lag_reader=lambda: 2.0)
+        self.assertEqual(result["failures"], [])
+        self.assertEqual(result["reading"]["temperature_c"], 55.0)
+        self.assertEqual(result["reading"]["swap_used_pct"], 10.0)
+
+    def test_resource_preflight_refuses_low_memory_heat_swap_lag_and_throttling(self):
+        cases = {
+            "mem_available_mib": dict(mem_kib=800 * 1024),  # the ~800 MiB reported on the Pi
+            "temperature_c": dict(temp_milli_c=75_000),
+            "swap_used_pct": dict(swap=(1_000_000, 100_000)),
+            "memory_pressure_some_avg10": dict(pressure="some avg10=12.50 avg60=3.00 avg300=1.00 total=9"),
+        }
+        for expected, overrides in cases.items():
+            with self.subTest(expected), tempfile.TemporaryDirectory() as temp:
+                failures = replay_eval.resource_preflight(
+                    replay_eval.DEFAULT_LIMITS, fake_root(Path(temp), **overrides),
+                    throttled_reader=lambda: 0, lag_reader=lambda: 2.0)["failures"]
+                self.assertEqual(len(failures), 1)
+                self.assertTrue(failures[0].startswith(expected))
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp))
+            lag = replay_eval.resource_preflight(replay_eval.DEFAULT_LIMITS, root,
+                                                 throttled_reader=lambda: 0, lag_reader=lambda: 45.0)
+            soft_limit = replay_eval.resource_preflight(replay_eval.DEFAULT_LIMITS, root,
+                                                        throttled_reader=lambda: 0x8, lag_reader=lambda: 2.0)
+        self.assertTrue(lag["failures"][0].startswith("scheduling_lag_ms"))
+        self.assertIn("soft temperature limit", soft_limit["failures"][0])
+
+    def test_unreadable_sensors_fail_the_preflight_but_optional_pressure_does_not(self):
+        with tempfile.TemporaryDirectory() as temp:
+            no_sensor = replay_eval.resource_preflight(
+                replay_eval.DEFAULT_LIMITS, fake_root(Path(temp), temp_milli_c=None, pressure=None),
+                throttled_reader=lambda: None, lag_reader=lambda: 2.0)
+        self.assertEqual(no_sensor["failures"], ["temperature_c unreadable"])
+        with tempfile.TemporaryDirectory() as temp:
+            nothing = replay_eval.resource_preflight(replay_eval.DEFAULT_LIMITS, Path(temp) / "missing",
+                                                     throttled_reader=lambda: None, lag_reader=lambda: 2.0)
+        self.assertEqual(nothing["failures"], ["mem_available_mib unreadable", "swap_used_pct unreadable",
+                                               "temperature_c unreadable"])
+
+    def test_resource_limit_overrides_are_validated(self):
+        limits = replay_eval.parse_limit_overrides(["min_mem_available_mib=700"])
+        self.assertEqual(limits["min_mem_available_mib"], 700.0)
+        with self.assertRaises(ValueError):
+            replay_eval.parse_limit_overrides(["min_memory=1"])
+
+    def test_watchdog_stops_the_loop_when_the_pi_overheats(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp), temp_milli_c=80_000)
+            loop = types.SimpleNamespace(RUNNING=True)
+            watchdog = replay_eval.ResourceWatchdog(loop, replay_eval.DEFAULT_LIMITS, root, interval_s=0.01)
+            watchdog.start()
+            watchdog.join(2.0)
+        self.assertFalse(loop.RUNNING)
+        self.assertIn("temperature_c=80.0", watchdog.reason)
+
+    def test_replay_does_not_start_when_an_abort_limit_is_already_crossed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = fake_root(Path(temp), mem_kib=300 * 1024)
+            kws, previous = load_kws_with_fake_engines()
+            try:
+                with self.assertRaises(replay_eval.ReplayAborted) as raised:
+                    replay_eval.run_replay(kws, [tone(0.3, 30)], env=fake_env(Path(temp)), gap_seconds=0.3,
+                                           lead_in=replay_eval.dither(0.2),
+                                           abort_limits=replay_eval.DEFAULT_LIMITS, resource_root=root)
+            finally:
+                restore(previous)
+        self.assertEqual(raised.exception.completed, 0)
+        self.assertIn("mem_available_mib", raised.exception.reason)
+
+    def test_short_and_long_recordings_are_replayed_whole_and_flagged(self):
+        # 0.86 s mirrors the shortest clip found in review; 12 s the longest exception clip.
+        items = [item("positive/help/short.wav", 1, "help"), item("negative/random_speech/long.wav", 0)]
+        rows, _, runs, _ = replay([tone(0.86, 12000), tone(12.0, 30)], items, speed=8.0)
+        self.assertEqual([r["duration_s"] for r in rows], [0.86, 12.0])
+        self.assertEqual([r["duration_flag"] for r in rows], ["under_1s", "over_5s"])
+        self.assertEqual(rows[0]["detected_keywords"], "help")  # the padded last chunk still counts
+        self.assertEqual(rows[1]["event_count"], 0)
+        self.assertEqual(sum(p["queue_drops"] for _t, _r, p in runs), 0)
+
+    def test_44_1_khz_audio_is_rejected_with_conversion_guidance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "cd_rate.wav"
+            write_wav(path, array("h", bytes(2 * 4410)), rate=44100)
+            with self.assertRaisesRegex(ValueError, r"44100 Hz.*Convert a copy offline.*never replace"):
+                replay_eval.read_wav(path)
+
+
+
+class ResumedSafetyTests(unittest.TestCase):
+    def test_limits_reject_nonfinite_and_negative(self):
+        for value in ("nan", "inf", "-1"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                replay_eval.parse_limit_overrides(["min_mem_available_mib=" + value])
+
+    def test_machine_screened_labels_cannot_be_scored(self):
+        self.assertEqual(replay_eval.unverified_items([
+            dict(path="negative/random_speech/synthetic.wav", label=0,
+                 review_status="machine_screened", reviewed_label="negative")
+        ]), ["negative/random_speech/synthetic.wav"])
+
+    def test_metadata_traversal_rejected_before_audio_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "metadata.csv").write_text(
+                "path,keyword\nnegative/../../outside.wav,\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unsafe recording path"):
+                replay_eval.load_items(root, split="dev", subset=None, limit=None, onsets={})
+
+    def test_runtime_resource_checks_include_pressure_and_swap(self):
+        reading = dict(mem_available_mib=2000, temperature_c=50,
+                       swap_used_pct=99, memory_pressure_some_avg10=99)
+        reasons = replay_eval.limit_failures(reading, replay_eval.DEFAULT_LIMITS,
+                                              replay_eval.RUNTIME_CHECKS)
+        self.assertEqual(len(reasons), 2)
+
+    def test_truncated_wav_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "truncated.wav"
+            write_wav(path, tone(.1, 30))
+            path.write_bytes(path.read_bytes()[:-2])
+            with self.assertRaisesRegex(ValueError, "truncated WAV"):
+                replay_eval.read_wav(path)
+
+    def test_validated_but_invalid_run_withholds_metrics(self):
+        from unittest.mock import patch
+        # Reuse the existing dataset fixture without touching real recordings.
+        owner = ReplaySafetyTest
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = owner()._dataset(root,
+                "path,keyword,speaker_id,review_status,reviewed_label\n"
+                "positive/help/a.wav,help,s1,verified,positive\n"
+                "negative/random_speech/b.wav,,s2,verified,negative\n")
+            kws, previous = load_kws_with_fake_engines()
+            try:
+                with patch.object(replay_eval, "import_kws", return_value=kws):
+                    self.assertEqual(replay_eval.main(
+                        [*args, "--evidence-mode", "validated", "--skip-resource-checks"]), 0)
+            finally:
+                restore(previous)
+            summary = json.loads((root / "out/summary.json").read_text())
+            self.assertEqual(summary["evidence_status"], "invalid")
+            self.assertIsNone(summary["metrics"])
+            self.assertNotIn("exact_keyword", summary)
+            self.assertFalse((root / "out/predictions.csv").exists())
+            Path(summary["run"]["noise_config_snapshot"]).chmod(stat.S_IREAD | stat.S_IWRITE)
+
+
+    def test_existing_output_is_not_reused_or_overwritten(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            args = ReplaySafetyTest()._dataset(root, "path,keyword\nnegative/random_speech/b.wav,\n")
+            (root / "out").mkdir()
+            previous = root / "out/predictions.csv"
+            previous.write_text("previous evidence", encoding="utf-8")
+            with patch.object(replay_eval, "import_kws") as imported:
+                with self.assertRaises(SystemExit):
+                    replay_eval.main([*args, "--skip-resource-checks"])
+                imported.assert_not_called()
+            self.assertEqual(previous.read_text(), "previous evidence")
+
+    def test_changed_configuration_invalidates_evidence(self):
+        reasons = replay_eval.invalid_reasons(dict(configuration_unchanged=False))
+        self.assertIn("engine configuration or model hashes changed during replay", reasons)
 
 
 if __name__ == "__main__":
