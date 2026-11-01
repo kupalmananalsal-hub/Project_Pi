@@ -16,6 +16,7 @@ import tempfile
 import time
 import types
 import unittest
+from unittest.mock import patch
 import wave
 from array import array
 from pathlib import Path
@@ -598,8 +599,10 @@ class ReplaySafetyTest(unittest.TestCase):
     def test_validated_mode_needs_every_label_human_verified(self):
         items = [item("positive/help/a.wav", 1, "help"), item("negative/hi/b.wav", 0)]
         self.assertEqual(replay_eval.unverified_items(items), ["positive/help/a.wav", "negative/hi/b.wav"])
-        items[0].update(review_status="verified", reviewed_label="positive")
-        items[1].update(review_status="machine_screened", reviewed_label="negative")
+        items[0].update(review_status="verified", reviewed_label="positive",
+                        review_method="human_listening", review_evidence="synthetic-001")
+        items[1].update(review_status="machine_screened", reviewed_label="negative",
+                        review_method="human_listening", review_evidence="synthetic-002")
         self.assertEqual(replay_eval.unverified_items(items), ["negative/hi/b.wav"])
         items[1]["review_status"] = "verified"
         self.assertEqual(replay_eval.unverified_items(items), [])
@@ -799,14 +802,14 @@ class ResumedSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             args = owner()._dataset(root,
-                "path,keyword,speaker_id,review_status,reviewed_label\n"
-                "positive/help/a.wav,help,s1,verified,positive\n"
-                "negative/random_speech/b.wav,,s2,verified,negative\n")
+                "path,keyword,speaker_id,review_status,reviewed_label,review_method,review_evidence\n"
+                "positive/help/a.wav,help,s1,verified,positive,human_listening,synthetic-001\n"
+                "negative/random_speech/b.wav,,s2,verified,negative,human_listening,synthetic-002\n")
             kws, previous = load_kws_with_fake_engines()
             try:
                 with patch.object(replay_eval, "import_kws", return_value=kws):
                     self.assertEqual(replay_eval.main(
-                        [*args, "--evidence-mode", "validated", "--skip-resource-checks"]), 0)
+                        [*args, "--evidence-mode", "validated", "--skip-resource-checks"]), 3)
             finally:
                 restore(previous)
             summary = json.loads((root / "out/summary.json").read_text())
@@ -834,6 +837,150 @@ class ResumedSafetyTests(unittest.TestCase):
     def test_changed_configuration_invalidates_evidence(self):
         reasons = replay_eval.invalid_reasons(dict(configuration_unchanged=False))
         self.assertIn("engine configuration or model hashes changed during replay", reasons)
+
+
+class ReviewCorrectionTests(unittest.TestCase):
+    def test_sha256_streams_instead_of_reading_entire_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "large.bin"
+            data = b"synthetic" * 400000
+            path.write_bytes(data)
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("unbounded read")):
+                self.assertEqual(replay_eval.sha256_file(path), replay_eval.hashlib.sha256(data).hexdigest())
+
+    def test_model_provenance_covers_vosk_snowboy_and_explicit_oww(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "effective.env"
+            source.write_text("# synthetic\n")
+            files = {"vosk/am/final.mdl": b"acoustic", "vosk/conf/model.conf": b"config",
+                     "help.pmdl": b"snowboy", "common.res": b"resource", "custom.onnx": b"wake",
+                     "custom.onnx.data": b"external weights"}
+            for name, data in files.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            env = {"VOSK_MODEL_PATH": str(root / "vosk"),
+                   "SNOWBOY_MODEL_PATHS": str(root / "help.pmdl"),
+                   "SNOWBOY_RESOURCE_PATH": str(root / "common.res"),
+                   "OPENWAKEWORD_MODELS": str(root / "custom.onnx"),
+                   "OPENWAKEWORD_MODEL_DIR": str(root / "absent")}
+            first = replay_eval.configuration_record(source, env)
+            assets = first["model_content_provenance"]
+            self.assertEqual(assets["vosk"]["files_sha256"], {
+                "am/final.mdl": replay_eval.hashlib.sha256(b"acoustic").hexdigest(),
+                "conf/model.conf": replay_eval.hashlib.sha256(b"config").hexdigest()})
+            for key in ("vosk", "snowboy_resource", "snowboy_models", "openwakeword"):
+                self.assertEqual(assets[key]["status"], "hashed")
+            for name in files:
+                path = root / name
+                old = path.read_bytes()
+                path.write_bytes(old + b"changed")
+                self.assertNotEqual(replay_eval.configuration_record(source, env), first, name)
+                path.write_bytes(old)
+            (root / "common.res").unlink()
+            missing = replay_eval.configuration_record(source, env)["model_content_provenance"]
+            self.assertNotEqual(missing["snowboy_resource"]["status"], "hashed")
+
+    def test_verification_flags_alone_do_not_supply_label_provenance(self):
+        sample = dict(path="negative/speech/a.wav", label=0,
+                      review_status="verified", reviewed_label="negative")
+        self.assertEqual(replay_eval.unverified_items([sample]), [sample["path"]])
+        sample.update(review_method="human_listening", review_evidence="synthetic-review-001")
+        self.assertEqual(replay_eval.unverified_items([sample]), [])
+        for evidence in ("", "unknown", "unassessed", "N/A"):
+            sample["review_evidence"] = evidence
+            self.assertEqual(replay_eval.unverified_items([sample]), [sample["path"]])
+        sample.update(review_evidence="synthetic-review-001", review_method="transcript_screening")
+        self.assertEqual(replay_eval.unverified_items([sample]), [sample["path"]])
+
+    def test_cli_invalid_validated_runs_preserve_diagnostics_and_fail(self):
+        cases = {"pacing": {"max_lag_s": .5}, "drops": {"queue_drops": 1},
+                 "backlog": {"unprocessed_packets": 1}, "skipped_resources": {},
+                 "network": {}, "speed": {}, "provenance": {}, "valid": {}}
+        for name, overrides in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                args = ReplaySafetyTest()._dataset(root,
+                    "path,keyword,review_status,reviewed_label,review_method,review_evidence\n"
+                    "negative/random_speech/b.wav,,verified,negative,human_listening,synthetic-001\n")
+                recording = tone(.6, 30)
+                timeline = replay_eval.Timeline(array("h"), [recording], 0)
+                recorder = replay_eval.EventRecorder(lambda: 0)
+                pacing = dict(max_lag_s=0, chunk_s=.08, queue_drops=0,
+                              unprocessed_packets=0, threads_not_stopped=[])
+                pacing.update(overrides)
+                engines = dict(loaded={k: True for k in replay_eval.ENGINES}, openwakeword={},
+                               network_attempts=["synthetic refused connection"] if name == "network" else [])
+                kws = types.SimpleNamespace(NoiseSuppressionConfigStore=FakeConfigStore)
+                extra = ["--skip-resource-checks"] if name == "skipped_resources" else []
+                if name == "speed":
+                    extra += ["--speed", "2"]
+                with patch.object(replay_eval, "import_kws", return_value=kws), \
+                     patch.object(replay_eval, "configuration_record", return_value=(
+                         {"unverified_model_assets": ["vosk"]} if name == "provenance" else {})), \
+                     patch.object(replay_eval, "resource_preflight", return_value=dict(reading={}, failures=[])), \
+                     patch.object(replay_eval, "run_replay", return_value=([(timeline, recorder, pacing)], engines)):
+                    code = replay_eval.main([*args, "--evidence-mode", "validated", *extra])
+                summary = json.loads((root / "out/summary.json").read_text())
+                self.assertEqual(code, 0 if name == "valid" else 3)
+                self.assertTrue((root / "out/events.jsonl").exists())
+                if name == "valid":
+                    self.assertEqual(summary["evidence_status"], "validated")
+                    self.assertTrue((root / "out/predictions.csv").exists())
+                else:
+                    self.assertEqual(summary["evidence_status"], "invalid")
+                    self.assertIsNone(summary["metrics"])
+                    self.assertTrue((root / "out/preliminary_detections.csv").exists())
+                    self.assertFalse((root / "out/predictions.csv").exists())
+                Path(summary["run"]["noise_config_snapshot"]).chmod(stat.S_IREAD | stat.S_IWRITE)
+
+    def test_model_tree_hash_is_relocation_independent_and_detects_added_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            roots = [Path(temp) / name for name in ("first", "second")]
+            for root in roots:
+                root.mkdir()
+                (root / "model").write_bytes(b"synthetic")
+            first = replay_eval.model_content_record([roots[0]])
+            self.assertEqual(first["manifest_sha256"],
+                             replay_eval.model_content_record([roots[1]])["manifest_sha256"])
+            (roots[1] / "new-conf").write_bytes(b"new")
+            self.assertNotEqual(first["manifest_sha256"],
+                                replay_eval.model_content_record([roots[1]])["manifest_sha256"])
+
+    @unittest.skipUnless(os.name == "posix", "symlink fixture needs POSIX permissions")
+    def test_model_tree_does_not_follow_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "model"
+            root.mkdir()
+            outside = Path(temp) / "outside"
+            outside.write_bytes(b"not part of model")
+            (root / "link").symlink_to(outside)
+            report = replay_eval.model_content_record([root])
+            self.assertEqual(report["status"], "unverified")
+            self.assertEqual(report["files_sha256"], {})
+
+    def test_missing_and_empty_model_assets_are_explicitly_unverified(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for paths in ([], [root], [root / "missing"]):
+                with self.subTest(paths=paths):
+                    report = replay_eval.model_content_record(paths)
+                    self.assertEqual(report["status"], "unverified")
+                    self.assertTrue(report["issues"])
+
+    def test_empty_oww_selection_uses_deployed_directory_discovery(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            model_dir = root / "dataset/audio/openwakeword_models"
+            model_dir.mkdir(parents=True)
+            (model_dir / "help.onnx").write_bytes(b"synthetic graph")
+            (model_dir / "help.onnx.data").write_bytes(b"synthetic weights")
+            source = root / "effective.env"
+            source.write_text("# synthetic")
+            result = replay_eval.configuration_record(source,
+                {"PROJECT_PI_ROOT": str(root), "OPENWAKEWORD_MODELS": ""})
+            self.assertEqual(result["model_content_provenance"]["openwakeword"]["status"], "hashed")
 
 
 if __name__ == "__main__":

@@ -38,7 +38,8 @@ Fidelity, stated plainly:
 - Evidence: `--evidence-mode preliminary` (default) reports detections only;
   folder names are provisional labels and no correctness metric is computed.
   `--evidence-mode validated` scores, and refuses to start unless every
-  recording's label is human-verified in metadata.csv.
+  recording has asserted human-listening review and a supporting evidence reference
+  in metadata.csv. These fields do not authenticate reviewers or prove ground truth.
 - Safety: network connections are refused while the loop runs, outputs go to a
   scratch directory, and resource checks (memory, swap, temperature, scheduling
   lag) run before and during the replay so it cannot starve the live service.
@@ -54,6 +55,7 @@ import argparse
 import csv
 import hashlib
 import importlib
+import importlib.metadata
 import json
 import math
 import os
@@ -153,7 +155,11 @@ def read_wav(path: Path) -> array:
 
 
 def sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class Timeline:
@@ -859,11 +865,17 @@ def preliminary_summary(rows: list[dict[str, object]], lead_in_events) -> dict[s
 
 
 def unverified_items(items: list[dict[str, object]]) -> list[str]:
-    """Paths whose label is not human-verified: needs review_status=verified and a
-    reviewed_label equal to the folder's class (positive/negative)."""
+    """Reject unsupported review assertions; this does not authenticate their truth.
+
+    A supporting review record is required, not inferred from text screening.
+    Evidence references remain local and must be independently checked by researchers.
+    """
     return [str(i["path"]) for i in items
             if i.get("review_status") != "verified"
-            or i.get("reviewed_label") != ("positive" if int(i["label"]) == 1 else "negative")]
+            or i.get("reviewed_label") != ("positive" if int(i["label"]) == 1 else "negative")
+            or i.get("review_method") != "human_listening"
+            or str(i.get("review_evidence") or "").strip().casefold()
+            in ("", "unknown", "unassessed", "n/a", "none", "not_checked")]
 
 
 def invalid_reasons(run: dict[str, object]) -> list[str]:
@@ -887,6 +899,8 @@ def invalid_reasons(run: dict[str, object]) -> list[str]:
         reasons.append("noise-suppression snapshot changed or missing")
     if not run.get("configuration_unchanged", True):
         reasons.append("engine configuration or model hashes changed during replay")
+    if run.get("unverified_model_assets"):
+        reasons.append(f"model content provenance incomplete: {run['unverified_model_assets']}")
     if sorted(run.get("required_engines") or ()) != sorted(ENGINES):
         reasons.append("not all three engines were required to load")
     if run.get("resource_checks") != "passed":
@@ -924,6 +938,8 @@ def load_items(dataset_dir: Path, *, split: str, subset: str | None, limit: int 
                 "speaker_id": row.get("speaker_id", ""), "onset_s": onsets.get(path),
                 "review_status": (row.get("review_status") or "").strip(),
                 "reviewed_label": (row.get("reviewed_label") or "").strip(),
+                "review_method": (row.get("review_method") or "").strip(),
+                "review_evidence": (row.get("review_evidence") or "").strip(),
             })
             if limit and len(items) >= limit:
                 break
@@ -980,12 +996,79 @@ def import_kws():
             "environment (e.g. ~/kws-env/bin/python). Nothing was replayed.") from exc
 
 
+def model_content_record(paths: list[Path]) -> dict[str, object]:
+    """Stream selected files or complete directory trees; never follow symlinks.
+
+    Per-file SHA-256 and a sorted manifest digest identify contents, not versions.
+    Missing, unreadable or linked assets are explicitly unverified. Directory keys
+    are relative to their root, so a Vosk model copied elsewhere keeps its digest.
+    """
+    files: dict[str, str] = {}
+    issues: list[str] = []
+
+    def add(path: Path, key: str) -> None:
+        try:
+            if path.is_symlink() or not path.is_file():
+                issues.append(f"not a regular unlinked file: {key}")
+            else:
+                files[key] = sha256_file(path)
+        except OSError as exc:
+            issues.append(f"unreadable: {key} ({type(exc).__name__})")
+
+    for path in paths:
+        if path.is_symlink():
+            issues.append(f"symlink not followed: {path}")
+        elif path.is_dir():
+            def scan_error(exc):
+                issues.append(f"directory unreadable ({type(exc).__name__})")
+
+            for directory, dirs, names in os.walk(path, followlinks=False, onerror=scan_error):
+                for name in sorted(dirs):
+                    if (Path(directory) / name).is_symlink():
+                        issues.append(f"symlink not followed: {Path(directory) / name}")
+                dirs[:] = sorted(d for d in dirs if not (Path(directory) / d).is_symlink())
+                for name in sorted(names):
+                    member = Path(directory) / name
+                    key = member.relative_to(path).as_posix() if len(paths) == 1 else str(member)
+                    add(member, key)
+        else:
+            add(path, str(path))
+    manifest = json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {"paths": [str(p) for p in paths], "files_sha256": dict(sorted(files.items())),
+            "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+            "status": "hashed" if files and not issues else "unverified",
+            "issues": issues or ([] if files else ["no model files found"])}
+
+
 def configuration_record(source: Path, env: dict[str, str]) -> dict[str, object]:
-    model_dir = Path(env.get("OPENWAKEWORD_MODEL_DIR", ""))
-    models = {}
-    if model_dir.is_dir():
-        for path in sorted(model_dir.glob("*.onnx*")):
-            models[path.name] = sha256_file(path)
+    # Match the deployed path selection without importing engines or loading assets.
+    project = Path(env.get("PROJECT_PI_ROOT", str(KWS_DIR.parents[1]))).expanduser()
+    dataset = Path(env.get("DATASET_DIR", str(project / "dataset"))).expanduser()
+    default = dataset / "audio/openwakeword_models"
+    legacy = project / "raspberry_pi/kws/openwakeword_models"
+    model_dir = Path(env["OPENWAKEWORD_MODEL_DIR"]).expanduser() if env.get(
+        "OPENWAKEWORD_MODEL_DIR") else (default if default.exists() or not legacy.exists() else legacy)
+    explicit = env.get("OPENWAKEWORD_MODELS")
+    oww_paths = ([Path(p.strip()) for p in explicit.split(",") if p.strip()] if explicit
+                 else sorted(model_dir.glob("*.onnx")))
+    # The deployed wrapper requires these external-weight companions for ONNX models.
+    oww_paths += [Path(str(p) + ".data") for p in list(oww_paths) if p.suffix.lower() == ".onnx"]
+    snowboy_paths = env.get("SNOWBOY_MODEL_PATHS", env.get("SNOWBOY_MODEL_PATH",
+        "/home/thesis/snowboy/examples/Python3/resources/models/help.pmdl"))
+    assets = {
+        "openwakeword": model_content_record(oww_paths),
+        "vosk": model_content_record([Path(env.get("VOSK_MODEL_PATH",
+            "/home/thesis/vosk-models/vosk-model-tl-ph-generic-0.6"))]),
+        "snowboy_models": model_content_record([Path(p.strip()) for p in snowboy_paths.split(",") if p.strip()]),
+        "snowboy_resource": model_content_record([Path(env.get("SNOWBOY_RESOURCE_PATH",
+            "/home/thesis/snowboy/examples/Python3/resources/common.res"))]),
+    }
+    versions = {}
+    for package in ("vosk", "openwakeword", "onnxruntime", "numpy", "scipy", "torch", "transformers", "PyAudio"):
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = None
     try:
         commit = subprocess.run(["git", "-C", str(KWS_DIR), "rev-parse", "HEAD"],
                                 capture_output=True, text=True, timeout=5).stdout.strip()
@@ -997,7 +1080,13 @@ def configuration_record(source: Path, env: dict[str, str]) -> dict[str, object]
         "config_source": str(source),
         "config_sha256": sha256_file(source),
         "engine_environment": {k: env[k] for k in sorted(keys)},
-        "openwakeword_models_sha256": models,
+        "openwakeword_models_sha256": assets["openwakeword"]["files_sha256"],
+        "model_content_provenance": assets,
+        "unverified_model_assets": [name for name, record in assets.items() if record["status"] != "hashed"],
+        "runtime_package_versions": versions,
+        "unverified_components": ["package/native library contents (versions only)",
+            "openWakeWord bundled embedding, melspectrogram and VAD assets",
+            "Snowboy Python/SWIG/native bindings", "wav2vec2 model/cache assets", "OS/drivers/firmware"],
         "code_commit": commit,
     }
 
@@ -1035,8 +1124,9 @@ def main(argv: list[str] | None = None) -> int:
                              "live file does not exist); frozen into a read-only snapshot")
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--evidence-mode", choices=("preliminary", "validated"), default="preliminary",
-                        help="preliminary: detections only, no metrics; validated: scored, needs every "
-                             "label human-verified (review_status=verified, reviewed_label) in metadata.csv")
+                        help="preliminary: detections only; validated: scored, needs review_status=verified, "
+                             "matching reviewed_label, review_method=human_listening and a supporting "
+                             "review_evidence reference in metadata.csv (operator assertions, not proof)")
     parser.add_argument("--split", choices=("dev", "holdout"), default="dev",
                         help="dev: positive/ + negative/; holdout: physical_holdout/ (final report only)")
     parser.add_argument("--subset", help="only metadata paths containing this text, e.g. negative/hello")
@@ -1081,7 +1171,7 @@ def main(argv: list[str] | None = None) -> int:
         unverified = unverified_items(items)
         if unverified:
             parser.error(f"--evidence-mode validated: {len(unverified)} of {len(items)} recordings lack a "
-                         f"human-verified label (first: {unverified[0]}); use --evidence-mode preliminary")
+                         f"supported human-review assertion (first: {unverified[0]}); use --evidence-mode preliminary")
     recordings = [read_wav(args.dataset_dir / str(item["path"])) for item in items]
     for item in items:
         item["audio_sha256"] = sha256_file(args.dataset_dir / str(item["path"]))
@@ -1191,12 +1281,19 @@ def main(argv: list[str] | None = None) -> int:
             summary["notice"] = "INVALID RUN: correctness metrics withheld; see run.invalid_reasons"
         printed = ("evidence_status", "notice", "detections")
     summary["engines"] = engines
+    summary["label_provenance"] = {
+        "notice": "Metadata assertions are not independently authenticated ground truth; "
+                  "researchers must verify supporting review records before publishing metrics.",
+        "recordings": [{"path": i["path"], "audio_sha256": i["audio_sha256"],
+                        **{k: i[k] for k in ("review_status", "reviewed_label", "review_method", "review_evidence")}}
+                       for i in items],
+    }
     summary["run"] = run
     (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({k: summary[k] for k in printed}, indent=2))
     if not run["valid_as_evidence"]:
         print("WARNING: run not valid as evidence: " + "; ".join(run["invalid_reasons"]), file=sys.stderr)
-    return 0
+    return 3 if args.evidence_mode == "validated" and not run["valid_as_evidence"] else 0
 
 
 if __name__ == "__main__":
