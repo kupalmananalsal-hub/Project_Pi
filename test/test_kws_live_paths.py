@@ -156,14 +156,24 @@ class DispatcherLiveWiringTest(LivePathTestCase):
         self.settle()
         self.assertEqual(poster.published, [("help", "snowboy")])
 
-    def test_current_defect_ordinary_word_replaces_pending_snowboy_help(self):
-        # CURRENT DEFECT: "araw" (day) cancels the pending help and is published as "aray".
-        # An alert still goes out, under the wrong keyword: not a silent miss on this path.
+    def test_current_defect_ordinary_word_publishes_alongside_pending_snowboy_help(self):
+        # Correction #1: a non-tulong Vosk match no longer cancels the pending help, so both
+        # are published as two separate events (two event_ids; nothing groups them yet).
+        # CURRENT DEFECT still pinned: "araw" (day) is itself published as "aray".
         dispatcher, poster = self.dispatcher()
         dispatcher.submit("help", 0.75, "snowboy")
         self.vosk_pair(dispatcher, "araw")
         self.settle()
-        self.assertEqual(poster.published, [("aray", "vosk")])
+        self.assertEqual(poster.published, [("aray", "vosk"), ("help", "snowboy")])
+
+    def test_openwakeword_help_is_kept_alongside_a_non_tulong_vosk_keyword(self):
+        # Correction #1 guard: only a tulong match opens the help-suppression window, so a
+        # genuine openWakeWord help next to another Vosk keyword is published (two events).
+        for text, keyword in (("saklolo", "saklolo"), ("araw", "aray")):
+            dispatcher, poster = self.dispatcher()
+            self.vosk_pair(dispatcher, text)
+            dispatcher.submit("help", 0.6, "openwakeword")
+            self.assertEqual(poster.published, [(keyword, "vosk"), ("help", "openwakeword")], text)
 
     def test_current_defect_ordinary_word_suppresses_openwakeword_help(self):
         # CURRENT DEFECT: "tulog" publishes "tulong", and that suppresses a genuine

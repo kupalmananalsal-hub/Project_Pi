@@ -72,7 +72,7 @@ class RecognitionRegressionTest(unittest.TestCase):
     def test_partial_prefix_does_not_match_while_word_is_spoken(self):
         self.assertIsNone(self.kws.detect_tagalog_keyword("tul"))
 
-    @unittest.expectedFailure
+    # Fixed by Recognition Correction #1 (only a tulong match counts as a tulong hint).
     def test_non_tulong_vosk_hint_does_not_cancel_snowboy_help(self):
         dispatcher, poster = self.dispatcher()
         dispatcher.submit("help", 0.75, "snowboy")
