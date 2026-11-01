@@ -3,7 +3,9 @@ import contextlib
 import csv
 import io
 import os
+import shlex
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -89,6 +91,20 @@ def wav_bytes(
 SERVICE_COMMANDS = {"sudo", "systemctl", "reboot", "shutdown", "poweroff"}
 
 
+def refuse_service_command(args, shell=False):
+    """Fail closed: no shell or string commands, and no service/power command anywhere in
+    the argument list (also wrapped, e.g. `env sudo …` or `bash -c "systemctl …"`)."""
+    if shell or isinstance(args, (str, bytes)):
+        raise AssertionError(f"test tried to run a shell/string command: {args!r}")
+    for word in map(str, args):
+        try:
+            parts = shlex.split(word)
+        except ValueError:
+            parts = word.split()
+        if any(Path(part).name in SERVICE_COMMANDS for part in parts):
+            raise AssertionError(f"test tried to run a real service command: {args}")
+
+
 def guarded_subprocess():
     """The subprocess module, except that starting a service or power command raises."""
     guard = types.ModuleType("subprocess")
@@ -96,13 +112,28 @@ def guarded_subprocess():
 
     def refuse(real):
         def call(args, *rest, **kwargs):
-            words = [args] if isinstance(args, str) else list(args)
-            if any(Path(str(word)).name in SERVICE_COMMANDS for word in words[:1]):
-                raise AssertionError(f"test tried to run a real service command: {args}")
+            refuse_service_command(args, kwargs.get("shell", False))
             return real(args, *rest, **kwargs)
         return call
     for name in ("run", "call", "check_call", "check_output", "Popen"):
         setattr(guard, name, refuse(getattr(subprocess, name)))
+    return guard
+
+
+def guarded_asyncio():
+    """asyncio, except that its process entry points go through the same guard."""
+    guard = types.ModuleType("asyncio")
+    guard.__dict__.update(asyncio.__dict__)
+    real_exec = asyncio.create_subprocess_exec
+
+    async def create_subprocess_exec(program, *args, **kwargs):
+        refuse_service_command([program, *args])
+        return await real_exec(program, *args, **kwargs)
+
+    async def create_subprocess_shell(cmd, **kwargs):
+        refuse_service_command(cmd, shell=True)
+    guard.create_subprocess_exec = create_subprocess_exec
+    guard.create_subprocess_shell = create_subprocess_shell
     return guard
 
 
@@ -128,6 +159,7 @@ class TrainingApiTest(unittest.TestCase):
             self.restart_requests.append("kws-alert.service")
             or {"skipped": True, "reason": "test double", "command": []})
         module.subprocess = guarded_subprocess()
+        module.asyncio = guarded_asyncio()
         return module, previous
 
     def cleanup(self, module, previous):
@@ -959,9 +991,27 @@ class TrainingApiTest(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "real service command"):
                     self.real_restart()
                 for command in (["sudo", "-n", "systemctl", "restart", "kws-alert.service"],
-                                ["/usr/bin/systemctl", "restart", "thermal-backend.service"]):
+                                ["/usr/bin/systemctl", "restart", "thermal-backend.service"],
+                                ["env", "sudo", "reboot"],
+                                ["bash", "-c", "systemctl restart kws-alert.service"],
+                                ["/sbin/shutdown", "-h", "now"]):
+                    for entry in ("run", "call", "check_call", "check_output", "Popen"):
+                        with self.assertRaisesRegex(AssertionError, "real service command"):
+                            getattr(module.subprocess, entry)(command)
                     with self.assertRaisesRegex(AssertionError, "real service command"):
-                        module.subprocess.run(command)
+                        asyncio.run(module.asyncio.create_subprocess_exec(*command))
+                # Shell execution fails closed, whatever the command.
+                for command, kwargs in (("systemctl restart kws-alert.service", {"shell": True}),
+                                        ("echo harmless", {"shell": True}),
+                                        ("sudo reboot", {})):
+                    with self.assertRaisesRegex(AssertionError, "shell/string command"):
+                        module.subprocess.run(command, **kwargs)
+                with self.assertRaisesRegex(AssertionError, "shell/string command"):
+                    asyncio.run(module.asyncio.create_subprocess_shell("echo harmless"))
+                # Ordinary commands still run through the guard.
+                done = module.subprocess.run([sys.executable, "-c", "print('ok')"],
+                                             capture_output=True, text=True, check=True)
+                self.assertEqual(done.stdout.strip(), "ok")
                 self.assertEqual(self.restart_requests, [])
             finally:
                 self.cleanup(module, previous)
