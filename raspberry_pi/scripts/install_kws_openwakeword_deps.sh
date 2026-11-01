@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
-# Install Project Pi openWakeWord runtime dependencies on the Raspberry Pi.
+# WARNING: MANUAL USE ONLY. This script changes the KWS virtual environment: it runs
+# apt-get and installs the pinned versions in raspberry_pi/requirements/kws-env.lock.txt,
+# which can replace whatever is installed now. A changed onnxruntime/openWakeWord/Vosk
+# version changes detection behavior, so run it only as part of a reviewed upgrade.
+# install_headless.sh never calls it.
+#
+#   bash raspberry_pi/scripts/install_kws_openwakeword_deps.sh --i-understand-this-upgrades-packages
 set -euo pipefail
+
+if [[ "${1:-}" != "--i-understand-this-upgrades-packages" ]]; then
+  sed -n '2,8p' "$0" >&2
+  exit 2
+fi
 
 KWS_VENV="${KWS_VENV:-/home/thesis/kws-env}"
 KWS_PYTHON="${KWS_VENV}/bin/python"
 KWS_PIP="${KWS_VENV}/bin/pip"
+LOCK_FILE="$(cd "$(dirname "$0")/.." && pwd)/requirements/kws-env.lock.txt"
 
 if [[ ! -x "${KWS_PYTHON}" ]]; then
   echo "KWS Python not found: ${KWS_PYTHON}" >&2
@@ -22,10 +34,6 @@ echo "Installing system Speex library..."
 "${SUDO[@]}" apt-get update
 "${SUDO[@]}" apt-get install -y libspeexdsp-dev
 
-echo "Installing Python openWakeWord and wav2vec2 dependencies into ${KWS_VENV}..."
-"${KWS_PIP}" install --upgrade pip wheel setuptools
-"${KWS_PIP}" install --upgrade openwakeword onnxruntime soundfile transformers torch
-
 PY_TAG="$("${KWS_PYTHON}" -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
 ARCH="$("${KWS_PYTHON}" -c 'import platform; print(platform.machine())')"
 
@@ -40,12 +48,15 @@ install_speex_wrapper() {
   fi
 
   echo "Falling back to speexdsp-ns from PyPI/source..."
-  "${KWS_PIP}" install speexdsp-ns
+  "${KWS_PIP}" install speexdsp-ns==0.1.2
 }
 
 if ! "${KWS_PYTHON}" -c 'import speexdsp_ns' >/dev/null 2>&1; then
   install_speex_wrapper
 fi
+
+echo "Installing the pinned KWS environment from ${LOCK_FILE}..."
+"${KWS_PIP}" install -r "${LOCK_FILE}"
 
 "${KWS_PYTHON}" -c "import speexdsp_ns; print('Speex OK')"
 "${KWS_PYTHON}" -c "import onnxruntime; print('ONNX Runtime OK')"

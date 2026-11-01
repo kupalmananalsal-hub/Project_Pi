@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/alerts_provider.dart';
 import '../providers/thermal_provider.dart';
+import '../widgets/alert_link_banner.dart';
 import '../widgets/alert_overlay.dart';
 import 'controls_screen.dart';
 import 'history_screen.dart';
@@ -63,7 +64,14 @@ class _AppShellState extends ConsumerState<AppShell> {
               ),
             ],
           ),
-          body: IndexedStack(index: _selectedIndex, children: _screens),
+          body: Column(
+            children: [
+              const AlertLinkBanner(),
+              Expanded(
+                child: IndexedStack(index: _selectedIndex, children: _screens),
+              ),
+            ],
+          ),
           bottomNavigationBar: NavigationBar(
             selectedIndex: _selectedIndex,
             onDestinationSelected: (index) {

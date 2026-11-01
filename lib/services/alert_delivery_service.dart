@@ -117,7 +117,25 @@ class AlertInbox {
     _committed = jsonEncode(data);
   }
 
+  /// Every save rewrites the whole inbox, so it must not grow for the app's lifetime.
+  /// A pruned event that is replayed later is only shown as history: replay
+  /// re-presents critical events for 300 s, far less than 500 events back.
+  static const maxEvents = 500;
+
+  void _prune() {
+    if (events.length <= maxEvents) return;
+    final unacked = {for (final m in outbox.values) (m as Map)['event_id']};
+    int sequence(String id) =>
+        ((events[id] as Map)['event'] as Map)['sequence'] as int? ?? 0;
+    final removable = events.keys.where((id) => !unacked.contains(id)).toList()
+      ..sort((a, b) => sequence(a).compareTo(sequence(b)));
+    for (final id in removable.take(events.length - maxEvents)) {
+      events.remove(id);
+    }
+  }
+
   Future<void> save() async {
+    _prune();
     final next = revision + 1;
     final file = File('${directory.path}/inbox.${next % 2}.json');
     final contents = jsonEncode({'revision': next, 'data': data});
@@ -261,6 +279,12 @@ class AlertDeliveryService {
     }
   }
 
+  static Map<String, dynamic> _ack(String kind, String id, int sequence) => {
+    'type': kind,
+    'event_id': id,
+    'sequence': sequence,
+  };
+
   void _flush() {
     for (final message in inbox.outbox.values) {
       _send(Map<String, dynamic>.from(message as Map));
@@ -269,7 +293,8 @@ class AlertDeliveryService {
 
   void _armWatchdog() {
     _watchdog?.cancel();
-    _watchdog = Timer(const Duration(seconds: 35), () => _socket?.reconnect());
+    // The Pi sends a heartbeat every 5 s, so 12 s of silence means the session is dead.
+    _watchdog = Timer(const Duration(seconds: 12), () => _socket?.reconnect());
   }
 
   Future<void> _handle(Map<String, dynamic> message) async {
@@ -314,12 +339,6 @@ class AlertDeliveryService {
         final existing = inbox.events[id] as Map<String, dynamic>?;
         final row =
             existing ?? <String, dynamic>{'event': event, 'processed': false};
-        inbox.events[id] = row;
-        inbox.ack('ack_received', id, sequence);
-        await inbox.save();
-        _send(
-          Map<String, dynamic>.from(inbox.outbox['ack_received:$id'] as Map),
-        );
         final confirmed =
             row['user_confirmed'] == true ||
             inbox.outbox.containsKey('ack_user_confirmed:$id');
@@ -333,10 +352,28 @@ class AlertDeliveryService {
             !active &&
             !_handledThisRun.contains(id) &&
             (row['processed'] != true || recovery);
+        // A failed save (e.g. phone storage full) must not swallow the alarm: present
+        // anyway, but send no acknowledgement the phone has not durably recorded, then
+        // fail the session so the Pi re-offers it. _handledThisRun keeps that
+        // re-offer from sounding the alarm a second time in this run.
+        Object? storageError;
+        Future<void> save() async {
+          if (storageError != null) return;
+          try {
+            await inbox.save();
+          } catch (error) {
+            storageError = error;
+          }
+        }
+
+        inbox.events[id] = row;
+        inbox.ack('ack_received', id, sequence);
+        await save();
+        if (storageError == null) _send(_ack('ack_received', id, sequence));
         if (shouldHandle) {
           // Intent is evidence of an attempt, never confirmation or a replay veto.
           row['disposition'] = 'intent_committed';
-          await inbox.save();
+          await save();
           await afterIntent?.call();
           final session = Zone.current[#deliverySession];
           if (_closed || (session != null && session != _sessionGeneration)) {
@@ -353,19 +390,16 @@ class AlertDeliveryService {
           row['processed'] = true;
           _handledThisRun.add(id);
           if (presented) inbox.ack('ack_presented', id, sequence);
-          await inbox.save();
-          if (presented) {
-            _send(
-              Map<String, dynamic>.from(
-                inbox.outbox['ack_presented:$id'] as Map,
-              ),
-            );
+          await save();
+          if (presented && storageError == null) {
+            _send(_ack('ack_presented', id, sequence));
           }
         } else {
           traceAlert('provider_disposition', id, 'duplicate_ignored', {
             'reason': 'durable_inbox',
           });
         }
+        if (storageError != null) throw storageError!;
       case 'ack_committed':
         inbox.outbox.remove(
           '${message['acknowledgement']}:${message['event_id']}',

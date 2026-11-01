@@ -4,9 +4,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'screens/resident_mode_screen.dart';
 import 'screens/resident_settings_screen.dart';
+import 'services/api_token.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await ApiToken.load();
+  } catch (_) {
+    // Unreadable secure storage: panic alerts are rejected until the token is re-entered.
+  }
   SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
@@ -68,9 +74,7 @@ class _ResidentHomeWrapperState extends State<_ResidentHomeWrapper> {
           return const Scaffold(
             backgroundColor: Colors.black,
             body: Center(
-              child: CircularProgressIndicator(
-                color: Color(0xFFE53935),
-              ),
+              child: CircularProgressIndicator(color: Color(0xFFE53935)),
             ),
           );
         }

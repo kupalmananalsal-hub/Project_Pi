@@ -103,3 +103,7 @@ dataset/audio/keyword_dataset/**/*.keras
 
 # Local editor settings
 .vscode/
+
+# Runtime alert database on the Pi: never staged. Ignoring is not a backup:
+# preupgrade_backup.sh / preupgrade_inventory.sh still list and verify it.
+raspberry_pi/backend/alerts.db*

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/app_settings.dart';
 import '../providers/connection_provider.dart';
 import '../providers/settings_provider.dart';
+import '../services/api_token.dart';
 import '../widgets/status_card.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -16,6 +17,7 @@ class SettingsScreen extends ConsumerStatefulWidget {
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   late final TextEditingController _hostController;
   late final TextEditingController _portController;
+  late final TextEditingController _tokenController;
   late final FocusNode _hostFocusNode;
 
   @override
@@ -25,6 +27,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _portController = TextEditingController(
       text: AppSettings.defaultPort.toString(),
     );
+    _tokenController = TextEditingController(text: ApiToken.current);
     _hostFocusNode = FocusNode();
   }
 
@@ -33,6 +36,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _hostFocusNode.dispose();
     _hostController.dispose();
     _portController.dispose();
+    _tokenController.dispose();
     super.dispose();
   }
 
@@ -81,6 +85,22 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               prefixIcon: Icon(Icons.numbers_rounded),
               border: OutlineInputBorder(),
             ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            key: const ValueKey('pi-api-token-field'),
+            controller: _tokenController,
+            obscureText: true,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: const InputDecoration(
+              labelText: 'Pi API token (optional)',
+              helperText:
+                  'Leave empty unless API authentication is enabled on the Pi',
+              prefixIcon: Icon(Icons.key_rounded),
+              border: OutlineInputBorder(),
+            ),
+            onSubmitted: (_) => _connect(context),
           ),
           const SizedBox(height: 12),
           _ConnectionStatusRow(connection: connection),
@@ -172,6 +192,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
       );
       return;
+    }
+    if (_tokenController.text.trim() != ApiToken.current) {
+      await ApiToken.save(_tokenController.text);
     }
     await ref
         .read(connectionProvider.notifier)

@@ -4,22 +4,30 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/app_settings.dart';
 import 'alert_delivery_service.dart';
+import 'api_token.dart';
 
 class ResidentAlertService {
-  ResidentAlertService({Dio? dio, String? host, int? port})
-    : _dio =
-          dio ??
-          Dio(
-            BaseOptions(
-              connectTimeout: const Duration(seconds: 3),
-              receiveTimeout: const Duration(seconds: 5),
-              sendTimeout: const Duration(seconds: 3),
-            ),
-          ),
-      _host = host,
-      _port = port;
+  ResidentAlertService({
+    Dio? dio,
+    String? host,
+    int? port,
+    this.retryWindow = const Duration(seconds: 30),
+  }) : _dio =
+           dio ??
+           Dio(
+             BaseOptions(
+               connectTimeout: const Duration(seconds: 3),
+               receiveTimeout: const Duration(seconds: 5),
+               sendTimeout: const Duration(seconds: 3),
+             ),
+           ),
+       _host = host,
+       _port = port;
 
   final Dio _dio;
+
+  /// How long a panic press keeps retrying through a Wi-Fi blip before reporting failure.
+  final Duration retryWindow;
   final String? _host;
   final int? _port;
 
@@ -46,18 +54,36 @@ class ResidentAlertService {
 
       final url =
           'http://$host:${AppSettings.normalizeBackendPort(port)}/api/alerts/manual';
-      final response = await _dio.post<Map<String, dynamic>>(
-        url,
-        data: {
-          'event_id': eventId ?? CaregiverCredentials.randomId(),
-          'keyword': keyword,
-          'confidence': confidence,
-          'source': source,
-        },
-      );
-
-      final statusCode = response.statusCode ?? 0;
-      return statusCode >= 200 && statusCode < 300;
+      // One event_id for every attempt: the backend deduplicates retries.
+      final data = {
+        'event_id': eventId ?? CaregiverCredentials.randomId(),
+        'keyword': keyword,
+        'confidence': confidence,
+        'source': source,
+      };
+      final deadline = DateTime.now().add(retryWindow);
+      var delay = const Duration(milliseconds: 500);
+      while (true) {
+        try {
+          final response = await _dio.post<Map<String, dynamic>>(
+            url,
+            options: Options(headers: ApiToken.headers),
+            data: data,
+          );
+          final statusCode = response.statusCode ?? 0;
+          return statusCode >= 200 && statusCode < 300;
+        } on DioException catch (e) {
+          final statusCode = e.response?.statusCode ?? 0;
+          // A 4xx (bad token, bad request) will not fix itself by retrying.
+          if (statusCode >= 400 && statusCode < 500) rethrow;
+          if (DateTime.now().add(delay).isAfter(deadline)) rethrow;
+          debugPrint('Manual alert attempt failed, retrying: ${e.message}');
+        }
+        await Future<void>.delayed(delay);
+        delay = delay * 2 > const Duration(seconds: 4)
+            ? const Duration(seconds: 4)
+            : delay * 2;
+      }
     } catch (e) {
       debugPrint('Error sending manual alert: $e');
       return false;

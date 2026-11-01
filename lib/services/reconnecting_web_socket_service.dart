@@ -1,6 +1,10 @@
 import 'dart:async';
-import 'alert_trace.dart';
+import 'dart:math';
 
+import 'alert_trace.dart';
+import 'api_token.dart';
+
+import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 enum SocketConnectionStatus {
@@ -16,7 +20,8 @@ class ReconnectingWebSocketService<T> {
     required this.parser,
     this.connector,
     this.reconnectDelay = const Duration(seconds: 2),
-    this.maxReconnectDelay = const Duration(seconds: 30),
+    // On a LAN the Pi is either back within seconds or not at all; a long cap only delays alerts.
+    this.maxReconnectDelay = const Duration(seconds: 5),
     this.readyTimeout = const Duration(seconds: 10),
     this.teardownTimeout = const Duration(seconds: 2),
     this.onReady,
@@ -44,6 +49,7 @@ class ReconnectingWebSocketService<T> {
   bool _started = false;
   int _reconnectAttempt = 0;
   int _generation = 0;
+  static final _random = Random();
 
   void _trace(String stage, String outcome, [String? reason]) {
     traceAlert(stage, null, outcome, {
@@ -100,9 +106,16 @@ class ReconnectingWebSocketService<T> {
     final generation = _generation;
     _trace('socket_attempt', openingStatus.name);
     try {
+      // Headers are read per attempt so a token changed in Settings applies on reconnect.
       _channel = connector != null
           ? connector!(uri)
-          : WebSocketChannel.connect(uri);
+          : IOWebSocketChannel.connect(
+              uri,
+              headers: ApiToken.headers,
+              // An unanswered ping closes a half-open socket (Pi power cut, AP roam);
+              // without it onDone never fires and the app shows "connected" forever.
+              pingInterval: const Duration(seconds: 5),
+            );
       unawaited(
         _channel!.ready
             .timeout(readyTimeout)
@@ -182,12 +195,13 @@ class ReconnectingWebSocketService<T> {
     final multiplier = 1 << _reconnectAttempt.clamp(0, 6);
     _reconnectAttempt++;
     final milliseconds = reconnectDelay.inMilliseconds * multiplier;
-    return Duration(
-      milliseconds: milliseconds.clamp(
-        reconnectDelay.inMilliseconds,
-        maxReconnectDelay.inMilliseconds,
-      ),
+    final capped = milliseconds.clamp(
+      reconnectDelay.inMilliseconds,
+      maxReconnectDelay.inMilliseconds,
     );
+    // +/-20% jitter so several sockets (and phones) do not reconnect in lockstep.
+    final jitter = 0.8 + _random.nextDouble() * 0.4;
+    return Duration(milliseconds: (capped * jitter).round());
   }
 
   Future<void> _teardown(

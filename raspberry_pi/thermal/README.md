@@ -163,10 +163,10 @@ Runtime environment variables:
 ```ini
 Environment=DATASET_DIR=/home/thesis/Project_Pi/dataset
 
-# Temperature-based model (original)
-Environment=THERMAL_HUMAN_MODEL_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_shape.tflite
-Environment=THERMAL_HUMAN_MODEL_METADATA_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_shape_labels.json
-Environment=THERMAL_HUMAN_MODEL_THRESHOLD=0.65
+# Temperature-based model (original). As deployed: no threshold override, so the
+# metadata's optimal_threshold applies. Set THERMAL_HUMAN_MODEL_THRESHOLD only to override it.
+Environment=THERMAL_HUMAN_MODEL_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_detector.tflite
+Environment=THERMAL_HUMAN_MODEL_METADATA_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_detector.metadata.json
 
 # Shape-aware model (new) — optional, auto-detected at default path
 Environment=THERMAL_HUMAN_SHAPE_MODEL_PATH=/home/thesis/Project_Pi/dataset/thermal/models/thermal_human_shape.tflite

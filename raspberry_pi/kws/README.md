@@ -66,26 +66,34 @@ pipeline running while dependencies are installed.
 
 ## Install openWakeWord and wav2vec2 verifier
 
-Install the optional openWakeWord engine and Filipino wav2vec2 verifier inside
-the same KWS virtual environment:
+The deployed Pi's package versions are recorded in
+`raspberry_pi/requirements/kws-env.lock.txt` (and `thermal-env-sys.lock.txt` for the
+backend). `install_headless.sh` never installs packages; it only reports drift from
+these files. Changing a package (especially onnxruntime, openWakeWord or Vosk) changes
+detection behavior, so do it only as a reviewed upgrade. The helper installs the
+pinned versions and refuses to run without its acknowledgement flag:
 
 ```bash
 cd ~/Project_Pi
-bash raspberry_pi/scripts/install_kws_openwakeword_deps.sh
+bash raspberry_pi/scripts/install_kws_openwakeword_deps.sh --i-understand-this-upgrades-packages
 ~/kws-env/bin/python -c "import openwakeword; openwakeword.utils.download_models()"
 ```
 
-Manual dependency install, if you are not using the helper script:
+The wav2vec2 verifier (transformers, torch) is not in the lock file; it is disabled
+in `kws-alert.service` (`WAV2VEC2_VERIFIER_ENABLED=0`).
+
+Manual dependency install, if you are not using the helper script (pinned, never
+`--upgrade`):
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y libspeexdsp-dev
-~/kws-env/bin/pip install --upgrade openwakeword onnxruntime soundfile transformers torch
+~/kws-env/bin/pip install -r raspberry_pi/requirements/kws-env.lock.txt
 
 PY_TAG="$(~/kws-env/bin/python -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
 ~/kws-env/bin/pip install \
   "https://github.com/dscripka/openWakeWord/releases/download/v0.1.1/speexdsp_ns-0.1.2-${PY_TAG}-${PY_TAG}-linux_aarch64.whl" \
-  || ~/kws-env/bin/pip install speexdsp-ns
+  || ~/kws-env/bin/pip install speexdsp-ns==0.1.2
 ```
 
 Smoke test ONNX Runtime, Speex noise suppression, and VAD:
