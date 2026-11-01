@@ -186,10 +186,21 @@ done
 
 # API auth: the mode the backend will actually run, by its own rules (backend/main.py).
 # Missing or incomplete configuration runs "locked"; it never falls back to open.
-env_value() { sed -n "s/^$1=//p" "$2" | tail -n 1 | tr -d '"'"'"'\r' | xargs; }
+# Bash builtins only: a value (the API token) must never become an argument of an
+# external command, where any local user could read it in the process list.
+env_value() {
+  local key="$1" conf="$2" line value=""
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    [[ "${line}" == "${key}="* ]] && value="${line#*=}"  # the last assignment wins
+  done <"${conf}"
+  value="${value//[\"\'$'\r']/}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  printf '%s' "${value%"${value##*[![:space:]]}"}"
+}
 effective_auth_mode() {
   local conf="$1" mode token ack
-  mode="$(env_value PROJECT_PI_API_AUTH "${conf}" | tr '[:upper:]' '[:lower:]')"
+  mode="$(env_value PROJECT_PI_API_AUTH "${conf}")"
+  mode="${mode,,}"
   token="$(env_value PROJECT_PI_API_TOKEN "${conf}")"
   ack="$(env_value PROJECT_PI_OPEN_MODE_ACK "${conf}")"
   if [[ "${mode}" == required && ${#token} -ge 16 && "${token}" != "${LEGACY_TOKEN}" ]]; then

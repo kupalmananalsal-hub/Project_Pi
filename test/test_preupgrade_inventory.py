@@ -216,7 +216,7 @@ class PreupgradeInventoryTest(unittest.TestCase):
         cases = {
             "": "mandatory asset alerts_db is not listed",            # comment-only
             manifest_text(FULL[:2]): "mandatory asset thermal_model is not listed",
-            manifest_text(FULL + [("alerts_db", ASSETS[1])]): "duplicate role alerts_db",
+            manifest_text(FULL + [("thermal_model", ASSETS[3])]): "duplicate role thermal_model",
             manifest_text(FULL[:3] + [("thermal_labels", ASSETS[2])]): "duplicate path",
             manifest_text(FULL + [("recordings", "README")]): "unknown role 'recordings'",
             manifest_text(FULL[:3]) + "thermal_labels\n": "malformed line",
@@ -251,6 +251,40 @@ class PreupgradeInventoryTest(unittest.TestCase):
             self.skipTest("symlinks need privileges on this Windows account")
         stderr = self.try_backup(manifest_text(FULL[:3] + [("thermal_labels", "linked/outside.dat")]))
         self.assertIn("is a symlink", stderr)
+
+    def decoy_db(self, name):
+        decoy = self.repo / "raspberry_pi" / "backend" / name
+        db = sqlite3.connect(decoy)
+        db.execute("CREATE TABLE decoy (x)")
+        db.commit()
+        db.close()
+        return decoy.relative_to(self.repo).as_posix()
+
+    def test_database_roles_cannot_point_at_a_decoy(self):
+        # All four roles present, but a database role names another SQLite file.
+        decoy = self.decoy_db("decoy.db")
+        for role, index in (("alerts_db", 0), ("alerts_db_backup", 1)):
+            entries = list(FULL)
+            entries[index] = (role, decoy)
+            stderr = self.try_backup(manifest_text(entries))
+            self.assertIn(f"{role} must be {ASSETS[index]}", stderr)
+
+    def test_inventory_rejects_a_backup_made_from_a_decoy_database(self):
+        decoy = self.decoy_db("decoy.db")
+        self.backup_now()
+        # A consistent-looking backup whose manifest maps alerts_db to the decoy.
+        copy = self.backup / decoy
+        shutil.copyfile(self.repo / decoy, copy)
+        entries = [("alerts_db", decoy)] + FULL[1:]
+        (self.backup / "protected_assets.txt").write_text(manifest_text(entries),
+                                                          encoding="utf-8", newline="\n")
+        subprocess.run([shutil.which("bash"), "-c",
+                        "sha256sum -- ROLLBACK_COMMIT protected_assets.txt "
+                        f"{decoy} {ASSETS[1]} {ASSETS[2]} {ASSETS[3]} > SHA256SUMS"],
+                       cwd=self.backup, check=True)
+        result = self.inventory()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"alerts_db must be {ASSETS[0]}", result.stdout)
 
     def test_inventory_rejects_a_backup_whose_manifest_omits_an_asset(self):
         self.backup_now()

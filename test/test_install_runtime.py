@@ -285,6 +285,59 @@ class InstallerRuntimeTest(unittest.TestCase):
         self.assertIn("PROJECT_PI_OPEN_MODE_ACK=isolated-network-verified\n", env)
         self.assertNotIn("PROJECT_PI_API_TOKEN=", env)
 
+    SPIED = ("sed", "tail", "tr", "xargs", "echo", "printf", "grep", "cat", "diff", "stat",
+             "cmp", "sort", "cut", "awk", "head", "od", "mktemp", "date", "sha256sum", "git",
+             "cp", "mv", "rm", "mkdir", "chmod", "ln", "ls", "env", "basename", "dirname")
+
+    def spy_on_external_commands(self):
+        """Wrap each external command so its arguments are logged before it runs."""
+        log = self.state / "argv.log"
+        path = f"/usr/bin:/bin:{os.environ.get('PATH', '')}"
+        for name in self.SPIED:
+            if (self.stubs / name).exists():
+                continue
+            real = subprocess.run([shutil.which("bash"), "-c", f"PATH='{path}' type -P {name}"],
+                                  capture_output=True, text=True).stdout.strip()
+            if real:
+                self.write_stub(name, "#!/usr/bin/env bash\n"
+                                      f'printf "%s\\n" "{name} $*" >> "{log.as_posix()}"\n'
+                                      f'exec "{real}" "$@"\n')
+        return log
+
+    def test_existing_token_never_reaches_an_external_command(self):
+        self.legacy_pi()  # backend.env in required mode with EXISTING_TOKEN
+        log = self.spy_on_external_commands()
+        for args in ((), ("--apply",)):
+            result = self.run_installer(*args)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn(self.EXISTING_TOKEN, result.stdout + result.stderr)
+            self.assertIn("backend would run required", result.stdout)
+        argv = log.read_text(encoding="utf-8")
+        self.assertIn("sed ", argv)  # the spies did run
+        self.assertNotIn(self.EXISTING_TOKEN, argv)
+        self.assertNotIn("\nxargs ", "\n" + argv)
+        self.assertNotIn(self.EXISTING_TOKEN, "\n".join(self.calls()))
+
+    def test_existing_backend_env_is_read_like_systemd_without_external_tools(self):
+        # Quotes, CRLF line ends, spaces and repeated keys (the last one wins).
+        valid = (f'PROJECT_PI_API_AUTH="Required"\r\nPROJECT_PI_API_TOKEN=short\r\n'
+                 f"PROJECT_PI_API_TOKEN=' {self.EXISTING_TOKEN} '\r\n")
+        conf = self.put("etc/project-pi/backend.env", valid)
+        result = self.run_installer("--apply")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("backend would run required", result.stdout)
+        self.assertEqual(conf.read_bytes(), valid.encode())
+        for malformed in ("PROJECT_PI_API_AUTH=required\nPROJECT_PI_API_TOKEN=\n",
+                          f"PROJECT_PI_API_TOKEN={self.EXISTING_TOKEN}\n",
+                          f"PROJECT_PI_API_AUTH=required\nPROJECT_PI_API_TOKEN={self.EXISTING_TOKEN}\n"
+                          "PROJECT_PI_API_TOKEN=\n",
+                          f"# PROJECT_PI_API_AUTH=required\nPROJECT_PI_API_TOKEN={self.EXISTING_TOKEN}\n"):
+            conf = self.put("etc/project-pi/backend.env", malformed)
+            result = self.run_installer("--apply")
+            self.assertEqual(result.returncode, 2, (malformed, result.stdout + result.stderr))
+            self.assertIn("gives locked", result.stderr)
+            self.assertEqual(conf.read_text(encoding="utf-8"), malformed)
+
     def test_existing_backend_env_must_already_give_the_requested_mode(self):
         cases = [
             ("PROJECT_PI_API_AUTH=open\n", "required", "gives locked"),  # open, no ack

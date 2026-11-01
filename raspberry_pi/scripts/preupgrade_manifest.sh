@@ -2,12 +2,18 @@
 # decides whether a protected-asset manifest is acceptable.
 #
 # Format: "<role> <path>" per line; "#" comments and blank lines ignored. Every role in
-# PREUPGRADE_ROLES must appear exactly once (a model may live at a confirmed alternative
-# path, but no asset may be left out). A "? " prefix marks an unconfirmed entry and is
-# refused. Paths are relative to the checkout, without "." or ".." parts, and no part of
-# them may be a symlink; the file must exist as a regular file.
+# PREUPGRADE_ROLES must appear exactly once. The two database roles are bound to the
+# backend's real files (PREUPGRADE_FIXED_PATHS), so a manifest cannot point them at a
+# decoy; only the thermal model and labels may live at a confirmed alternative path. A
+# "? " prefix marks an unconfirmed entry and is refused. Paths are relative to the
+# checkout, without "." or ".." parts, and no part of them may be a symlink; the file
+# must exist as a regular file.
 
 PREUPGRADE_ROLES=(alerts_db alerts_db_backup thermal_model thermal_labels)
+declare -A PREUPGRADE_FIXED_PATHS=(
+  [alerts_db]=raspberry_pi/backend/alerts.db
+  [alerts_db_backup]=raspberry_pi/backend/alerts.db.backup
+)
 
 # read_manifest MANIFEST REPO: prints "role path" lines, or every problem on stderr and
 # returns 1. Nothing is written.
@@ -36,6 +42,13 @@ read_manifest() {
     fi
     if [[ " ${PREUPGRADE_ROLES[*]} " != *" ${role} "* ]]; then
       echo "MANIFEST unknown role '${role}' (expected one of: ${PREUPGRADE_ROLES[*]})" >&2
+      errors=1
+      continue
+    fi
+    if [[ -n "${PREUPGRADE_FIXED_PATHS[${role}]:-}" \
+        && "${path}" != "${PREUPGRADE_FIXED_PATHS[${role}]}" ]]; then
+      echo "MANIFEST ${role} must be ${PREUPGRADE_FIXED_PATHS[${role}]} (the backend's own" \
+        "file), not ${path}" >&2
       errors=1
       continue
     fi
