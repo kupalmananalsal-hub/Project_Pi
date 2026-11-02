@@ -111,7 +111,7 @@ class _ResidentModeScreenState extends State<ResidentModeScreen>
                           onDoubleTap: () => _control.sendTest(full: true),
                           onLongPressStart: (_) {
                             setState(() => _pressed = true);
-                            unawaited(_control.beginHold());
+                            // Consume the long press without sending tap or mute commands.
                           },
                           onLongPressEnd: (_) => _release(),
                           onLongPressCancel: _release,
@@ -143,7 +143,7 @@ class _ResidentModeScreenState extends State<ResidentModeScreen>
                   const Padding(
                     padding: EdgeInsets.symmetric(horizontal: 24),
                     child: Text(
-                      'Tap: Keyword TEST\nDouble tap: Full Alert TEST\nHold: request recognition mute',
+                      'Tap: Keyword TEST\nDouble tap: Full Alert TEST\nHold-to-mute: disabled',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Colors.white70, height: 1.6),
                     ),

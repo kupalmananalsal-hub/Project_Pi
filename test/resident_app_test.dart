@@ -101,7 +101,7 @@ void main() {
       tester.getCenter(find.text('HELP')),
     );
     await tester.pump(const Duration(milliseconds: 700));
-    expect(service.holds, 1);
+    expect(service.holds, 0);
     await gesture.up();
     await tester.pump(const Duration(milliseconds: 500));
     expect(service.releases, greaterThanOrEqualTo(1));

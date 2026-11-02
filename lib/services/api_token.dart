@@ -1,21 +1,29 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-/// Bearer token the Pi backend requires on every /api and /ws route
-/// (PROJECT_PI_API_TOKEN in /etc/project-pi/backend.env on the Pi).
-///
-/// Loaded once before runApp so HTTP and WebSocket clients, which are created
-/// on demand all over the app, can read it synchronously.
+/// Active device credential, installed only after pairing/server verification.
+/// Legacy save remains for compatibility; connection settings never request a token.
 class ApiToken {
   static const _storage = FlutterSecureStorage();
   static const _key = 'pi_api_token';
 
   static String current = '';
+  static String deviceId = '';
+  static String endpoint = '';
+  static Map<String, String> headersFor(String host, int port) =>
+      endpoint.isEmpty || endpoint == '$host:$port' ? headers : const {};
 
-  static Map<String, String> get headers =>
-      current.isEmpty ? const {} : {'Authorization': 'Bearer $current'};
+  static Map<String, String> get headers => current.isEmpty
+      ? const {}
+      : {
+          'Authorization': 'Bearer $current',
+          if (deviceId.isNotEmpty) 'X-Device-Id': deviceId,
+        };
 
   static Future<void> load() async {
-    current = await _storage.read(key: _key) ?? '';
+    // Device credentials activate only after the Pi identity proof succeeds.
+    current = '';
+    deviceId = '';
+    endpoint = '';
   }
 
   static Future<void> save(String value) async {

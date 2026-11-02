@@ -77,7 +77,7 @@ class ResidentMonitorService extends ChangeNotifier {
           .getUri<Map<String, dynamic>>(
             settings.httpUri('/api/resident/main'),
             options: Options(
-              headers: ApiToken.headers,
+              headers: ApiToken.headersFor(settings.host, settings.port),
               receiveTimeout: const Duration(seconds: 2),
             ),
           )
@@ -152,7 +152,7 @@ class ResidentMonitorService extends ChangeNotifier {
             settings.httpUri('/api/resident/main'),
             data: jsonEncode(body),
             options: Options(
-              headers: ApiToken.headers,
+              headers: ApiToken.headersFor(settings.host, settings.port),
               contentType: Headers.jsonContentType,
               receiveTimeout: const Duration(seconds: 2),
             ),

@@ -146,33 +146,22 @@ void main() {
     },
   );
   test(
-    'mute is never shown before KWS acknowledgement; release clears holding',
+    'remote mute stays disabled even if a backend advertises capability',
     () async {
       final (client, adapter) = await resident();
+      expect(client.muteAvailable, false);
       await client.beginHold();
-      expect(client.holding, true);
-      expect(client.muted, false);
       adapter.ack = true;
       await client.poll();
-      expect(client.muted, true);
-      await client.release();
-      expect(client.muted, false);
-      expect((adapter.requests.last.data as Map)['action'], 'mute_end');
-    },
-  );
-  test(
-    'release before delayed start acknowledgement ends the acquired lease',
-    () async {
-      final (client, adapter) = await resident();
-      adapter.startGate = Completer<void>();
-      final start = client.beginHold();
-      await Future<void>.delayed(Duration.zero);
-      await client.release();
-      adapter.startGate!.complete();
-      await start;
       expect(client.holding, false);
       expect(client.muted, false);
-      expect((adapter.requests.last.data as Map)['action'], 'mute_end');
+      await client.release();
+      expect(
+        adapter.requests.where(
+          (r) => (r.data as Map)['action'].toString().startsWith('mute_'),
+        ),
+        isEmpty,
+      );
     },
   );
   test('network loss and reconnect never replay a hold', () async {
@@ -190,17 +179,17 @@ void main() {
       adapter.requests
           .where((r) => (r.data as Map)['action'] == 'mute_start')
           .length,
-      1,
+      0,
     );
   });
-  test('background pause sends release and disconnect', () async {
+  test('background pause disconnects without a mute command', () async {
     final (client, adapter) = await resident();
     await client.beginHold();
     await client.pause();
     expect(client.connected, false);
     expect(
       adapter.requests.map((r) => (r.data as Map)['action']).toList(),
-      containsAllInOrder(['mute_start', 'mute_end', 'disconnect']),
+      contains('disconnect'),
     );
   });
   test(

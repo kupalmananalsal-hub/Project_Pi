@@ -73,10 +73,8 @@ class _ConnectionStatusScreenState
           ],
         ),
         const SizedBox(height: 16),
-        OutlinedButton.icon(
-          icon: const Icon(Icons.key),
-          label: const Text('Pair reliable alert delivery'),
-          onPressed: _pairDelivery,
+        const Text(
+          'Connect with the editable Pi address and port. First enrollment requires local operator approval; credentials are saved automatically.',
         ),
         if (alertState.pairingState ==
             AlertPairingState.reconfigurationRequired)
@@ -84,10 +82,6 @@ class _ConnectionStatusScreenState
             alertState.error ??
                 'Re-pair this endpoint to restore reliable alerts.',
           ),
-        TextButton(
-          onPressed: _unpairDelivery,
-          child: const Text('Administrator: unpair reliable delivery'),
-        ),
         TextField(
           controller: _hostController,
           keyboardType: TextInputType.url,
@@ -258,121 +252,6 @@ class _ConnectionStatusScreenState
         ),
       ],
     );
-  }
-
-  Future<void> _pairDelivery() async {
-    final id = await CaregiverCredentials.installationId();
-    if (!mounted) return;
-    final controller = TextEditingController();
-    final token = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Pair this Caregiver'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              'Give this installation ID to the Pi administrator, then enter its pairing secret.',
-            ),
-            SelectableText(id),
-            TextField(
-              controller: controller,
-              obscureText: true,
-              decoration: const InputDecoration(labelText: 'Pairing secret'),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-    // The dialog route can still render during its closing animation.
-    if (token != null && token.length >= 32) {
-      await CaregiverCredentials.saveToken(_hostController.text.trim(), token);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Pairing saved. Reconnect to activate reliable delivery.',
-            ),
-          ),
-        );
-      }
-    } else if (token != null && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Use the full pairing secret (at least 32 characters).',
-          ),
-        ),
-      );
-    }
-  }
-
-  Future<void> _unpairDelivery() async {
-    String secret = '';
-    final approved = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Unpair reliable alert delivery?'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              'This removes saved endpoint credentials and enables best-effort legacy delivery after reconnecting. The Pi administrator must enter an existing pairing secret. Revoke this installation on the Pi separately.',
-            ),
-            TextField(
-              obscureText: true,
-              onChanged: (value) => secret = value.trim(),
-              decoration: const InputDecoration(
-                labelText: 'Existing pairing secret',
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Unpair'),
-          ),
-        ],
-      ),
-    );
-    if (approved != true || !mounted) return;
-    try {
-      await CaregiverCredentials.unpair(secret);
-      if (!mounted) return;
-      ref.read(alertsProvider.notifier).disconnect();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Unpaired. Reconnect to use legacy delivery, or pair again.',
-          ),
-        ),
-      );
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Unpair failed. Verify the administrator pairing secret and retry.',
-            ),
-          ),
-        );
-      }
-    }
   }
 
   Future<void> _confirmPowerAction(

@@ -67,7 +67,12 @@ class ResidentAlertService {
         try {
           final response = await _dio.post<Map<String, dynamic>>(
             url,
-            options: Options(headers: ApiToken.headers),
+            options: Options(
+              headers: ApiToken.headersFor(
+                host,
+                AppSettings.normalizeBackendPort(port),
+              ),
+            ),
             data: data,
           );
           final statusCode = response.statusCode ?? 0;

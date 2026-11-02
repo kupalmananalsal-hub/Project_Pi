@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/app_settings.dart';
 import 'mute_acknowledgement.dart';
+import 'device_pairing_service.dart';
 
 class ResidentPairing {
   static const _storage = FlutterSecureStorage();
@@ -41,11 +42,14 @@ class ResidentControlClient extends ChangeNotifier {
   int _port = 8765, _sequence = 0, _generation = 0;
   bool _holding = false, _busy = false, _disposed = false, _paused = false;
   int _holdGeneration = 0;
+  int _pairingGeneration = 0;
+  bool _managedPairing = false;
   Map<String, dynamic> state = {};
   String message = 'Not connected — configure Resident pairing';
   String? lastEventId;
   bool get connected => _session != null;
-  bool get muteAvailable => connected && state['remote_mute_available'] == true;
+  bool get muteAvailable =>
+      false; // Hold-to-mute remains unavailable in this release.
   bool get muted =>
       connected &&
       _holding &&
@@ -80,22 +84,29 @@ class ResidentControlClient extends ChangeNotifier {
   }
 
   Future<void> connectSaved() async {
+    final generation = ++_pairingGeneration;
+    _paused = false;
+    _timer?.cancel();
     try {
       final prefs = await SharedPreferences.getInstance();
       final host = AppSettings.normalizeBackendHost(prefs.getString('host'));
       final port = AppSettings.normalizeBackendPort(prefs.getInt('port'));
       if (host == null) return;
-      final pairing = await ResidentPairing.load(host, port);
-      if (_disposed) return;
-      await connect(
+      final credential = await DevicePairingService().ensure(
         host,
         port,
-        pairing['id']?.toString() ?? '',
-        pairing['token']?.toString() ?? '',
+        'resident',
       );
-    } catch (_) {
-      message = 'Pairing unavailable — open Settings';
+      if (_disposed || generation != _pairingGeneration || _paused) return;
+      _managedPairing = true;
+      await connect(host, port, credential.deviceId, credential.token);
+    } catch (error) {
+      if (_disposed || generation != _pairingGeneration || _paused) return;
+      message = error is PairingRequired
+          ? error.message
+          : 'Unable to pair with Pi. Check IP and port.';
       _changed();
+      _timer = Timer(const Duration(seconds: 2), () => connectSaved());
     }
   }
 
@@ -160,6 +171,16 @@ class ResidentControlClient extends ChangeNotifier {
 
   Future<void> _connect(int generation) async {
     try {
+      if (_managedPairing) {
+        final credential = await DevicePairingService().ensure(
+          _host,
+          _port,
+          'resident',
+        );
+        if (_disposed || _paused || generation != _generation) return;
+        _id = credential.deviceId;
+        _token = credential.token;
+      }
       final value = await _post({'action': 'connect'});
       if (_disposed || _paused || generation != _generation) return;
       _session = value['session_id'] as String;
@@ -299,6 +320,7 @@ class ResidentControlClient extends ChangeNotifier {
   }
 
   Future<void> pause() async {
+    ++_pairingGeneration;
     _paused = true;
     _timer?.cancel();
     await release();

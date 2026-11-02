@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/alert_event.dart';
 import 'alert_trace.dart';
+import 'device_pairing_service.dart';
 import 'reconnecting_web_socket_service.dart';
 
 enum AlertPairingState { legacy, reliable, reconfigurationRequired }
@@ -27,9 +28,13 @@ class CaregiverCredentials {
     return id;
   }
 
-  static Future<String?> token(String host) =>
-      storage.read(key: 'caregiver_token_$host');
+  static Future<String?> token(String host) async =>
+      DevicePairingService.active(host, 'caregiver')?.token ??
+      await storage.read(key: 'caregiver_token_$host');
   static Future<AlertPairingState> endpointState(String host) async {
+    if (DevicePairingService.active(host, 'caregiver') != null) {
+      return AlertPairingState.reliable;
+    }
     final values = await storage.readAll();
     // Migrate pre-marker installations by inspecting all saved endpoint keys.
     final hasPairing =
@@ -212,7 +217,9 @@ class AlertDeliveryService {
 
   static Future<AlertInbox> openInbox(String host, String installation) async {
     final root = await getApplicationSupportDirectory();
-    final name = base64Url.encode(utf8.encode(host)).replaceAll('=', '');
+    final identity =
+        DevicePairingService.active(host, 'caregiver')?.inboxKey ?? host;
+    final name = base64Url.encode(utf8.encode(identity)).replaceAll('=', '');
     final inbox = AlertInbox(
       Directory('${root.path}/alert_delivery/$installation/$name'),
     );

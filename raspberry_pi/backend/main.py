@@ -55,6 +55,9 @@ from alert_decision import AlertDecisionEngine
 from alert_trace import trace_alert
 from alert_delivery import DeliverySessions
 from resident_control import ControlPlane
+from device_pairing import DeviceRegistry
+
+device_registry = DeviceRegistry.from_env()
 
 resident_controls = ControlPlane()
 
@@ -197,7 +200,7 @@ def api_auth_enabled() -> bool:
     return effective_auth_mode() != "open"
 
 
-def api_token_valid(authorization: str) -> bool:
+def api_token_valid(authorization: str, device_id: str = "") -> bool:
     scheme, _, token = authorization.partition(" ")
     token = token.strip()
     return (
@@ -206,7 +209,8 @@ def api_token_valid(authorization: str) -> bool:
         and API_TOKEN != LEGACY_DEFAULT_API_TOKEN
         and token != LEGACY_DEFAULT_API_TOKEN
         and scheme.lower() == "bearer"
-        and hmac.compare_digest(token.encode(), API_TOKEN.encode())
+        and (hmac.compare_digest(token.encode(), API_TOKEN.encode())
+             or device_registry.authenticate(device_id, token, "caregiver"))
     )
 
 
@@ -214,6 +218,8 @@ def api_token_required(scope: dict[str, Any]) -> bool:
     if scope["type"] == "http" and scope.get("method") == "OPTIONS":
         return False
     path = scope.get("path", "")
+    if path in ("/api/discovery", "/api/pairing/request", "/api/pairing/claim", "/api/pairing/prove"):
+        return False  # Minimal discovery/enrollment routes enforce their own bounded contract.
     if path == "/api/resident/control":
         return False  # Exact route authenticates a scoped resident secret itself.
     query = scope.get("query_string", b"").split(b"&")
@@ -236,7 +242,16 @@ class ApiTokenMiddleware:
             and api_token_required(scope)
         ):
             headers = dict(scope.get("headers") or [])
-            if not api_token_valid(headers.get(b"authorization", b"").decode("latin-1")):
+            authorization = headers.get(b"authorization", b"").decode("latin-1")
+            device_id = headers.get(b"x-device-id", b"").decode("latin-1")
+            token = authorization.partition(" ")[2]
+            is_device = device_registry.authenticate(device_id, token, "caregiver")
+            read_paths = {"/api/status", "/api/button", "/api/audio/status", "/api/audio/noise-suppression", "/api/alerts", "/api/resident/main", "/ws/audio", "/ws/thermal", "/ws/alerts"}
+            write_paths = {"/api/leds", "/api/audio/noise-suppression", "/api/resident/main", "/api/alerts/manual", "/api/reboot", "/api/shutdown"}
+            allowed = (scope.get("path") in read_paths if scope.get("method", "GET") == "GET"
+                       else (scope.get("path") in write_paths and scope.get("method") == "POST")
+                       or (scope.get("path") == "/api/alerts" and scope.get("method") == "DELETE"))
+            if not api_token_valid(authorization, device_id) or (is_device and not allowed):
                 if scope["type"] == "http":
                     await send({
                         "type": "http.response.start",
@@ -271,26 +286,72 @@ async def resident_body(request: Request) -> dict:
         raise HTTPException(400, "Invalid control message")
 
 
+@app.get("/api/discovery")
+async def device_discovery():
+    value = device_registry.discovery()
+    if effective_auth_mode() != "required":
+        value["pairing_available"] = False
+        value["enrollment_open"] = False
+    return value
+
+
+async def pairing_operation(request: Request, operation: str):
+    if effective_auth_mode() != "required" or not device_registry.available():
+        raise HTTPException(503, "Local operator pairing setup required")
+    body = await resident_body(request)
+    try:
+        if operation == "request":
+            return device_registry.request(body.get("role"), body.get("device_id"), body.get("claim_proof"))
+        if operation == "claim":
+            return device_registry.claim(body.get("request_id"), body.get("claim_proof"))
+        return device_registry.prove(body.get("device_id"), body.get("nonce"))
+    except (ValueError, OSError, sqlite3.Error):
+        raise HTTPException(409, "Pairing rejected, expired, revoked, or local enrollment window closed")
+
+
+@app.post("/api/pairing/request")
+async def device_pair_request(request: Request):
+    return await pairing_operation(request, "request")
+
+
+@app.post("/api/pairing/claim")
+async def device_pair_claim(request: Request):
+    return await pairing_operation(request, "claim")
+
+
+@app.post("/api/pairing/prove")
+async def device_pair_prove(request: Request):
+    return await pairing_operation(request, "prove")
+
+
 @app.post("/api/resident/control")
 async def resident_control(request: Request):
     identity = request.headers.get("x-resident-id", "")
     scheme, _, token = request.headers.get("authorization", "").partition(" ")
     if (effective_auth_mode() != "required" or scheme.lower() != "bearer"
-            or not resident_controls.authenticate(identity, token)):
+            or not (resident_controls.authenticate(identity, token)
+                    or device_registry.authenticate(identity, token, "resident"))):
         raise HTTPException(401, "Resident test pairing unavailable or invalid")
     body = await resident_body(request)
+    if device_registry.authenticate(identity, token, "resident") and str(body.get("action", "")).startswith("mute_"):
+        raise HTTPException(403, "Remote hold-to-mute disabled for paired Residents")
     try:
         if body.get("action") == "connect":
-            return resident_controls.connect(identity)
-        if body.get("action") == "heartbeat":
-            return resident_controls.heartbeat(identity, body.get("session_id"))
-        return resident_controls.command(identity, body)
+            result = resident_controls.connect(identity)
+        elif body.get("action") == "heartbeat":
+            result = resident_controls.heartbeat(identity, body.get("session_id"))
+        else:
+            result = resident_controls.command(identity, body)
+        if device_registry.authenticate(identity, token, "resident"):
+            result["remote_mute_available"] = False
+            result["max_lease_seconds"] = None
+        return result
     except (ValueError, OSError):
         raise HTTPException(409, "Control rejected; reconnect or check capability")
 
 
 def require_main_test_access(request: Request):
-    if not api_token_valid(request.headers.get("authorization", "")):
+    if not api_token_valid(request.headers.get("authorization", ""), request.headers.get("x-device-id", "")):
         raise HTTPException(401, "Authenticated Main App required")
     if not resident_controls.settings.test_mode:
         raise HTTPException(404, "Resident TEST mode disabled")

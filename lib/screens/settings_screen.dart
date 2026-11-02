@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/app_settings.dart';
 import '../providers/connection_provider.dart';
 import '../providers/settings_provider.dart';
-import '../services/api_token.dart';
 import '../widgets/status_card.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -17,8 +16,8 @@ class SettingsScreen extends ConsumerStatefulWidget {
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   late final TextEditingController _hostController;
   late final TextEditingController _portController;
-  late final TextEditingController _tokenController;
   late final FocusNode _hostFocusNode;
+  bool _portEdited = false;
 
   @override
   void initState() {
@@ -27,7 +26,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _portController = TextEditingController(
       text: AppSettings.defaultPort.toString(),
     );
-    _tokenController = TextEditingController(text: ApiToken.current);
     _hostFocusNode = FocusNode();
   }
 
@@ -36,7 +34,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _hostFocusNode.dispose();
     _hostController.dispose();
     _portController.dispose();
-    _tokenController.dispose();
     super.dispose();
   }
 
@@ -48,7 +45,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _hostController.text = settings.host;
     }
     final portText = settings.port.toString();
-    if (_portController.text != portText) {
+    if (!_portEdited) {
       _portController.text = portText;
     }
 
@@ -78,7 +75,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           TextField(
             key: const ValueKey('pi-port-field'),
             controller: _portController,
-            readOnly: true,
+            onChanged: (_) => _portEdited = true,
             keyboardType: TextInputType.number,
             decoration: const InputDecoration(
               labelText: 'Port',
@@ -87,20 +84,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
           const SizedBox(height: 12),
-          TextField(
-            key: const ValueKey('pi-api-token-field'),
-            controller: _tokenController,
-            obscureText: true,
-            autocorrect: false,
-            enableSuggestions: false,
-            decoration: const InputDecoration(
-              labelText: 'Pi API token (optional)',
-              helperText:
-                  'Leave empty unless API authentication is enabled on the Pi',
-              prefixIcon: Icon(Icons.key_rounded),
-              border: OutlineInputBorder(),
-            ),
-            onSubmitted: (_) => _connect(context),
+          const Text(
+            'First connection requires local approval on the Pi. Saved device credentials reconnect automatically, including after an IP change.',
           ),
           const SizedBox(height: 12),
           _ConnectionStatusRow(connection: connection),
@@ -193,15 +178,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       );
       return;
     }
-    if (_tokenController.text.trim() != ApiToken.current) {
-      await ApiToken.save(_tokenController.text);
+    final port = int.tryParse(_portController.text);
+    if (port == null || port < 1 || port > 65535) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Enter a valid port (1–65535).')),
+      );
+      return;
     }
-    await ref
-        .read(connectionProvider.notifier)
-        .connect(
-          host: host,
-          port: int.tryParse(_portController.text) ?? AppSettings.defaultPort,
-        );
+    await ref.read(connectionProvider.notifier).connect(host: host, port: port);
     if (!context.mounted) {
       return;
     }

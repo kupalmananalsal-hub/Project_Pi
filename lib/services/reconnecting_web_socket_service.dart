@@ -111,7 +111,7 @@ class ReconnectingWebSocketService<T> {
           ? connector!(uri)
           : IOWebSocketChannel.connect(
               uri,
-              headers: ApiToken.headers,
+              headers: ApiToken.headersFor(uri.host, uri.port),
               // An unanswered ping closes a half-open socket (Pi power cut, AP roam);
               // without it onDone never fires and the app shows "connected" forever.
               pingInterval: const Duration(seconds: 5),

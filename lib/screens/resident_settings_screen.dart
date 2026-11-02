@@ -1,364 +1,142 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
 import '../models/app_settings.dart';
-import '../services/resident_control_client.dart';
+import '../services/device_pairing_service.dart';
 
 class ResidentSettingsScreen extends StatefulWidget {
   const ResidentSettingsScreen({super.key, this.isInitialSetup = false});
-
   final bool isInitialSetup;
-
   @override
   State<ResidentSettingsScreen> createState() => _ResidentSettingsScreenState();
 }
 
 class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
-  final _formKey = GlobalKey<FormState>();
-  final _hostController = TextEditingController();
-  final _portController = TextEditingController();
-  final _tokenController = TextEditingController();
-  final _identityController = TextEditingController();
-  bool _isLoading = true;
-  bool _isSaving = false;
-
+  final _host = TextEditingController(),
+      _port = TextEditingController(text: '8765');
+  final _form = GlobalKey<FormState>();
+  Timer? _retry;
+  bool _loading = true, _connecting = false;
+  String? _message;
+  int _generation = 0;
   @override
   void initState() {
     super.initState();
-    _loadSettings();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _host.text = prefs.getString('host') ?? AppSettings.defaultHost;
+      _port.text = (prefs.getInt('port') ?? 8765).toString();
+      _loading = false;
+    });
   }
 
   @override
   void dispose() {
-    _hostController.dispose();
-    _portController.dispose();
-    _tokenController.dispose();
-    _identityController.dispose();
+    ++_generation;
+    _retry?.cancel();
+    _host.dispose();
+    _port.dispose();
     super.dispose();
   }
 
-  Future<void> _loadSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    final savedHost = prefs.getString('host') ?? AppSettings.defaultHost;
-    final savedPort = prefs.getInt('port') ?? AppSettings.defaultPort;
-    Map<String, dynamic> pairing = {};
-    try {
-      pairing = await ResidentPairing.load(savedHost, savedPort);
-    } catch (_) {
-      /* Require re-pairing. */
-    }
-
-    if (mounted) {
-      setState(() {
-        _hostController.text = savedHost;
-        _portController.text = savedPort.toString();
-        _identityController.text = pairing['id']?.toString() ?? '';
-        _tokenController.text = pairing['token']?.toString() ?? '';
-        _isLoading = false;
-      });
-    }
-  }
-
-  Future<void> _saveSettings() async {
-    if (!_formKey.currentState!.validate()) {
-      return;
-    }
-
+  Future<void> _connect() async {
+    if (!_form.currentState!.validate()) return;
+    _retry?.cancel();
+    final generation = ++_generation;
+    final host = AppSettings.normalizeBackendHost(_host.text)!;
+    final port = int.parse(_port.text);
     setState(() {
-      _isSaving = true;
+      _connecting = true;
+      _message = 'Connecting to Pi…';
     });
-
-    final host = AppSettings.normalizeBackendHost(_hostController.text);
-    final port =
-        int.tryParse(_portController.text.trim()) ?? AppSettings.defaultPort;
-
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('host', host!);
-    await prefs.setInt('port', port);
     try {
-      await ResidentPairing.save(
-        host,
-        port,
-        _identityController.text.trim(),
-        _tokenController.text.trim(),
-      );
-    } catch (_) {
-      if (mounted) {
-        setState(() => _isSaving = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Secure pairing could not be saved')),
-        );
-      }
-      return;
-    }
-
-    if (mounted) {
-      setState(() {
-        _isSaving = false;
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text(
-            'Settings saved',
-            textAlign: TextAlign.center,
-            style: TextStyle(fontWeight: FontWeight.bold),
-          ),
-          backgroundColor: Colors.green.shade800,
-          duration: const Duration(seconds: 2),
-          behavior: SnackBarBehavior.floating,
-          margin: const EdgeInsets.symmetric(horizontal: 48, vertical: 24),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-        ),
-      );
-
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('host', host);
+      await prefs.setInt('port', port);
+      await DevicePairingService().ensure(host, port, 'resident');
+      if (!mounted || generation != _generation) return;
       if (widget.isInitialSetup) {
         Navigator.of(context).pushReplacementNamed('/');
       } else {
         Navigator.of(context).pop(true);
       }
+    } catch (error) {
+      if (!mounted || generation != _generation) return;
+      setState(() {
+        _connecting = false;
+        _message = error is PairingRequired
+            ? error.message
+            : 'Unable to connect. Check the IP and port.';
+      });
+      _retry = Timer(const Duration(seconds: 2), _connect);
     }
   }
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.black,
-        elevation: 0,
-        leading: widget.isInitialSetup
-            ? null
-            : IconButton(
-                icon: const Icon(Icons.arrow_back, color: Colors.white),
-                onPressed: () => Navigator.of(context).pop(),
-              ),
-        title: const Text(
-          'Pi Connection Settings',
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-        ),
-        centerTitle: true,
-      ),
-      body: _isLoading
-          ? const Center(
-              child: CircularProgressIndicator(color: Color(0xFFE53935)),
-            )
-          : SafeArea(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 28.0,
-                  vertical: 20.0,
-                ),
-                child: Form(
-                  key: _formKey,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const Text(
-                        'Configure Raspberry Pi connection for sending distress alerts.',
-                        style: TextStyle(
-                          color: Colors.white70,
-                          fontSize: 15,
-                          height: 1.4,
-                        ),
-                      ),
-                      const SizedBox(height: 32),
-                      TextFormField(
-                        controller: _hostController,
-                        key: const ValueKey('pi-ip-field'),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                        ),
-                        decoration: InputDecoration(
-                          labelText: 'Raspberry Pi IP Address',
-                          labelStyle: const TextStyle(color: Colors.white70),
-                          hintText: 'e.g. 10.213.117.220',
-                          hintStyle: TextStyle(color: Colors.grey.shade600),
-                          prefixIcon: const Icon(
-                            Icons.lan,
-                            color: Colors.white70,
-                          ),
-                          filled: true,
-                          fillColor: const Color(0xFF1E1E1E),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            borderSide: BorderSide(color: Colors.grey.shade800),
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            borderSide: const BorderSide(
-                              color: Color(0xFFE53935),
-                              width: 2,
-                            ),
-                          ),
-                          errorBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            borderSide: BorderSide(color: Colors.red.shade400),
-                          ),
-                          focusedErrorBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            borderSide: BorderSide(
-                              color: Colors.red.shade400,
-                              width: 2,
-                            ),
-                          ),
-                        ),
-                        keyboardType: TextInputType.text,
-                        autocorrect: false,
-                        validator: (value) {
-                          if (value == null || value.trim().isEmpty) {
-                            return 'Please enter the Pi IP address';
-                          }
-                          if (AppSettings.normalizeBackendHost(value) == null) {
-                            return 'Enter a raw IP address or hostname';
-                          }
-                          return null;
-                        },
-                      ),
-                      const SizedBox(height: 20),
-                      TextFormField(
-                        controller: _portController,
-                        key: const ValueKey('pi-port-field'),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                        ),
-                        decoration: InputDecoration(
-                          labelText: 'Port',
-                          labelStyle: const TextStyle(color: Colors.white70),
-                          hintText: '8765',
-                          hintStyle: TextStyle(color: Colors.grey.shade600),
-                          prefixIcon: const Icon(
-                            Icons.tag,
-                            color: Colors.white70,
-                          ),
-                          filled: true,
-                          fillColor: const Color(0xFF1E1E1E),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            borderSide: BorderSide(color: Colors.grey.shade800),
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            borderSide: const BorderSide(
-                              color: Color(0xFFE53935),
-                              width: 2,
-                            ),
-                          ),
-                          errorBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            borderSide: BorderSide(color: Colors.red.shade400),
-                          ),
-                          focusedErrorBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            borderSide: BorderSide(
-                              color: Colors.red.shade400,
-                              width: 2,
-                            ),
-                          ),
-                        ),
-                        keyboardType: TextInputType.number,
-                        validator: (value) {
-                          if (value == null || value.trim().isEmpty) {
-                            return 'Please enter port';
-                          }
-                          final parsed = int.tryParse(value.trim());
-                          if (parsed == null || parsed <= 0 || parsed > 65535) {
-                            return 'Enter a valid port (1 - 65535)';
-                          }
-                          return null;
-                        },
-                      ),
-                      const SizedBox(height: 20),
-                      TextFormField(
-                        controller: _identityController,
-                        key: const ValueKey('resident-id-field'),
-                        decoration: const InputDecoration(
-                          labelText: 'Resident pairing ID',
-                        ),
-                        validator: (value) =>
-                            value == null ||
-                                value.trim().isEmpty ||
-                                value.trim().length > 128
-                            ? 'Enter the administrator-issued Resident ID'
-                            : null,
-                      ),
-                      const SizedBox(height: 20),
-                      TextFormField(
-                        controller: _tokenController,
-                        validator: (value) => (value?.trim().length ?? 0) < 32
-                            ? 'Enter the separate Resident secret (at least 32 characters)'
-                            : null,
-                        key: const ValueKey('pi-api-token-field'),
-                        obscureText: true,
-                        autocorrect: false,
-                        enableSuggestions: false,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                        ),
-                        decoration: InputDecoration(
-                          labelText: 'Resident pairing secret',
-                          helperText:
-                              'Issued by Pi administrator; not the Main API token',
-                          helperStyle: const TextStyle(color: Colors.white54),
-                          labelStyle: const TextStyle(color: Colors.white70),
-                          prefixIcon: const Icon(
-                            Icons.key,
-                            color: Colors.white70,
-                          ),
-                          filled: true,
-                          fillColor: const Color(0xFF1E1E1E),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            borderSide: BorderSide(color: Colors.grey.shade800),
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            borderSide: const BorderSide(
-                              color: Color(0xFFE53935),
-                              width: 2,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 36),
-                      SizedBox(
-                        height: 56,
-                        child: FilledButton(
-                          key: const ValueKey('save-settings-button'),
-                          style: FilledButton.styleFrom(
-                            backgroundColor: const Color(0xFFE53935),
-                            foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(16),
-                            ),
-                            textStyle: const TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          onPressed: _isSaving ? null : _saveSettings,
-                          child: _isSaving
-                              ? const SizedBox(
-                                  width: 24,
-                                  height: 24,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2.5,
-                                    color: Colors.white,
-                                  ),
-                                )
-                              : const Text('Save Settings'),
-                        ),
-                      ),
-                    ],
+  Widget build(BuildContext context) => Scaffold(
+    backgroundColor: Colors.black,
+    appBar: AppBar(title: const Text('Pi Connection Settings')),
+    body: _loading
+        ? const Center(child: CircularProgressIndicator())
+        : Form(
+            key: _form,
+            child: ListView(
+              padding: const EdgeInsets.all(24),
+              children: [
+                TextFormField(
+                  controller: _host,
+                  key: const ValueKey('pi-ip-field'),
+                  decoration: const InputDecoration(
+                    labelText: 'Pi IP / Hostname',
                   ),
+                  onChanged: (_) {
+                    _retry?.cancel();
+                    ++_generation;
+                  },
+                  validator: (value) =>
+                      AppSettings.normalizeBackendHost(value) == null
+                      ? 'Enter a valid IP address or hostname'
+                      : null,
                 ),
-              ),
+                const SizedBox(height: 20),
+                TextFormField(
+                  controller: _port,
+                  key: const ValueKey('pi-port-field'),
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Port'),
+                  onChanged: (_) {
+                    _retry?.cancel();
+                    ++_generation;
+                  },
+                  validator: (value) {
+                    final port = int.tryParse(value ?? '');
+                    return port == null || port < 1 || port > 65535
+                        ? 'Enter port 1–65535'
+                        : null;
+                  },
+                ),
+                const SizedBox(height: 20),
+                const Text(
+                  'First connection needs local operator approval on the Pi. Compare the displayed code. Future connections use securely saved credentials; the Pi address stays editable.',
+                ),
+                const SizedBox(height: 20),
+                FilledButton(
+                  key: const ValueKey('save-settings-button'),
+                  onPressed: _connecting ? null : _connect,
+                  child: Text(_connecting ? 'Connecting…' : 'Connect'),
+                ),
+                if (_message != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 20),
+                    child: Text(_message!),
+                  ),
+              ],
             ),
-    );
-  }
+          ),
+  );
 }

@@ -1,12 +1,14 @@
 import 'dart:async';
 
 import 'package:dio/dio.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/app_settings.dart';
 import '../models/system_status.dart';
 import '../services/background_monitoring.dart';
 import '../services/pi_api_service.dart';
+import '../services/device_pairing_service.dart';
 import 'alerts_provider.dart';
 import 'audio_provider.dart';
 import 'noise_suppression_provider.dart';
@@ -22,9 +24,14 @@ typedef PiStatusFetcher = Future<SystemStatus> Function(String host, int port);
 
 final piStatusFetcherProvider = Provider<PiStatusFetcher>((ref) {
   return (host, port) async {
+    await DevicePairingService().ensure(host, port, 'caregiver');
     final api = PiApiService(host: host, port: port);
     try {
-      return await api.fetchStatus();
+      final status = await api.fetchStatus();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('lastConnectedHost', host);
+      await prefs.setInt('lastConnectedPort', port);
+      return status;
     } finally {
       api.close();
     }
@@ -227,7 +234,7 @@ class ConnectionController extends Notifier<PiConnectionState> {
     final requestedPort = AppSettings.normalizeBackendPort(
       port ?? settings.port,
     );
-    if (requestedHost.isEmpty) {
+    if (AppSettings.normalizeBackendHost(requestedHost) == null) {
       state = state.copyWith(
         connectionStatus: PiConnectionStatus.error,
         isConnected: false,
@@ -240,6 +247,7 @@ class ConnectionController extends Notifier<PiConnectionState> {
       return;
     }
 
+    _closeConnectionChannels();
     // Every attempt, including retries, so a phone that boots before the Pi keeps
     // retrying with the screen off. Only an explicit Disconnect stops it.
     unawaited(BackgroundMonitoring.start());
@@ -403,6 +411,7 @@ class ConnectionController extends Notifier<PiConnectionState> {
           usedFallback: candidate != host,
         );
       } catch (error) {
+        if (error is PairingRequired) rethrow;
         lastError = error;
       }
     }
@@ -413,9 +422,9 @@ class ConnectionController extends Notifier<PiConnectionState> {
 }
 
 String piConnectionErrorMessage(Object error) {
+  if (error is PairingRequired) return error.message;
   if (error is DioException && error.response?.statusCode == 401) {
-    return 'The Pi refused the request (401). Enter its API token in Settings. If the '
-        'token is right, the Pi API is locked by its configuration: check it on the Pi.';
+    return 'Pi authorization rejected. Ask the local operator to check device approval and backend configuration.';
   }
   if (error is DioException) {
     switch (error.type) {

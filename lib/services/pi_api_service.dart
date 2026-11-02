@@ -26,7 +26,10 @@ class PiApiService {
               connectTimeout: const Duration(seconds: 3),
               receiveTimeout: const Duration(seconds: 5),
               sendTimeout: const Duration(seconds: 3),
-              headers: ApiToken.headers,
+              headers: ApiToken.headersFor(
+                host,
+                AppSettings.normalizeBackendPort(port),
+              ),
             ),
           );
 

@@ -11,7 +11,12 @@ from alert_trace import trace_alert
 
 
 def authenticate(installation, token):
-    # Provision SHA-256 verifiers out of band; no shared development fallback.
+    from device_pairing import DeviceRegistry
+    registry = DeviceRegistry.from_env()
+    if registry.enrolled(installation):
+        # Once migrated, the registry is authoritative: no legacy-secret downgrade.
+        return registry.authenticate(installation, token, "caregiver")
+    # Preserve existing out-of-band caregiver credentials and delivery identity.
     path = os.getenv("PROJECT_PI_CAREGIVER_CREDENTIALS")
     if not path or not isinstance(installation, str) or not isinstance(token, str):
         return False
@@ -150,6 +155,8 @@ class DeliverySessions:
             async def pulse():
                 while True:
                     await asyncio.sleep(self.heartbeat_interval)
+                    if not await asyncio.to_thread(authenticate, installation, hello.get("token")):
+                        raise ValueError("device_authorization_revoked")
                     heartbeat["nonce"] = secrets.token_hex(16)
                     heartbeat["event"].clear()
                     await send("heartbeat", nonce=heartbeat["nonce"])
