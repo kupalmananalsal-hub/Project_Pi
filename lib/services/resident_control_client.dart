@@ -48,6 +48,7 @@ class ResidentControlClient extends ChangeNotifier {
   Map<String, dynamic> state = {};
   String message = 'Not connected — configure Resident pairing';
   String? lastEventId;
+  String? lastHistoryEventId;
   bool get connected => _session != null;
   bool get muteAvailable =>
       connected &&
@@ -242,7 +243,10 @@ class ResidentControlClient extends ChangeNotifier {
             'user_acknowledged' => 'TEST acknowledged on Main',
             'deferred_real_emergency' =>
               'TEST deferred — real emergency active',
-            _ => 'TEST backend accepted — awaiting Main presentation',
+            _ =>
+              lastHistoryEventId != null
+                  ? 'Saved in Main alert history'
+                  : 'Manual trigger awaiting backend persistence',
           };
         }
         _changed();
@@ -310,7 +314,10 @@ class ResidentControlClient extends ChangeNotifier {
         gestureId: gestureId,
       );
       lastEventId = result['event_id'] as String;
-      message = 'TEST backend accepted — waiting for Main presentation';
+      lastHistoryEventId = result['history_event_id'] as String?;
+      message = result['history_persisted'] == true
+          ? 'Saved in Main alert history'
+          : 'Backend update required for persistent manual history';
       _changed();
     } catch (_) {
       _lost();

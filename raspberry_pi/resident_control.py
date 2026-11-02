@@ -355,7 +355,7 @@ class ControlPlane:
                     and e['session_id'] == session['id']), None)
                 if previous is not None:
                     if action == 'full_test' and previous['kind'] == 'keyword_test' and previous['delivery'] != 'user_acknowledged':
-                        previous.update(kind='full_test', delivery='backend_accepted')
+                        previous.update(kind='full_test', delivery='backend_accepted', upgraded_epoch_seconds=time.time())
                     result = previous.copy()
                 elif len(self.events) >= 300:
                     raise ValueError('test_event_capacity_restart_test_session')

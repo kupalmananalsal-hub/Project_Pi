@@ -82,9 +82,11 @@ class _AlertOverlayState extends State<AlertOverlay>
                       ),
                       const SizedBox(height: 24),
                       Text(
-                        widget.isTest
+                        widget.event.isResidentManual
+                            ? 'EMERGENCY!'
+                            : widget.isTest
                             ? 'FULL ALERT TEST / SIMULATION'
-                            : 'EMERGENCY ALERT',
+                            : widget.event.emergencyTitle,
                         textAlign: TextAlign.center,
                         style: Theme.of(context).textTheme.headlineMedium
                             ?.copyWith(
@@ -97,7 +99,9 @@ class _AlertOverlayState extends State<AlertOverlay>
                       if (!widget.isTest) _AlertDirection(event: widget.event),
                       const SizedBox(height: 12),
                       Text(
-                        widget.isTest
+                        widget.event.isResidentManual
+                            ? 'Manual trigger • Simulation'
+                            : widget.isTest
                             ? (widget.testOutputsEnabled
                                   ? 'TEST audio and vibration authorized locally'
                                   : 'TEST audio and vibration disabled')
@@ -111,7 +115,9 @@ class _AlertOverlayState extends State<AlertOverlay>
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        widget.isTest
+                        widget.event.isResidentManual
+                            ? 'Manually generated — no ML detection claimed'
+                            : widget.isTest
                             ? 'No real detection or thermal evidence claimed'
                             : 'Final confidence ${(widget.event.displayedConfidence * 100).round()}%',
                         style: Theme.of(

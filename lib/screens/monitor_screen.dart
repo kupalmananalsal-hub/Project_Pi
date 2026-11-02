@@ -42,6 +42,22 @@ class MonitorScreen extends ConsumerWidget {
     final thermalCard = _ThermalCard(thermal: thermal);
     return AppPage(
       children: [
+        if (alerts.keywordNotice?.isResidentManual == true)
+          Card(
+            child: ListTile(
+              title: const Text(
+                'KEYWORD SPOTTED',
+                style: TextStyle(fontWeight: FontWeight.w900),
+              ),
+              subtitle: const Text('Manual trigger • Simulation'),
+              trailing: IconButton(
+                icon: const Icon(Icons.close),
+                tooltip: 'Dismiss alert',
+                onPressed: () =>
+                    ref.read(alertsProvider.notifier).dismissKeywordNotice(),
+              ),
+            ),
+          ),
         Text(
           'Monitor',
           style: Theme.of(

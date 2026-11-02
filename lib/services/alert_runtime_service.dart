@@ -178,6 +178,7 @@ class AlertRuntimeService {
     required bool vibrate,
   }) async {
     final generation = ++_generation;
+    ++_manualBeepGeneration;
     _emergencyActive = true;
     _eventId = event.eventId;
     Future<void> stage(String name, Future<void> Function() action) async {
@@ -272,7 +273,30 @@ class AlertRuntimeService {
     await _cleanup('soft_audio_dispose', _softPlayer.dispose);
   }
 
-  Future<void> stopSoftAudio() => _softPlayer.stop();
+  int _manualBeepGeneration = 0;
+  Future<void> playManualKeywordBeep() async {
+    if (_emergencyActive) return;
+    final generation = ++_manualBeepGeneration;
+    try {
+      await configureAudio();
+      final file = await _softBeepFile();
+      if (generation != _manualBeepGeneration || _emergencyActive) return;
+      await _softPlayer.setFilePath(file.path);
+      await _softPlayer.setLoopMode(LoopMode.one);
+      await _softPlayer.setVolume(1);
+      if (generation != _manualBeepGeneration || _emergencyActive) return;
+      unawaited(_softPlayer.play().catchError((Object _) {}));
+    } catch (error) {
+      traceAlert('manual_keyword_audio', null, 'failed', {
+        'reason': error.runtimeType.toString(),
+      });
+    }
+  }
+
+  Future<void> stopSoftAudio() {
+    ++_manualBeepGeneration;
+    return _softPlayer.stop();
+  }
 
   Future<void> showEmergencyNotification(
     AlertEvent event, {
@@ -313,7 +337,11 @@ class AlertRuntimeService {
           ? 'Full Alert TEST / SIMULATION'
           : event.emergencyTitle,
       body:
-          '${event.source == 'resident_test' ? 'TEST / SIMULATION. ' : ''}Voice from ${event.directionLabel}. '
+          '${event.isResidentManual
+              ? 'Manual trigger • Simulation. '
+              : event.source == 'resident_test'
+              ? 'TEST / SIMULATION. '
+              : ''}${event.isResidentManual ? '' : 'Voice from ${event.directionLabel}. '}'
           'Thermal status: ${event.backendThermalState.name}. '
           '${_formatTime(event.timestamp)}',
       notificationDetails: const NotificationDetails(

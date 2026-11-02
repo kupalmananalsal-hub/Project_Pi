@@ -14,6 +14,7 @@ import '../providers/thermal_provider.dart';
 import '../services/reconnecting_web_socket_service.dart';
 import '../services/alert_trace.dart';
 import '../services/alert_delivery_service.dart';
+import '../services/pi_api_service.dart';
 
 final alertsProvider = NotifierProvider<AlertsController, AlertsState>(
   AlertsController.new,
@@ -128,6 +129,7 @@ class AlertsController extends Notifier<AlertsState> {
   Future<void> connect(String host, int port) async {
     disconnect();
     final generation = _connectionGeneration;
+    unawaited(_restoreHistory(host, port, generation));
     try {
       await _deliveryClose;
       final pairing = await CaregiverCredentials.endpointState(host);
@@ -163,9 +165,13 @@ class AlertsController extends Notifier<AlertsState> {
             // Durable delivery has already checked active state and confirmation.
             _handledIds.remove(event.eventId);
             _handleAlert(event);
-            return identical(state.activeAlert, event);
+            return identical(state.activeAlert, event) ||
+                identical(state.keywordNotice, event);
           },
-          isActive: (id) => ref.mounted && state.activeAlert?.eventId == id,
+          isActive: (id) =>
+              ref.mounted &&
+              (state.activeAlert?.eventId == id ||
+                  state.keywordNotice?.eventId == id),
           onError: (error) {
             if (ref.mounted && generation == _connectionGeneration) {
               state = state.copyWith(error: error.toString());
@@ -253,6 +259,40 @@ class AlertsController extends Notifier<AlertsState> {
     );
   }
 
+  Future<void> _restoreHistory(String host, int port, int generation) async {
+    final api = PiApiService(host: host, port: port);
+    try {
+      final records = await api.fetchAlerts();
+      if (!ref.mounted || generation != _connectionGeneration) return;
+      final merged = <String, AlertEvent>{};
+      for (final event in [...records, ...state.history]) {
+        merged[event.eventId ??
+                '${event.timestamp.toIso8601String()}:${event.source}:${event.keyword}'] =
+            event;
+      }
+      final history = merged.values.toList()
+        ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
+      state = state.copyWith(history: history.take(100).toList());
+    } catch (error) {
+      traceAlert('history_restore', null, 'failed', {
+        'reason': error.runtimeType.toString(),
+      });
+    } finally {
+      api.close();
+    }
+  }
+
+  void dismissKeywordNotice() {
+    final event = state.keywordNotice;
+    _keywordNoticeTimer?.cancel();
+    state = state.copyWith(keywordNotice: null);
+    if (event?.isResidentManual == true) {
+      unawaited(ref.read(alertRuntimeServiceProvider).stopSoftAudio());
+      if (event?.eventId != null)
+        unawaited(_delivery?.confirm(event!.eventId!) ?? Future.value());
+    }
+  }
+
   Future<void> confirmGuidanceAlert() async {
     final event = state.pendingGuidance;
     if (event == null) {
@@ -317,6 +357,9 @@ class AlertsController extends Notifier<AlertsState> {
     _socket?.disconnect();
     _socket = null;
     if (ref.mounted) {
+      if (state.keywordNotice?.isResidentManual == true) {
+        unawaited(ref.read(alertRuntimeServiceProvider).stopSoftAudio());
+      }
       state = state.copyWith(
         socketStatus: SocketConnectionStatus.disconnected,
         keywordNotice: null,
@@ -346,7 +389,12 @@ class AlertsController extends Notifier<AlertsState> {
     }
     if (_handledIds.length > 256) _handledIds.remove(_handledIds.first);
 
-    final nextHistory = [event, ...state.history];
+    final nextHistory = [
+      event,
+      ...state.history.where(
+        (old) => event.eventId == null || old.eventId != event.eventId,
+      ),
+    ];
     if (nextHistory.length > 100) {
       nextHistory.removeRange(100, nextHistory.length);
     }
@@ -354,6 +402,23 @@ class AlertsController extends Notifier<AlertsState> {
 
     if (event.duplicateEvent) {
       traceAlert('provider_disposition', event.eventId, 'duplicate_ignored');
+      return;
+    }
+
+    if (state.keywordNotice?.isResidentManual == true &&
+        !event.isResidentManualKeyword) {
+      unawaited(ref.read(alertRuntimeServiceProvider).stopSoftAudio());
+    }
+    if (event.isResidentManual &&
+        state.activeAlert != null &&
+        !state.activeAlert!.isResidentManual)
+      return;
+    if (event.isResidentManualKeyword) {
+      if (state.activeAlert != null) return;
+      _clearPendingVoiceState();
+      _keywordNoticeTimer?.cancel();
+      state = state.copyWith(keywordNotice: event, thermalSoftAlert: false);
+      unawaited(ref.read(alertRuntimeServiceProvider).playManualKeywordBeep());
       return;
     }
 
@@ -468,7 +533,12 @@ class AlertsController extends Notifier<AlertsState> {
   }
 
   void _addAlertToHistorySilently(AlertEvent event) {
-    final nextHistory = [event, ...state.history];
+    final nextHistory = [
+      event,
+      ...state.history.where(
+        (old) => event.eventId == null || old.eventId != event.eventId,
+      ),
+    ];
     if (nextHistory.length > 100) {
       nextHistory.removeRange(100, nextHistory.length);
     }
@@ -664,7 +734,11 @@ class AlertsController extends Notifier<AlertsState> {
     final sound = ref.read(settingsProvider).alertSound;
     await ref
         .read(alertRuntimeServiceProvider)
-        .startEmergency(event, sound, vibrate: vibrate);
+        .startEmergency(
+          event,
+          event.isResidentManual ? AlertSound.siren : sound,
+          vibrate: vibrate,
+        );
   }
 }
 

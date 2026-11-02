@@ -98,14 +98,10 @@ class HistoryScreen extends ConsumerWidget {
                               : Icons.report_gmailerrorred_rounded,
                         ),
                       ),
-                      title: Text(
-                        event.isKeywordDetection
-                            ? 'Keyword Spotted!'
-                            : 'Alert recorded',
-                      ),
+                      title: Text(event.historyTitle),
                       subtitle: Text(
                         '${_formatTimestamp(event.timestamp)} - '
-                        'confidence ${(event.displayedConfidence * 100).round()}% - '
+                        '${event.isResidentManual ? 'Manual trigger • Simulation • ${event.source}' : 'confidence ${(event.displayedConfidence * 100).round()}%'} - '
                         'human ${event.humanDetected ? 'yes' : 'no'}',
                       ),
                     ),

@@ -287,7 +287,14 @@ class AlertEvent {
     return voiceDirection.label;
   }
 
-  String get emergencyTitle => 'EMERGENCY ALERT';
+  bool get isResidentManual => source == 'resident_manual';
+  bool get isResidentManualKeyword =>
+      isResidentManual && decisionState == AlertDecisionState.advisory;
+  String get historyTitle => isResidentManual
+      ? (isResidentManualKeyword ? 'KEYWORD SPOTTED' : 'EMERGENCY!')
+      : (isKeywordDetection ? 'Keyword Spotted!' : 'Alert recorded');
+  String get emergencyTitle =>
+      isResidentManual ? 'EMERGENCY!' : 'EMERGENCY ALERT';
 
   String get detectedPartLabel {
     switch (detectedPart) {

@@ -344,6 +344,29 @@ async def resident_control(request: Request):
             result = resident_controls.heartbeat(identity, body.get("session_id"))
         else:
             result = resident_controls.command(identity, body)
+        if result.get("kind") in ("keyword_test", "full_test") and result.get("event_id"):
+            # Immutable linked records preserve both the first tap and its
+            # escalation without changing protocol-v2 sequence/ACK identity.
+            full = result["kind"] == "full_test"
+            root = result["event_id"].removeprefix("test-")
+            history_id = f"manual-{root}-{'emergency' if full else 'keyword'}"
+            fingerprint = hashlib.sha256(f"{identity}:{history_id}".encode()).hexdigest()
+            payload = dict(event_id=history_id, event="manual_trigger", source="resident_manual",
+                keyword="EMERGENCY!" if full else "KEYWORD SPOTTED", confidence=0.0,
+                timestamp=datetime.fromtimestamp(result.get("upgraded_epoch_seconds",
+                    result["created_epoch_seconds"]), timezone.utc).isoformat(),
+                decision_state="critical" if full else "advisory",
+                decision_reason="authorized_resident_manual_trigger", alert_modality="manual",
+                alert_level="critical" if full else "visual_only", thermal_state="unknown",
+                human_detected=False, manual_event_type="emergency" if full else "keyword",
+                gesture_id=result.get("gesture_id"), is_simulation=True,
+                supersedes_event_id=f"manual-{root}-keyword" if full else None,
+                _request_fingerprint=fingerprint)
+            stored = await asyncio.to_thread(alert_store.insert, payload)
+            if not stored.get("duplicate_event"):
+                await alerts.publish(dict(stored))
+            result["history_event_id"] = stored["event_id"]
+            result["history_persisted"] = True
         if paired and not mute_authorized:
             result["remote_mute_available"] = False
             result["max_lease_seconds"] = None
