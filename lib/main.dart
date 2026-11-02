@@ -62,27 +62,67 @@ class _AppBootstrapState extends ConsumerState<AppBootstrap> {
 }
 
 ThemeData _buildTheme(Brightness brightness) {
-  final scheme = ColorScheme.fromSeed(
+  var scheme = ColorScheme.fromSeed(
     seedColor: const Color(0xFF00A884),
     brightness: brightness,
+    surface: brightness == Brightness.dark ? const Color(0xFF141D27) : null,
   );
+  if (brightness == Brightness.dark) {
+    scheme = scheme.copyWith(
+      surfaceContainerLow: const Color(0xFF141D27),
+      surfaceContainer: const Color(0xFF18232E),
+      surfaceContainerHigh: const Color(0xFF1D2935),
+      surfaceContainerHighest: const Color(0xFF26333F),
+      onSurface: const Color(0xFFE4EBF3),
+      onSurfaceVariant: const Color(0xFFADBCCB),
+      outlineVariant: const Color(0xFF304052),
+    );
+  }
 
   return ThemeData(
     useMaterial3: true,
+    fontFamily: 'Roboto',
     brightness: brightness,
     colorScheme: scheme,
     scaffoldBackgroundColor: brightness == Brightness.dark
-        ? const Color(0xFF101413)
+        ? const Color(0xFF0B121A)
         : null,
     cardTheme: CardThemeData(
-      margin: const EdgeInsets.only(bottom: 10),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      elevation: 0,
+      margin: const EdgeInsets.only(bottom: 16),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: BorderSide(color: scheme.outlineVariant.withValues(alpha: .5)),
+      ),
+    ),
+    appBarTheme: AppBarTheme(
+      backgroundColor: brightness == Brightness.dark
+          ? const Color(0xFF0B121A)
+          : scheme.surface,
+      surfaceTintColor: Colors.transparent,
+      titleTextStyle: TextStyle(
+        fontFamily: 'Roboto',
+        color: scheme.onSurface,
+        fontSize: 20,
+        fontWeight: FontWeight.w700,
+      ),
+    ),
+    dividerTheme: DividerThemeData(
+      color: scheme.outlineVariant.withValues(alpha: .5),
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(minimumSize: const Size(48, 48)),
+    ),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+      style: OutlinedButton.styleFrom(minimumSize: const Size(48, 48)),
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
     ),
     navigationBarTheme: NavigationBarThemeData(
+      height: 72,
+      backgroundColor: scheme.surface,
       indicatorShape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(8),
       ),

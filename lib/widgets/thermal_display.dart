@@ -65,6 +65,7 @@ class ThermalDisplay extends StatelessWidget {
                     selectedX: selectedX,
                     selectedY: selectedY,
                     textColor: Theme.of(context).colorScheme.onSurface,
+                    textStyle: Theme.of(context).textTheme.bodyMedium,
                   ),
                   child: const SizedBox.expand(),
                 ),
@@ -86,6 +87,7 @@ class _ThermalPainter extends CustomPainter {
     required this.selectedX,
     required this.selectedY,
     required this.textColor,
+    required this.textStyle,
   });
 
   final ThermalFrame? frame;
@@ -95,6 +97,7 @@ class _ThermalPainter extends CustomPainter {
   final int? selectedX;
   final int? selectedY;
   final Color textColor;
+  final TextStyle? textStyle;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -103,7 +106,7 @@ class _ThermalPainter extends CustomPainter {
       final textPainter = TextPainter(
         text: TextSpan(
           text: 'Waiting for thermal stream',
-          style: TextStyle(color: textColor.withValues(alpha: 0.7)),
+          style: textStyle?.copyWith(color: textColor),
         ),
         textDirection: TextDirection.ltr,
       )..layout(maxWidth: size.width);

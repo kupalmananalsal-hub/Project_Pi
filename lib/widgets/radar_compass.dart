@@ -17,7 +17,7 @@ class RadarCompass extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final dimension = size.clamp(220.0, 420.0);
+    final dimension = size.clamp(120.0, 420.0);
     final rotation = direction.isKnown
         ? direction.angleDegrees * math.pi / 180
         : 0.0;
@@ -62,4 +62,3 @@ class RadarCompass extends StatelessWidget {
     );
   }
 }
-

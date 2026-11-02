@@ -33,9 +33,21 @@ class LedControl extends StatelessWidget {
       children: [
         SegmentedButton<int>(
           segments: const [
-            ButtonSegment(value: 0, icon: Icon(Icons.looks_one_rounded)),
-            ButtonSegment(value: 1, icon: Icon(Icons.looks_two_rounded)),
-            ButtonSegment(value: 2, icon: Icon(Icons.looks_3_rounded)),
+            ButtonSegment(
+              value: 0,
+              icon: Icon(Icons.looks_one_rounded),
+              tooltip: 'Indicator 1',
+            ),
+            ButtonSegment(
+              value: 1,
+              icon: Icon(Icons.looks_two_rounded),
+              tooltip: 'Indicator 2',
+            ),
+            ButtonSegment(
+              value: 2,
+              icon: Icon(Icons.looks_3_rounded),
+              tooltip: 'Indicator 3',
+            ),
           ],
           selected: {selectedLed},
           onSelectionChanged: (selection) => onLedSelected(selection.first),
@@ -51,7 +63,7 @@ class LedControl extends StatelessWidget {
               onTap: () => onLedSelected(index),
               child: Container(
                 width: 48,
-                height: 40,
+                height: 48,
                 decoration: BoxDecoration(
                   color: color,
                   borderRadius: BorderRadius.circular(8),
@@ -70,6 +82,37 @@ class LedControl extends StatelessWidget {
         BlockPicker(
           pickerColor: selectedColor,
           onColorChanged: onColorChanged,
+          itemBuilder: (color, selected, changeColor) {
+            final name = _colorName(color);
+            final foreground =
+                ThemeData.estimateBrightnessForColor(color) == Brightness.dark
+                ? Colors.white
+                : Colors.black;
+            return Semantics(
+              label: '$name light color',
+              button: true,
+              selected: selected,
+              child: Tooltip(
+                message: name,
+                excludeFromSemantics: true,
+                child: SizedBox.square(
+                  key: ValueKey('light-color-${name.toLowerCase()}'),
+                  dimension: 48,
+                  child: Material(
+                    color: color,
+                    borderRadius: BorderRadius.circular(12),
+                    child: InkWell(
+                      onTap: changeColor,
+                      borderRadius: BorderRadius.circular(12),
+                      child: selected
+                          ? Icon(Icons.check_rounded, color: foreground)
+                          : const SizedBox.expand(),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
           availableColors: const [
             Colors.red,
             Colors.deepOrange,
@@ -103,17 +146,41 @@ class LedControl extends StatelessWidget {
           onChanged: onBrightnessChanged,
         ),
         const SizedBox(height: 8),
-        SegmentedButton<LedPattern>(
-          segments: [
-            for (final item in LedPattern.values)
-              ButtonSegment(
-                value: item,
-                label: Text(item.label),
-                icon: Icon(_patternIcon(item)),
-              ),
-          ],
-          selected: {pattern},
-          onSelectionChanged: (selection) => onPatternChanged(selection.first),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            if (constraints.maxWidth < 440 ||
+                MediaQuery.textScalerOf(context).scale(1) > 1.3) {
+              return InputDecorator(
+                decoration: const InputDecoration(labelText: 'Light pattern'),
+                child: DropdownButtonHideUnderline(
+                  child: DropdownButton<LedPattern>(
+                    isExpanded: true,
+                    value: pattern,
+                    items: [
+                      for (final item in LedPattern.values)
+                        DropdownMenuItem(value: item, child: Text(item.label)),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) onPatternChanged(value);
+                    },
+                  ),
+                ),
+              );
+            }
+            return SegmentedButton<LedPattern>(
+              segments: [
+                for (final item in LedPattern.values)
+                  ButtonSegment(
+                    value: item,
+                    label: Text(item.label),
+                    icon: Icon(_patternIcon(item)),
+                  ),
+              ],
+              selected: {pattern},
+              onSelectionChanged: (selection) =>
+                  onPatternChanged(selection.first),
+            );
+          },
         ),
       ],
     );
@@ -129,4 +196,21 @@ class LedControl extends StatelessWidget {
         return Icons.gradient_rounded;
     }
   }
+
+  String _colorName(Color color) =>
+      <Color, String>{
+        Colors.red: 'Red',
+        Colors.deepOrange: 'Orange',
+        Colors.amber: 'Amber',
+        Colors.yellow: 'Yellow',
+        Colors.lightGreenAccent: 'Lime',
+        Colors.greenAccent: 'Green',
+        Colors.cyanAccent: 'Cyan',
+        Colors.lightBlueAccent: 'Light blue',
+        Colors.blueAccent: 'Blue',
+        Colors.purpleAccent: 'Purple',
+        Colors.pinkAccent: 'Pink',
+        Colors.white: 'White',
+      }[color] ??
+      'Custom';
 }

@@ -9,7 +9,6 @@ import 'controls_screen.dart';
 import 'history_screen.dart';
 import 'monitor_screen.dart';
 import 'settings_screen.dart';
-import 'training_screen.dart';
 
 class AppShell extends ConsumerStatefulWidget {
   const AppShell({super.key});
@@ -21,12 +20,7 @@ class AppShell extends ConsumerStatefulWidget {
 class _AppShellState extends ConsumerState<AppShell> {
   int _selectedIndex = 0;
 
-  static const _screens = [
-    MonitorScreen(),
-    HistoryScreen(),
-    ControlsScreen(),
-    TrainingScreen(),
-  ];
+  static const _screens = [MonitorScreen(), HistoryScreen(), ControlsScreen()];
 
   @override
   Widget build(BuildContext context) {
@@ -47,55 +41,94 @@ class _AppShellState extends ConsumerState<AppShell> {
 
     return Stack(
       children: [
-        Scaffold(
-          appBar: AppBar(
-            title: const Text('Project Pi'),
-            actions: [
-              IconButton(
-                tooltip: 'Settings',
-                onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (context) => const SettingsScreen(),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final expanded = constraints.maxWidth >= 840;
+            return Scaffold(
+              appBar: AppBar(
+                title: const Text('Project Pi'),
+                actions: [
+                  IconButton(
+                    tooltip: 'Settings',
+                    onPressed: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (context) => const SettingsScreen(),
+                        ),
+                      );
+                    },
+                    icon: const Icon(Icons.settings_rounded),
+                  ),
+                ],
+              ),
+              body: SafeArea(
+                top: false,
+                bottom: false,
+                child: Column(
+                  children: [
+                    const AlertLinkBanner(),
+                    Expanded(
+                      child: Row(
+                        children: [
+                          if (expanded) ...[
+                            NavigationRail(
+                              selectedIndex: _selectedIndex,
+                              labelType: NavigationRailLabelType.all,
+                              onDestinationSelected: (index) =>
+                                  setState(() => _selectedIndex = index),
+                              destinations: const [
+                                NavigationRailDestination(
+                                  icon: Icon(Icons.sensors_rounded),
+                                  label: Text('Monitor'),
+                                ),
+                                NavigationRailDestination(
+                                  icon: Icon(Icons.history_rounded),
+                                  label: Text('History'),
+                                ),
+                                NavigationRailDestination(
+                                  icon: Icon(Icons.tune_rounded),
+                                  label: Text('Controls'),
+                                ),
+                              ],
+                            ),
+                            const VerticalDivider(width: 1),
+                          ],
+                          Expanded(
+                            child: IndexedStack(
+                              index: _selectedIndex,
+                              children: _screens,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  );
-                },
-                icon: const Icon(Icons.settings_rounded),
+                  ],
+                ),
               ),
-            ],
-          ),
-          body: Column(
-            children: [
-              const AlertLinkBanner(),
-              Expanded(
-                child: IndexedStack(index: _selectedIndex, children: _screens),
-              ),
-            ],
-          ),
-          bottomNavigationBar: NavigationBar(
-            selectedIndex: _selectedIndex,
-            onDestinationSelected: (index) {
-              setState(() => _selectedIndex = index);
-            },
-            destinations: const [
-              NavigationDestination(
-                icon: Icon(Icons.sensors_rounded),
-                label: 'Monitor',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.history_rounded),
-                label: 'History',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.tune_rounded),
-                label: 'Controls',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.model_training_rounded),
-                label: 'Training',
-              ),
-            ],
-          ),
+              bottomNavigationBar: expanded
+                  ? null
+                  : NavigationBar(
+                      selectedIndex: _selectedIndex,
+                      onDestinationSelected: (index) {
+                        setState(() => _selectedIndex = index);
+                      },
+                      destinations: const [
+                        NavigationDestination(
+                          icon: Icon(Icons.sensors_rounded),
+                          label: 'Monitor',
+                        ),
+                        NavigationDestination(
+                          icon: Icon(Icons.history_rounded),
+                          label: 'History',
+                        ),
+                        NavigationDestination(
+                          icon: Icon(Icons.tune_rounded),
+                          label: 'Controls',
+                        ),
+                      ],
+                    ),
+            );
+          },
         ),
         if (activeAlert != null)
           AlertOverlay(

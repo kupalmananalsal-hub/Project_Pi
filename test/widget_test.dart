@@ -12,10 +12,10 @@ void main() {
 
     expect(find.text('Monitor'), findsWidgets);
     expect(find.text('DIRECTION'), findsOneWidget);
-    expect(find.text('LISTENING'), findsOneWidget);
+    expect(find.text('WAITING FOR AUDIO'), findsOneWidget);
     expect(find.text('THERMAL'), findsOneWidget);
     expect(find.text('MICROPHONES'), findsOneWidget);
-    expect(find.text('Simulate distress call'), findsOneWidget);
+    expect(find.text('Simulate distress call'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 20));
   });

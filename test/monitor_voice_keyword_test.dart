@@ -14,6 +14,7 @@ import 'package:thermal_audio_monitor/providers/audio_provider.dart';
 import 'package:thermal_audio_monitor/providers/connection_provider.dart';
 import 'package:thermal_audio_monitor/providers/settings_provider.dart';
 import 'package:thermal_audio_monitor/services/alert_runtime_service.dart';
+import 'package:thermal_audio_monitor/services/reconnecting_web_socket_service.dart';
 import 'package:thermal_audio_monitor/widgets/radar_compass.dart';
 
 class FakeAlertRuntimeService extends AlertRuntimeService {
@@ -36,7 +37,11 @@ class FakeAlertRuntimeService extends AlertRuntimeService {
 
 class _FakeAudioController extends AudioController {
   void publish(AudioFrame frame) {
-    state = state.copyWith(latest: frame, error: null);
+    state = state.copyWith(
+      latest: frame,
+      error: null,
+      socketStatus: SocketConnectionStatus.connected,
+    );
   }
 }
 
@@ -106,12 +111,12 @@ void main() {
     });
   }
 
-  testWidgets('default Monitor status is LISTENING with direction arrow', (
+  testWidgets('offline Monitor waits for audio with direction arrow', (
     tester,
   ) async {
     final container = await pumpApp(tester);
 
-    expect(find.text('LISTENING'), findsOneWidget);
+    expect(find.text('WAITING FOR AUDIO'), findsOneWidget);
     expect(find.text('Keyword Spotted!'), findsNothing);
     expect(find.byKey(const ValueKey('voice-direction-arrow')), findsOneWidget);
     expect(find.byType(RadarCompass), findsOneWidget);
@@ -127,7 +132,7 @@ void main() {
       overrides: [audioProvider.overrideWith(_FakeAudioController.new)],
     );
 
-    expect(find.text('LISTENING'), findsOneWidget);
+    expect(find.text('WAITING FOR AUDIO'), findsOneWidget);
 
     (container.read(audioProvider.notifier) as _FakeAudioController).publish(
       AudioFrame(
@@ -167,7 +172,7 @@ void main() {
     await tester.pump(const Duration(seconds: 3));
     await tester.pump();
 
-    expect(find.text('LISTENING'), findsOneWidget);
+    expect(find.text('WAITING FOR AUDIO'), findsOneWidget);
     expect(find.text('Keyword Spotted!'), findsNothing);
 
     container.dispose();
@@ -208,7 +213,7 @@ void main() {
         );
     await tester.pump();
 
-    expect(find.text('LISTENING'), findsOneWidget);
+    expect(find.text('WAITING FOR AUDIO'), findsOneWidget);
     expect(find.text('Keyword Spotted!'), findsNothing);
 
     container.dispose();
@@ -236,7 +241,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
     await tester.pump();
 
-    expect(find.text('LISTENING'), findsOneWidget);
+    expect(find.text('WAITING FOR AUDIO'), findsOneWidget);
 
     container.dispose();
   });

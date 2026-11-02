@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-02T08:42:05Z",
+  "title": "Design System: Project Pi Android UI",
+  "extensions": {
+    "breakpoints": [
+      { "name": "monitor-usable-content", "value": "720px" },
+      { "name": "shell-navigation", "value": "840px" },
+      { "name": "direction-stack-usable-panel", "value": "290px" },
+      { "name": "direction-size-usable-panel", "value": "400px" },
+      { "name": "light-pattern-usable-control", "value": "440px" }
+    ],
+    "motion": [
+      {
+        "name": "direction-rotation",
+        "value": "240ms easeOutCubic",
+        "purpose": "Existing Flutter AnimatedRotation for the direction arrow."
+      },
+      {
+        "name": "retained-emergency-pulse",
+        "value": "780ms; scale 0.86 to 1.06; repeat reverse",
+        "purpose": "Existing emergency overlay behavior; distinct from routine monitor notices and unchanged by the scoped refinement."
+      }
+    ]
+  },
+  "components": [],
+  "narrative": {
+    "overview": "This documents the incumbent Flutter Material 3 interface after the scoped C158 refinement. The dark interface uses blue-black surfaces, restrained green-derived Material accents, clear headings, and readable sensor states. It is an operating interface for the existing thermal and acoustic monitor; this document introduces no new brand identity or product claims.\n\nThe main destinations are Monitor, History, and Controls. Settings remains an app-bar action. Monitoring information, device controls, and the existing emergency presentation retain distinct purposes. Visual changes must preserve delivery, acknowledgement, siren, history, replay, and Android identity/signing behavior.",
+    "keyCharacteristics": [
+      "Dark tonal surfaces with fine borders and no resting card shadow.",
+      "Native Material typography, buttons, inputs, chips, and navigation.",
+      "Explicit waiting, unavailable, disconnected, and last-frame descriptions.",
+      "Flexible wrapping and scrolling instead of compressed content."
+    ],
+    "rules": [
+      {
+        "name": "The Separate States Rule",
+        "body": "Pi status connectivity, individual stream availability, keyword notice, thermal presence, and emergency state must remain distinguishable. Color accompanies state text or icons.",
+        "section": "colors"
+      }
+    ],
+    "dos": [
+      "Do reuse the Flutter theme and the implemented Material components.",
+      "Do distinguish the 720-pixel content breakpoint from the 840-pixel shell breakpoint.",
+      "Do retain explicit unavailable and last-frame wording alongside sensor data.",
+      "Do preserve native text scaling, scrolling, wrapping, labeled selection, and 48-pixel palette targets.",
+      "Do keep routine notices visually and behaviorally separate from the existing emergency overlay."
+    ],
+    "donts": [
+      "Don't treat the primary seed as a hard-coded replacement for generated Material colors.",
+      "Don't label stale or unavailable sensor values as live readings.",
+      "Don't restore PART/None, simulation, Training navigation, or Refresh KWS Service to the scoped main interface.",
+      "Don't infer new recognition thresholds, alarm policy, accuracy claims, or hardware validation from this visual refinement.",
+      "Don't change delivery, acknowledgement, siren, history, replay, or Android identity/signing behavior as part of applying these visual rules."
+    ]
+  }
+}

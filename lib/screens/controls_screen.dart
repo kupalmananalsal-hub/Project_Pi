@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/connection_provider.dart';
 import '../providers/controls_provider.dart';
 import '../widgets/led_control.dart';
+import '../widgets/app_page.dart';
 import '../widgets/status_card.dart';
 
 class ControlsScreen extends ConsumerWidget {
@@ -16,10 +17,23 @@ class ControlsScreen extends ConsumerWidget {
     final button = controls.buttonEvent;
     final status = connection.status;
 
-    return ListView(
-      padding: const EdgeInsets.all(16),
+    return AppPage(
       children: [
-        Text('Controls', style: Theme.of(context).textTheme.headlineSmall),
+        Text(
+          'Controls',
+          style: Theme.of(
+            context,
+          ).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          connection.isConnected
+              ? 'Pi indicators and device controls'
+              : 'Connect in Settings to send device commands.',
+          style: TextStyle(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
         const SizedBox(height: 14),
         Card(
           child: Padding(
@@ -127,88 +141,48 @@ class ControlsScreen extends ConsumerWidget {
               : 'Last pressed ${_formatTimestamp(button!.lastPressedAt!)}',
         ),
         const SizedBox(height: 14),
-        FilledButton.tonalIcon(
-          onPressed: !connection.isConnected || controls.isBusy
-              ? null
-              : () => _confirm(
-                  context,
-                  title: 'Refresh keyword spotting?',
-                  message:
-                      'Reinstalls kws-alert.service from the repo and restarts the KWS service. Use this instead of SSH when detection needs a restart.',
-                  action: () async {
-                    final ok = await ref
-                        .read(controlsProvider.notifier)
-                        .refreshKws();
-                    if (!context.mounted) {
-                      return;
-                    }
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          ok
-                              ? 'KWS service refreshed successfully.'
-                              : ref.read(controlsProvider).error ??
-                                    'Refresh failed.',
-                        ),
-                      ),
-                    );
-                  },
-                ),
-          icon: controls.isBusy
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.refresh_rounded),
-          label: const Text('Refresh KWS Service'),
-        ),
-        const SizedBox(height: 14),
-        Row(
+        Wrap(
+          spacing: 12,
+          runSpacing: 12,
           children: [
-            Expanded(
-              child: OutlinedButton.icon(
-                onPressed: !connection.isConnected || controls.isBusy
-                    ? null
-                    : () => _confirm(
+            OutlinedButton.icon(
+              onPressed: !connection.isConnected || controls.isBusy
+                  ? null
+                  : () => _confirm(
+                      context,
+                      title: 'Restart Pi?',
+                      message:
+                          'The backend will disconnect while the Pi restarts.',
+                      action: () => _runPowerAction(
                         context,
-                        title: 'Restart Pi?',
-                        message:
-                            'The backend will disconnect while the Pi restarts.',
-                        action: () => _runPowerAction(
-                          context,
-                          ref,
-                          actionName: 'Restart',
-                          action: ref.read(controlsProvider.notifier).reboot,
-                        ),
+                        ref,
+                        actionName: 'Restart',
+                        action: ref.read(controlsProvider.notifier).reboot,
                       ),
-                icon: const Icon(Icons.restart_alt_rounded),
-                label: const Text('Restart'),
-              ),
+                    ),
+              icon: const Icon(Icons.restart_alt_rounded),
+              label: const Text('Restart'),
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: FilledButton.icon(
-                style: FilledButton.styleFrom(
-                  backgroundColor: Theme.of(context).colorScheme.error,
-                ),
-                onPressed: !connection.isConnected || controls.isBusy
-                    ? null
-                    : () => _confirm(
-                        context,
-                        title: 'Shutdown Pi?',
-                        message:
-                            'You will need physical access or power cycling to start it again.',
-                        action: () => _runPowerAction(
-                          context,
-                          ref,
-                          actionName: 'Shutdown',
-                          action: ref.read(controlsProvider.notifier).shutdown,
-                        ),
-                      ),
-                icon: const Icon(Icons.power_settings_new_rounded),
-                label: const Text('Shutdown'),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(context).colorScheme.error,
               ),
+              onPressed: !connection.isConnected || controls.isBusy
+                  ? null
+                  : () => _confirm(
+                      context,
+                      title: 'Shutdown Pi?',
+                      message:
+                          'You will need physical access or power cycling to start it again.',
+                      action: () => _runPowerAction(
+                        context,
+                        ref,
+                        actionName: 'Shutdown',
+                        action: ref.read(controlsProvider.notifier).shutdown,
+                      ),
+                    ),
+              icon: const Icon(Icons.power_settings_new_rounded),
+              label: const Text('Shutdown'),
             ),
           ],
         ),

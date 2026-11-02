@@ -4,7 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/alerts_provider.dart';
 import '../providers/connection_provider.dart';
 import '../services/pi_api_service.dart';
-import '../widgets/status_card.dart';
+import '../widgets/app_page.dart';
 
 class HistoryScreen extends ConsumerWidget {
   const HistoryScreen({super.key});
@@ -14,23 +14,26 @@ class HistoryScreen extends ConsumerWidget {
     final alerts = ref.watch(alertsProvider);
     final connection = ref.watch(connectionProvider);
 
-    return ListView(
-      padding: const EdgeInsets.all(14),
+    return AppPage(
       children: [
-        Row(
+        Wrap(
+          spacing: 16,
+          runSpacing: 12,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          alignment: WrapAlignment.spaceBetween,
           children: [
-            Expanded(
-              child: Text(
-                'History',
-                style: Theme.of(context).textTheme.headlineSmall,
-              ),
+            Text(
+              'History',
+              style: Theme.of(
+                context,
+              ).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w700),
             ),
             FilledButton.tonalIcon(
               onPressed: connection.isConnected
                   ? () => _confirmClearHistory(context, ref, connection)
                   : null,
               icon: const Icon(Icons.delete_sweep_rounded),
-              label: const Text('Clear Detection History'),
+              label: const Text('Clear history'),
             ),
           ],
         ),
@@ -47,10 +50,36 @@ class HistoryScreen extends ConsumerWidget {
                 ),
                 const SizedBox(height: 8),
                 if (alerts.history.isEmpty)
-                  const StatusCard(
-                    title: 'No alerts yet',
-                    value: 'Listening for distress keywords',
-                    icon: Icons.hearing_rounded,
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 32),
+                    child: Center(
+                      child: Column(
+                        children: [
+                          Icon(
+                            Icons.history_rounded,
+                            size: 40,
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSurfaceVariant,
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            'No alerts yet',
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Received alerts will appear here.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   )
                 else
                   for (final event in alerts.history.take(12))
