@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/app_settings.dart';
-import '../services/api_token.dart';
+import '../services/resident_control_client.dart';
 
 class ResidentSettingsScreen extends StatefulWidget {
   const ResidentSettingsScreen({super.key, this.isInitialSetup = false});
@@ -17,7 +17,8 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
   final _formKey = GlobalKey<FormState>();
   final _hostController = TextEditingController();
   final _portController = TextEditingController();
-  final _tokenController = TextEditingController(text: ApiToken.current);
+  final _tokenController = TextEditingController();
+  final _identityController = TextEditingController();
   bool _isLoading = true;
   bool _isSaving = false;
 
@@ -32,6 +33,7 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
     _hostController.dispose();
     _portController.dispose();
     _tokenController.dispose();
+    _identityController.dispose();
     super.dispose();
   }
 
@@ -39,11 +41,19 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
     final prefs = await SharedPreferences.getInstance();
     final savedHost = prefs.getString('host') ?? AppSettings.defaultHost;
     final savedPort = prefs.getInt('port') ?? AppSettings.defaultPort;
+    Map<String, dynamic> pairing = {};
+    try {
+      pairing = await ResidentPairing.load(savedHost, savedPort);
+    } catch (_) {
+      /* Require re-pairing. */
+    }
 
     if (mounted) {
       setState(() {
         _hostController.text = savedHost;
         _portController.text = savedPort.toString();
+        _identityController.text = pairing['id']?.toString() ?? '';
+        _tokenController.text = pairing['token']?.toString() ?? '';
         _isLoading = false;
       });
     }
@@ -65,8 +75,21 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('host', host!);
     await prefs.setInt('port', port);
-    if (_tokenController.text.trim() != ApiToken.current) {
-      await ApiToken.save(_tokenController.text);
+    try {
+      await ResidentPairing.save(
+        host,
+        port,
+        _identityController.text.trim(),
+        _tokenController.text.trim(),
+      );
+    } catch (_) {
+      if (mounted) {
+        setState(() => _isSaving = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Secure pairing could not be saved')),
+        );
+      }
+      return;
     }
 
     if (mounted) {
@@ -251,7 +274,24 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
                       ),
                       const SizedBox(height: 20),
                       TextFormField(
+                        controller: _identityController,
+                        key: const ValueKey('resident-id-field'),
+                        decoration: const InputDecoration(
+                          labelText: 'Resident pairing ID',
+                        ),
+                        validator: (value) =>
+                            value == null ||
+                                value.trim().isEmpty ||
+                                value.trim().length > 128
+                            ? 'Enter the administrator-issued Resident ID'
+                            : null,
+                      ),
+                      const SizedBox(height: 20),
+                      TextFormField(
                         controller: _tokenController,
+                        validator: (value) => (value?.trim().length ?? 0) < 32
+                            ? 'Enter the separate Resident secret (at least 32 characters)'
+                            : null,
                         key: const ValueKey('pi-api-token-field'),
                         obscureText: true,
                         autocorrect: false,
@@ -261,9 +301,9 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
                           fontSize: 16,
                         ),
                         decoration: InputDecoration(
-                          labelText: 'Pi API token (optional)',
+                          labelText: 'Resident pairing secret',
                           helperText:
-                              'Leave empty unless the Pi requires a token',
+                              'Issued by Pi administrator; not the Main API token',
                           helperStyle: const TextStyle(color: Colors.white54),
                           labelStyle: const TextStyle(color: Colors.white70),
                           prefixIcon: const Icon(

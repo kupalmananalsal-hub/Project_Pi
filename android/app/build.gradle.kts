@@ -38,6 +38,19 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    flavorDimensions += "role"
+    productFlavors {
+        create("caregiver") {
+            dimension = "role"
+            manifestPlaceholders["appLabel"] = "Project Pi"
+        }
+        create("resident") {
+            dimension = "role"
+            applicationIdSuffix = ".resident"
+            manifestPlaceholders["appLabel"] = "Project Pi Resident"
+        }
+    }
 }
 
 flutter {

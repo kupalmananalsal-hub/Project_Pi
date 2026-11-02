@@ -14,6 +14,8 @@ class AlertOverlay extends StatefulWidget {
     this.thermalMinTemp = 20,
     this.thermalMaxTemp = 45,
     required this.onDismiss,
+    this.isTest = false,
+    this.testOutputsEnabled = false,
   });
 
   final AlertEvent event;
@@ -23,6 +25,8 @@ class AlertOverlay extends StatefulWidget {
   final double thermalMinTemp;
   final double thermalMaxTemp;
   final VoidCallback onDismiss;
+  final bool isTest;
+  final bool testOutputsEnabled;
 
   @override
   State<AlertOverlay> createState() => _AlertOverlayState();
@@ -78,7 +82,9 @@ class _AlertOverlayState extends State<AlertOverlay>
                       ),
                       const SizedBox(height: 24),
                       Text(
-                        'EMERGENCY ALERT',
+                        widget.isTest
+                            ? 'FULL ALERT TEST / SIMULATION'
+                            : 'EMERGENCY ALERT',
                         textAlign: TextAlign.center,
                         style: Theme.of(context).textTheme.headlineMedium
                             ?.copyWith(
@@ -88,10 +94,14 @@ class _AlertOverlayState extends State<AlertOverlay>
                             ),
                       ),
                       const SizedBox(height: 18),
-                      _AlertDirection(event: widget.event),
+                      if (!widget.isTest) _AlertDirection(event: widget.event),
                       const SizedBox(height: 12),
                       Text(
-                        widget.humanDetected
+                        widget.isTest
+                            ? (widget.testOutputsEnabled
+                                  ? 'TEST audio and vibration authorized locally'
+                                  : 'TEST audio and vibration disabled')
+                            : widget.humanDetected
                             ? 'Thermal human detected - alarm active'
                             : 'Thermal status: ${widget.event.backendThermalState.name}',
                         textAlign: TextAlign.center,
@@ -101,16 +111,20 @@ class _AlertOverlayState extends State<AlertOverlay>
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        'Final confidence ${(widget.event.displayedConfidence * 100).round()}%',
+                        widget.isTest
+                            ? 'No real detection or thermal evidence claimed'
+                            : 'Final confidence ${(widget.event.displayedConfidence * 100).round()}%',
                         style: Theme.of(
                           context,
                         ).textTheme.titleMedium?.copyWith(color: Colors.white),
                       ),
                       const SizedBox(height: 10),
                       Text(
-                        '${widget.event.detectedPartLabel} - '
-                        '${(widget.event.bodyCoverage * 100).toStringAsFixed(1)}% coverage - '
-                        'boost +${(widget.event.thermalConfidenceBoost * 100).round()}%',
+                        widget.isTest
+                            ? 'TEST event ${widget.event.eventId}'
+                            : '${widget.event.detectedPartLabel} - '
+                                  '${(widget.event.bodyCoverage * 100).toStringAsFixed(1)}% coverage - '
+                                  'boost +${(widget.event.thermalConfidenceBoost * 100).round()}%',
                         textAlign: TextAlign.center,
                         style: Theme.of(
                           context,
@@ -144,7 +158,9 @@ class _AlertOverlayState extends State<AlertOverlay>
                         ),
                         onPressed: widget.onDismiss,
                         icon: const Icon(Icons.close_rounded),
-                        label: const Text('Dismiss Alert'),
+                        label: Text(
+                          widget.isTest ? 'Acknowledge TEST' : 'Dismiss Alert',
+                        ),
                       ),
                     ],
                   ),

@@ -18,6 +18,7 @@ class AudioFrame {
     this.directionConfidence,
     this.distanceEstimateMeters,
     this.error,
+    this.remoteMicrophoneMuted = false,
   });
 
   final double leftRms;
@@ -34,6 +35,7 @@ class AudioFrame {
   final double? directionConfidence;
   final double? distanceEstimateMeters;
   final String? error;
+  final bool remoteMicrophoneMuted;
 
   factory AudioFrame.fromMessage(dynamic message) {
     final decoded = message is String ? jsonDecode(message) : message;
@@ -64,6 +66,7 @@ class AudioFrame {
             decoded['distance_estimate_m'] ?? decoded['distance_m'],
           ),
           error: decoded['error']?.toString(),
+          remoteMicrophoneMuted: decoded['remote_microphone_muted'] == true,
           timestamp: timestamp,
         );
       }
@@ -90,6 +93,7 @@ class AudioFrame {
           decoded['distance_estimate_m'] ?? decoded['distance_m'],
         ),
         error: decoded['error']?.toString(),
+        remoteMicrophoneMuted: decoded['remote_microphone_muted'] == true,
         timestamp: timestamp,
       );
     }
@@ -100,11 +104,11 @@ class AudioFrame {
 
   double get normalizedRight => _normalize(rightRms);
 
-  double get normalizedLevel => _normalize(
-    leftRms >= rightRms ? leftRms : rightRms,
-  );
+  double get normalizedLevel =>
+      _normalize(leftRms >= rightRms ? leftRms : rightRms);
 
   VoiceDirection get voiceDirection {
+    if (remoteMicrophoneMuted) return const VoiceDirection.unknown();
     return VoiceDirection.fromPayload(
       direction: direction,
       angleDegrees: directionAngleDegrees,

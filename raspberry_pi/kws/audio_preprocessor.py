@@ -104,6 +104,17 @@ class AudioPreprocessor:
         except Exception as exc:  # pragma: no cover - optional Pi dependency
             self.error = str(exc)
 
+    def reset_recognition(self) -> None:
+        """Discard model/VAD/PCM history at an authorized mute boundary."""
+        self.__init__(
+            wake_word_models=list(self.configured_wake_word_models),
+            enabled=self.enabled,
+            vad_threshold=self.vad_threshold,
+            wake_word_threshold=self.wake_word_threshold,
+            wake_word_thresholds=dict(self.wake_word_thresholds),
+            enable_speex_noise_suppression=self.enable_speex_noise_suppression,
+        )
+
     def process(self, audio_frame: np.ndarray) -> dict[str, object]:
         frame = np.asarray(audio_frame, dtype=np.int16)
         if not self.enabled:

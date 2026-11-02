@@ -1,189 +1,147 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:thermal_audio_monitor/main_resident.dart';
 import 'package:thermal_audio_monitor/screens/resident_mode_screen.dart';
 import 'package:thermal_audio_monitor/screens/resident_settings_screen.dart';
-import 'package:thermal_audio_monitor/services/resident_alert_service.dart';
+import 'package:thermal_audio_monitor/services/resident_control_client.dart';
 
-class FakeResidentAlertService extends ResidentAlertService {
-  int manualAlertCalls = 0;
-  String? lastKeyword;
-  double? lastConfidence;
-  String? lastSource;
-  bool shouldSucceed = true;
+class FakeResidentControl extends ResidentControlClient {
+  final tests = <bool>[];
+  int holds = 0, releases = 0, pauses = 0;
+  @override
+  Future<void> connectSaved() async {}
+  @override
+  Future<void> sendTest({required bool full}) async {
+    tests.add(full);
+  }
 
   @override
-  Future<bool> sendManualAlert({
-    String keyword = 'manual',
-    double confidence = 1.0,
-    String source = 'manual_button',
-    String? hostOverride,
-    int? portOverride,
-    String? eventId,
-  }) async {
-    manualAlertCalls++;
-    lastKeyword = keyword;
-    lastConfidence = confidence;
-    lastSource = source;
-    return shouldSucceed;
+  Future<void> beginHold() async {
+    holds++;
+  }
+
+  @override
+  Future<void> release() async {
+    releases++;
+  }
+
+  @override
+  Future<void> pause() async {
+    pauses++;
   }
 }
 
 void main() {
-  TestWidgetsFlutterBinding.ensureInitialized();
-
   setUp(() {
-    SharedPreferences.setMockInitialValues({
-      'host': '10.159.83.236',
-      'port': 8765,
-    });
+    SharedPreferences.setMockInitialValues({'host': 'pi.test', 'port': 8765});
+    FlutterSecureStorage.setMockInitialValues({});
   });
+  Future<FakeResidentControl> mount(WidgetTester tester) async {
+    final service = FakeResidentControl();
+    await tester.pumpWidget(
+      MaterialApp(home: ResidentModeScreen(control: service)),
+    );
+    return service;
+  }
 
   testWidgets(
-    'ResidentModeScreen renders pure black screen with large HELP button and gear icon',
+    'small phone with enlarged text retains the button and readable status',
     (tester) async {
-      final fakeService = FakeResidentAlertService();
-
-      await tester.pumpWidget(
-        MaterialApp(home: ResidentModeScreen(alertService: fakeService)),
-      );
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(320, 568);
+      tester.platformDispatcher.textScaleFactorTestValue = 1.6;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      await mount(tester);
       await tester.pump();
-
-      // Verify pure black background
-      final scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
-      expect(scaffold.backgroundColor, Colors.black);
-
-      // Verify HELP button text
+      expect(tester.takeException(), isNull);
       expect(find.text('HELP'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
 
-      // Verify gear settings icon in top-right
+  testWidgets(
+    'black screen, one HELP button, explicit TEST contract and settings',
+    (tester) async {
+      await mount(tester);
       expect(
-        find.byKey(const ValueKey('resident-settings-button')),
-        findsOneWidget,
+        tester.widget<Scaffold>(find.byType(Scaffold)).backgroundColor,
+        Colors.black,
       );
-    },
-  );
-
-  testWidgets('Tapping gear icon opens ResidentSettingsScreen', (tester) async {
-    await tester.pumpWidget(const MaterialApp(home: ResidentModeScreen()));
-    await tester.pump();
-
-    await tester.tap(find.byKey(const ValueKey('resident-settings-button')));
-    await tester.pumpAndSettle();
-
-    expect(find.byType(ResidentSettingsScreen), findsOneWidget);
-    expect(find.text('Pi Connection Settings'), findsOneWidget);
-    expect(find.byKey(const ValueKey('pi-ip-field')), findsOneWidget);
-    expect(find.byKey(const ValueKey('pi-port-field')), findsOneWidget);
-  });
-
-  testWidgets('Saving new IP and port updates SharedPreferences', (
-    tester,
-  ) async {
-    await tester.pumpWidget(const MaterialApp(home: ResidentSettingsScreen()));
-    await tester.pumpAndSettle();
-
-    await tester.enterText(
-      find.byKey(const ValueKey('pi-ip-field')),
-      '192.168.1.50',
-    );
-    await tester.enterText(find.byKey(const ValueKey('pi-port-field')), '9000');
-    await tester.tap(find.byKey(const ValueKey('save-settings-button')));
-    await tester.pumpAndSettle();
-
-    final prefs = await SharedPreferences.getInstance();
-    expect(prefs.getString('host'), '192.168.1.50');
-    expect(prefs.getInt('port'), 9000);
-  });
-
-  testWidgets('Tapping HELP button once sends single-tap notice', (
-    tester,
-  ) async {
-    final fakeService = FakeResidentAlertService()..shouldSucceed = true;
-
-    await tester.pumpWidget(
-      MaterialApp(home: ResidentModeScreen(alertService: fakeService)),
-    );
-    await tester.pump();
-
-    await tester.tap(find.text('HELP'));
-    await tester.pump(); // Start press animation
-    await tester.pump(
-      const Duration(milliseconds: 700),
-    ); // Complete single tap timer & send
-    await tester.pumpAndSettle();
-
-    expect(fakeService.manualAlertCalls, 1);
-    expect(fakeService.lastKeyword, 'manual');
-    expect(fakeService.lastConfidence, 0.75);
-    expect(fakeService.lastSource, 'manual_button_single');
-
-    expect(find.text('Notice sent'), findsOneWidget);
-  });
-
-  testWidgets('Double-tapping HELP button sends full emergency alert', (
-    tester,
-  ) async {
-    final fakeService = FakeResidentAlertService()..shouldSucceed = true;
-
-    await tester.pumpWidget(
-      MaterialApp(home: ResidentModeScreen(alertService: fakeService)),
-    );
-    await tester.pump();
-
-    await tester.tap(find.text('HELP'));
-    await tester.pump(const Duration(milliseconds: 200));
-    await tester.tap(find.text('HELP'));
-    await tester.pump();
-    await tester.pumpAndSettle();
-
-    expect(fakeService.manualAlertCalls, 1);
-    expect(fakeService.lastKeyword, 'manual');
-    expect(fakeService.lastConfidence, 1.0);
-    expect(fakeService.lastSource, 'manual_button');
-
-    expect(find.text('EMERGENCY ALERT SENT'), findsOneWidget);
-  });
-
-  testWidgets('Failed alert shows Failed to send alert toast', (tester) async {
-    final fakeService = FakeResidentAlertService()..shouldSucceed = false;
-
-    await tester.pumpWidget(
-      MaterialApp(home: ResidentModeScreen(alertService: fakeService)),
-    );
-    await tester.pump();
-
-    await tester.tap(find.text('HELP'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 700));
-    await tester.pumpAndSettle();
-
-    expect(fakeService.manualAlertCalls, 1);
-    expect(find.text('Failed to send alert'), findsOneWidget);
-  });
-
-  testWidgets(
-    'ResidentApp builds successfully with black theme and saved host',
-    (tester) async {
-      await tester.pumpWidget(const ResidentApp());
-      await tester.pump();
-      await tester.pumpAndSettle();
-
-      expect(find.byType(ResidentModeScreen), findsOneWidget);
       expect(find.text('HELP'), findsOneWidget);
+      expect(find.textContaining('TEST'), findsWidgets);
+      await tester.tap(find.byKey(const ValueKey('resident-settings-button')));
+      await tester.pumpAndSettle();
+      expect(find.byType(ResidentSettingsScreen), findsOneWidget);
+      expect(find.byKey(const ValueKey('pi-ip-field')), findsOneWidget);
     },
   );
-
-  testWidgets('ResidentApp shows settings screen first if no host is saved', (
+  testWidgets('single tap sends exactly one keyword TEST', (tester) async {
+    final service = await mount(tester);
+    await tester.tap(find.text('HELP'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(service.tests, [false]);
+    expect(service.holds, 0);
+  });
+  testWidgets('double tap sends full TEST without single tap', (tester) async {
+    final service = await mount(tester);
+    await tester.tap(find.text('HELP'));
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.text('HELP'));
+    await tester.pump(const Duration(milliseconds: 700));
+    expect(service.tests, [true]);
+    expect(service.holds, 0);
+  });
+  testWidgets('long press and release never fire tap TESTs', (tester) async {
+    final service = await mount(tester);
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.text('HELP')),
+    );
+    await tester.pump(const Duration(milliseconds: 700));
+    expect(service.holds, 1);
+    await gesture.up();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(service.releases, greaterThanOrEqualTo(1));
+    expect(service.tests, isEmpty);
+  });
+  testWidgets('pointer cancellation releases hold', (tester) async {
+    final service = await mount(tester);
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.text('HELP')),
+    );
+    await tester.pump(const Duration(milliseconds: 700));
+    await gesture.cancel();
+    await tester.pump();
+    expect(service.releases, greaterThanOrEqualTo(1));
+    expect(service.tests, isEmpty);
+  });
+  testWidgets(
+    'backgrounding releases control; resuming reconnects without a hold',
+    (tester) async {
+      final service = await mount(tester);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      await tester.pump();
+      expect(service.pauses, 1);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(service.holds, 0);
+    },
+  );
+  testWidgets('ResidentApp opens configured screen', (tester) async {
+    await tester.pumpWidget(const ResidentApp());
+    await tester.pumpAndSettle();
+    expect(find.byType(ResidentModeScreen), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+  testWidgets('ResidentApp asks for settings without a saved host', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
-
     await tester.pumpWidget(const ResidentApp());
-    await tester.pump();
     await tester.pumpAndSettle();
-
     expect(find.byType(ResidentSettingsScreen), findsOneWidget);
   });
 }

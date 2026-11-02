@@ -353,6 +353,8 @@ def run_replay(kws, recordings: list[array], *, env: dict[str, str], gap_seconds
     Returns a list of (timeline, recorder, pacing) runs and the engine report:
     one run per recording when isolated, one run in total when continuous.
     """
+    # Offline replay must never read/write a production remote-mute IPC directory.
+    env = {**env, "PROJECT_PI_REMOTE_MUTE_ENABLED": "0"}
     saved = {name: getattr(kws, name) for name in ("pyaudio", "AlertPoster", "RUNNING")}
     saved_env = {key: os.environ.get(key) for key in env}
     cache = EngineCache(kws)

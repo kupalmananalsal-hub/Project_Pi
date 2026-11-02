@@ -217,6 +217,21 @@ def item(path, label, keyword="", speaker="sp", onset=None):
 
 
 class ReplayHarnessTest(unittest.TestCase):
+    def test_replay_forces_remote_mute_off_and_restores_environment(self):
+        from unittest.mock import Mock, patch
+        kws = types.SimpleNamespace(pyaudio=object(), AlertPoster=object(), RUNNING=True)
+        cache = Mock()
+        cache.install.return_value = {}
+        cache.status = {name: True for name in replay_eval.ENGINES}
+        def run(*args):
+            self.assertEqual(os.environ['PROJECT_PI_REMOTE_MUTE_ENABLED'], '0')
+            return ('synthetic', 'no audio', 'no network')
+        with patch.dict(os.environ, {'PROJECT_PI_REMOTE_MUTE_ENABLED': '1'}), \
+                patch.object(replay_eval, 'EngineCache', return_value=cache), \
+                patch.object(replay_eval, '_run_once', side_effect=run):
+            replay_eval.run_replay(kws, [], env={}, gap_seconds=0, lead_in=[], isolate=False)
+            self.assertEqual(os.environ['PROJECT_PI_REMOTE_MUTE_ENABLED'], '1')
+
     def test_unit_environment_matches_tracked_service(self):
         env = replay_eval.parse_unit_environment(PROJECT_ROOT / "raspberry_pi/systemd/kws-alert.service")
         self.assertEqual(env["KWS_CHANNELS"], "2")

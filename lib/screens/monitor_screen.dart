@@ -26,10 +26,13 @@ class MonitorScreen extends ConsumerWidget {
     final audioAvailable =
         monitor.audioFrame != null &&
         monitor.audioFrame!.error == null &&
+        !monitor.audioFrame!.remoteMicrophoneMuted &&
         monitor.audioSocketStatus == 'connected';
     final direction = _DirectionCard(
       direction:
-          monitor.audioFrame?.error != null && alerts.keywordNotice == null
+          (monitor.audioFrame?.error != null ||
+                  monitor.audioFrame?.remoteMicrophoneMuted == true) &&
+              alerts.keywordNotice == null
           ? const VoiceDirection.unknown()
           : monitor.direction,
       keywordSpotted: alerts.keywordNotice != null,
@@ -351,7 +354,10 @@ class _MicrophoneCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final live =
-        audio != null && audio!.error == null && socketStatus == 'connected';
+        audio != null &&
+        audio!.error == null &&
+        !audio!.remoteMicrophoneMuted &&
+        socketStatus == 'connected';
     return _Panel(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -359,7 +365,9 @@ class _MicrophoneCard extends StatelessWidget {
           const _SectionTitle('MICROPHONES'),
           const SizedBox(height: 8),
           Text(
-            audio?.error != null
+            audio?.remoteMicrophoneMuted == true
+                ? 'Acoustic input withheld in this frame — not audio evidence'
+                : audio?.error != null
                 ? 'Microphone unavailable'
                 : live
                 ? 'Live input levels'

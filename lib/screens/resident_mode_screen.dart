@@ -1,250 +1,203 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
-import '../services/resident_alert_service.dart';
+import '../services/resident_control_client.dart';
 import 'resident_settings_screen.dart';
 
 class ResidentModeScreen extends StatefulWidget {
-  const ResidentModeScreen({super.key, this.alertService});
-
-  final ResidentAlertService? alertService;
-
+  const ResidentModeScreen({super.key, this.control});
+  final ResidentControlClient? control;
   @override
   State<ResidentModeScreen> createState() => _ResidentModeScreenState();
 }
 
-class _ResidentModeScreenState extends State<ResidentModeScreen> {
-  late final ResidentAlertService _alertService;
-  bool _isPressed = false;
-  bool _isSending = false;
-  bool _lastSendFailed = false;
-  DateTime? _lastTapTime;
-  Timer? _tapTimer;
-
-  static const Color _idleRed = Color(0xFFE53935);
-  static const Color _darkerRed = Color(0xFFB71C1C);
-
+class _ResidentModeScreenState extends State<ResidentModeScreen>
+    with WidgetsBindingObserver {
+  late final ResidentControlClient _control;
+  bool _pressed = false;
   @override
   void initState() {
     super.initState();
-    _alertService = widget.alertService ?? ResidentAlertService();
+    WidgetsBinding.instance.addObserver(this);
+    _control = widget.control ?? ResidentControlClient();
+    _control.addListener(_update);
+    unawaited(_control.connectSaved());
+  }
+
+  void _update() {
+    if (mounted) setState(() {});
+  }
+
+  void _release() {
+    if (mounted) setState(() => _pressed = false);
+    unawaited(_control.release());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_control.connectSaved());
+    } else {
+      _pressed = false;
+      unawaited(_control.pause());
+    }
   }
 
   @override
   void dispose() {
-    _tapTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _control.removeListener(_update);
+    if (widget.control == null) {
+      _control.dispose();
+    } else {
+      unawaited(_control.pause());
+    }
     super.dispose();
   }
 
-  void _openSettings() {
-    Navigator.of(
-      context,
-    ).push(MaterialPageRoute(builder: (_) => const ResidentSettingsScreen()));
-  }
-
-  void _handleHelpTap() {
-    final now = DateTime.now();
-    HapticFeedback.heavyImpact();
-
-    setState(() => _isPressed = true);
-    Future.delayed(const Duration(milliseconds: 150), () {
-      if (mounted) setState(() => _isPressed = false);
-    });
-
-    if (_lastTapTime != null &&
-        now.difference(_lastTapTime!) < const Duration(milliseconds: 600)) {
-      // Double tap confirmed!
-      _tapTimer?.cancel();
-      _tapTimer = null;
-      _lastTapTime = null;
-      _triggerAlert(isDoubleTap: true);
-    } else {
-      // First tap — wait to see if a second tap follows
-      _lastTapTime = now;
-      _tapTimer?.cancel();
-      _tapTimer = Timer(const Duration(milliseconds: 600), () {
-        if (!mounted) return;
-        _lastTapTime = null;
-        _triggerAlert(isDoubleTap: false);
-      });
-    }
-  }
-
-  Future<void> _triggerAlert({required bool isDoubleTap}) async {
-    if (_isSending) return;
-
-    setState(() {
-      _isSending = true;
-    });
-
-    final success = await _alertService.sendManualAlert(
-      keyword: 'manual',
-      confidence: isDoubleTap ? 1.0 : 0.75,
-      source: isDoubleTap ? 'manual_button' : 'manual_button_single',
+  Future<void> _settings() async {
+    await _control.pause();
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const ResidentSettingsScreen()),
     );
-
-    if (mounted) {
-      setState(() {
-        _isSending = false;
-        _lastSendFailed = !success;
-      });
-
-      ScaffoldMessenger.of(context).clearSnackBars();
-      // A failure stays on screen (banner below) instead of a 2 s toast.
-      if (!success) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            isDoubleTap ? 'EMERGENCY ALERT SENT' : 'Notice sent',
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.bold,
-              fontSize: 16,
-            ),
-          ),
-          backgroundColor: isDoubleTap
-              ? Colors.red.shade900
-              : Colors.orange.shade800,
-          duration: const Duration(seconds: 2),
-          behavior: SnackBarBehavior.floating,
-          margin: const EdgeInsets.symmetric(horizontal: 40, vertical: 24),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-        ),
-      );
-    }
+    if (mounted) await _control.connectSaved();
   }
 
   @override
   Widget build(BuildContext context) {
-    final screenSize = MediaQuery.of(context).size;
-    // Expanded button size for ease of accessibility
-    final buttonSize = math.min(
-      screenSize.width * 0.85,
-      screenSize.height * 0.72,
-    );
-
+    final size = MediaQuery.sizeOf(context);
+    final diameter = math.min(size.width * .82, size.height * .48);
     return Scaffold(
       backgroundColor: Colors.black,
-      body: Stack(
-        children: [
-          // Centered Massive HELP button
-          Center(
-            child: SizedBox(
-              width: buttonSize,
-              height: buttonSize,
-              child: GestureDetector(
-                onTap: _handleHelpTap,
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 150),
-                  decoration: BoxDecoration(
-                    color: _isPressed ? _darkerRed : _idleRed,
-                    shape: BoxShape.circle,
-                    boxShadow: [
-                      BoxShadow(
-                        color: (_isPressed ? _darkerRed : _idleRed).withValues(
-                          alpha: 0.55,
-                        ),
-                        blurRadius: _isPressed ? 16 : 36,
-                        spreadRadius: _isPressed ? 4 : 10,
-                      ),
-                    ],
-                  ),
-                  alignment: Alignment.center,
-                  child: const Column(
-                    mainAxisSize: MainAxisSize.min,
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) => SingleChildScrollView(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: constraints.maxHeight),
+              child: Column(
+                children: [
+                  Row(
                     children: [
-                      Text(
-                        'HELP',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w900,
-                          fontSize: 54,
-                          letterSpacing: 3.5,
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Text(
+                          _control.connected
+                              ? 'Pi connected • TEST mode'
+                              : 'Pi disconnected',
+                          style: const TextStyle(color: Colors.white70),
                         ),
                       ),
-                      SizedBox(height: 8),
-                      Text(
-                        'TAP 2X FOR EMERGENCY',
-                        style: TextStyle(
+                      IconButton(
+                        key: const ValueKey('resident-settings-button'),
+                        tooltip: 'Settings',
+                        onPressed: _settings,
+                        icon: const Icon(
+                          Icons.settings_outlined,
                           color: Colors.white70,
-                          fontWeight: FontWeight.w700,
-                          fontSize: 13,
-                          letterSpacing: 1.2,
                         ),
                       ),
                     ],
                   ),
-                ),
-              ),
-            ),
-          ),
-
-          if (_isSending || _lastSendFailed)
-            SafeArea(
-              child: Align(
-                alignment: Alignment.bottomCenter,
-                child: Container(
-                  key: const ValueKey('resident-send-status'),
-                  width: double.infinity,
-                  margin: const EdgeInsets.all(16),
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: _isSending
-                        ? Colors.grey.shade900
-                        : Colors.amber.shade900,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        _isSending
-                            ? 'Sending alert...'
-                            : 'Failed to send alert',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 18,
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 24),
+                    child: Center(
+                      child: Listener(
+                        onPointerCancel: (_) => _release(),
+                        child: GestureDetector(
+                          key: const ValueKey('resident-control-button'),
+                          onTap: () => _control.sendTest(full: false),
+                          onDoubleTap: () => _control.sendTest(full: true),
+                          onLongPressStart: (_) {
+                            setState(() => _pressed = true);
+                            unawaited(_control.beginHold());
+                          },
+                          onLongPressEnd: (_) => _release(),
+                          onLongPressCancel: _release,
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 150),
+                            width: diameter,
+                            height: diameter,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: _pressed
+                                  ? const Color(0xFFB71C1C)
+                                  : const Color(0xFFE53935),
+                            ),
+                            alignment: Alignment.center,
+                            child: const Text(
+                              'HELP',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 54,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 3,
+                              ),
+                            ),
+                          ),
                         ),
                       ),
-                      if (!_isSending)
-                        const Text(
-                          'Tap HELP again, or call your caregiver.',
+                    ),
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 24),
+                    child: Text(
+                      'Tap: Keyword TEST\nDouble tap: Full Alert TEST\nHold: request recognition mute',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.white70, height: 1.6),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        Text(
+                          _control.muted
+                              ? 'MUTED — acknowledged by KWS'
+                              : _control.holding
+                              ? 'Awaiting KWS mute acknowledgement'
+                              : _control.state['mute_state'] == 'resuming'
+                              ? 'Resuming — awaiting KWS acknowledgement'
+                              : _control.muteAvailable
+                              ? 'Remote mute available'
+                              : 'Remote mute unavailable',
+                          key: const ValueKey('resident-mute-state'),
                           textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.white, fontSize: 15),
+                          style: const TextStyle(
+                            color: Colors.amber,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
-                    ],
+                        const SizedBox(height: 8),
+                        Text(
+                          _control.message,
+                          key: const ValueKey('resident-send-status'),
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: Colors.white70),
+                        ),
+                        if (_control.connected)
+                          Text(
+                            _control.state['main_connected'] == true
+                                ? 'Main App recently seen'
+                                : 'Main App not recently seen',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(color: Colors.white54),
+                          ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'TEST controls do not replace a real emergency call.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white54),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ),
-            ),
-
-          // Small unobtrusive gear icon in top-right corner
-          SafeArea(
-            child: Align(
-              alignment: Alignment.topRight,
-              child: Padding(
-                padding: const EdgeInsets.all(12.0),
-                child: IconButton(
-                  key: const ValueKey('resident-settings-button'),
-                  icon: const Icon(
-                    Icons.settings_outlined,
-                    color: Colors.white60,
-                    size: 26,
-                  ),
-                  tooltip: 'Settings',
-                  onPressed: _openSettings,
-                ),
+                ],
               ),
             ),
           ),
-        ],
+        ),
       ),
     );
   }

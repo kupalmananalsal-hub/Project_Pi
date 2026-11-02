@@ -22,6 +22,7 @@ class AlertRuntimeService {
   final Duration operationTimeout;
   int _generation = 0;
   bool _emergencyActive = false;
+  String? _testOwner;
   final Set<int> _notificationIds = {};
   String? _eventId;
   Future<void>? _audioConfiguration;
@@ -119,6 +120,28 @@ class AlertRuntimeService {
     AlertSound sound, {
     bool vibrate = true,
   }) async {
+    _testOwner =
+        null; // Real emergencies always preempt synthetic output ownership.
+    await _startEmergency(event, sound, vibrate: vibrate);
+  }
+
+  Future<bool> startTestEmergency(AlertEvent event, AlertSound sound) async {
+    if (_emergencyActive && _testOwner == null) return false;
+    if (_testOwner == event.eventId) return false;
+    _testOwner = event.eventId;
+    await _startEmergency(event, sound, vibrate: true);
+    return true;
+  }
+
+  Future<void> stopTestEmergency(String eventId) async {
+    if (_testOwner == eventId) await stopEmergency();
+  }
+
+  Future<void> _startEmergency(
+    AlertEvent event,
+    AlertSound sound, {
+    required bool vibrate,
+  }) async {
     final generation = ++_generation;
     _emergencyActive = true;
     _eventId = event.eventId;
@@ -161,6 +184,7 @@ class AlertRuntimeService {
   }
 
   Future<void> stopEmergency() async {
+    _testOwner = null;
     ++_generation;
     _emergencyActive = false;
     _vibrationFallbackTimer?.cancel();
@@ -249,9 +273,11 @@ class AlertRuntimeService {
     _notificationIds.add(notificationId);
     await _notifications.show(
       id: notificationId,
-      title: event.emergencyTitle,
+      title: event.source == 'resident_test'
+          ? 'Full Alert TEST / SIMULATION'
+          : event.emergencyTitle,
       body:
-          'Voice from ${event.directionLabel}. '
+          '${event.source == 'resident_test' ? 'TEST / SIMULATION. ' : ''}Voice from ${event.directionLabel}. '
           'Thermal status: ${event.backendThermalState.name}. '
           '${_formatTime(event.timestamp)}',
       notificationDetails: const NotificationDetails(

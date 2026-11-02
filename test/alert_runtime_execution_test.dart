@@ -66,6 +66,44 @@ class RecoveringAudioRuntime extends TestRuntime {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test(
+    'real emergency preempts TEST outputs and late TEST cleanup cannot stop it',
+    () async {
+      final runtime = TestRuntime();
+      final synthetic = AlertEvent(
+        eventId: 'test-output',
+        keyword: 'TEST',
+        confidence: 0,
+        source: 'resident_test',
+        timestamp: DateTime.now(),
+      );
+      final real = AlertEvent(
+        eventId: 'real-output',
+        keyword: 'help',
+        confidence: .99,
+        timestamp: DateTime.now(),
+      );
+      expect(
+        await runtime.startTestEmergency(synthetic, AlertSound.alarm),
+        true,
+      );
+      expect(
+        await runtime.startTestEmergency(synthetic, AlertSound.alarm),
+        false,
+      );
+      await runtime.startEmergency(real, AlertSound.alarm);
+      await runtime.stopTestEmergency('test-output');
+      expect(runtime.stops, 0);
+      expect(
+        await runtime.startTestEmergency(synthetic, AlertSound.alarm),
+        false,
+      );
+      expect(runtime.audioStarts, 2);
+      runtime.playback.complete();
+      await runtime.stopEmergency();
+      expect(runtime.stops, 1);
+    },
+  );
   test('audio configuration failure retries on next emergency', () async {
     final runtime = RecoveringAudioRuntime();
     final event = AlertEvent(

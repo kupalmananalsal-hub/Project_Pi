@@ -54,6 +54,9 @@ for extra_path in (
 from alert_decision import AlertDecisionEngine
 from alert_trace import trace_alert
 from alert_delivery import DeliverySessions
+from resident_control import ControlPlane
+
+resident_controls = ControlPlane()
 
 # 5 s/5 s detects a dead caregiver link fast; the pre-PR #9 values were 15 s/10 s.
 delivery_sessions = DeliverySessions(
@@ -211,6 +214,8 @@ def api_token_required(scope: dict[str, Any]) -> bool:
     if scope["type"] == "http" and scope.get("method") == "OPTIONS":
         return False
     path = scope.get("path", "")
+    if path == "/api/resident/control":
+        return False  # Exact route authenticates a scoped resident secret itself.
     query = scope.get("query_string", b"").split(b"&")
     if path == "/ws/alerts" and b"protocol=2" in query and effective_auth_mode() != "locked":
         return False  # caregiver delivery authenticates with its own per-phone secret
@@ -249,6 +254,64 @@ class ApiTokenMiddleware:
 
 
 app.add_middleware(ApiTokenMiddleware)
+
+
+async def resident_body(request: Request) -> dict:
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > 4096:
+            raise HTTPException(413, "Control message too large")
+        data.extend(chunk)
+    try:
+        body = json.loads(data)
+        if not isinstance(body, dict):
+            raise ValueError()
+        return body
+    except ValueError:
+        raise HTTPException(400, "Invalid control message")
+
+
+@app.post("/api/resident/control")
+async def resident_control(request: Request):
+    identity = request.headers.get("x-resident-id", "")
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    if (effective_auth_mode() != "required" or scheme.lower() != "bearer"
+            or not resident_controls.authenticate(identity, token)):
+        raise HTTPException(401, "Resident test pairing unavailable or invalid")
+    body = await resident_body(request)
+    try:
+        if body.get("action") == "connect":
+            return resident_controls.connect(identity)
+        if body.get("action") == "heartbeat":
+            return resident_controls.heartbeat(identity, body.get("session_id"))
+        return resident_controls.command(identity, body)
+    except (ValueError, OSError):
+        raise HTTPException(409, "Control rejected; reconnect or check capability")
+
+
+def require_main_test_access(request: Request):
+    if not api_token_valid(request.headers.get("authorization", "")):
+        raise HTTPException(401, "Authenticated Main App required")
+    if not resident_controls.settings.test_mode:
+        raise HTTPException(404, "Resident TEST mode disabled")
+
+
+@app.get("/api/resident/main")
+async def resident_main_state(request: Request):
+    require_main_test_access(request)
+    return resident_controls.main_snapshot()
+
+
+@app.post("/api/resident/main")
+async def resident_main_ack(request: Request):
+    require_main_test_access(request)
+    body = await resident_body(request)
+    try:
+        if body.get("action") == "disable_mute":
+            return resident_controls.disable_mute()
+        return resident_controls.present(body.get("event_id"), body.get("disposition"))
+    except (ValueError, OSError):
+        raise HTTPException(409, "TEST acknowledgement rejected")
 
 
 class LedRequest(BaseModel):
@@ -1088,6 +1151,8 @@ def normalize_audio_payload(data: dict[str, Any], *, working: bool = True) -> di
         direction = "front"
     return {
         "working": working,
+        "remote_microphone_muted": data.get("remote_microphone_muted") is True,
+        "audio_evidence": "muted_not_evidence" if data.get("remote_microphone_muted") else "live_audio",
         "left": left,
         "right": right,
         "left_rms": left,

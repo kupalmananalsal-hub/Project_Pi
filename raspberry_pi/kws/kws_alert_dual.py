@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+from contextlib import nullcontext
 import json
 import os
 import queue
@@ -21,6 +22,7 @@ if str(RASPBERRY_PI_ROOT) not in sys.path:
 
 from alert_decision import AlertDecisionEngine, AlertPolicy
 from alert_trace import trace_alert
+from resident_control import KwsMuteGate, RecognitionPoster
 
 import numpy as np
 import pyaudio
@@ -988,6 +990,8 @@ def write_audio_status(status_path: Path, packet: dict[str, object]) -> None:
     left_rms = float(np.sqrt(np.mean(np.square(left))) / 32768.0) if left.size else 0.0
     right_rms = float(np.sqrt(np.mean(np.square(right))) / 32768.0) if right.size else 0.0
     payload = {
+        "remote_microphone_muted": packet.get("remote_microphone_muted", False),
+        "audio_evidence": "muted_not_evidence" if packet.get("remote_microphone_muted") else "live_audio",
         "left": round(left_rms, 4),
         "right": round(right_rms, 4),
         "rms": [round(left_rms, 4), round(right_rms, 4)],
@@ -1111,93 +1115,105 @@ def vosk_worker(
     else:
         print("wav2vec2 verifier disabled by WAV2VEC2_VERIFIER_ENABLED=0", flush=True)
 
+    worker_epoch = -1
     while RUNNING:
         try:
             data = audio_queue.get(timeout=0.2)
         except queue.Empty:
             continue
 
-        mono_samples = np.asarray(data["mono_samples"], dtype=np.int16)
-        recent_audio.append(mono_samples.copy())
-        recent_audio_sample_count += int(mono_samples.size)
-        while recent_audio_sample_count > max_context_samples and recent_audio:
-            removed_samples = recent_audio.popleft()
-            recent_audio_sample_count -= int(removed_samples.size)
+        gate = getattr(dispatcher, "mute_gate", None)
+        with gate.lock if gate else nullcontext():
+            if gate:
+                if not gate.accepts(data):
+                    continue
+                if worker_epoch != gate.epoch:
+                    recognizer.Reset()
+                    recent_audio.clear()
+                    recent_audio_sample_count = 0
+                    last_debug_text = ""
+                    worker_epoch = gate.epoch
+            mono_samples = np.asarray(data["mono_samples"], dtype=np.int16)
+            recent_audio.append(mono_samples.copy())
+            recent_audio_sample_count += int(mono_samples.size)
+            while recent_audio_sample_count > max_context_samples and recent_audio:
+                removed_samples = recent_audio.popleft()
+                recent_audio_sample_count -= int(removed_samples.size)
 
-        text = read_vosk_text(recognizer, data["mono_bytes"])
-        if debug and text and text != last_debug_text:
-            print(f"vosk heard: {text}", flush=True)
-            last_debug_text = text
+            text = read_vosk_text(recognizer, data["mono_bytes"])
+            if debug and text and text != last_debug_text:
+                print(f"vosk heard: {text}", flush=True)
+                last_debug_text = text
 
-        tagalog_keyword = detect_tagalog_keyword(text)
-        if tagalog_keyword is not None:
-            final_confidence = confidence
-            context = _event_context(data)
-            context["vosk_text"] = text
-            candidate = KeywordCandidate(
-                keyword=tagalog_keyword,
-                confidence=confidence,
-                source="vosk",
-                accepted=True,
-                reason="fallback_accepted",
-            )
-            print(
-                "Vosk detection: "
-                f"{tagalog_keyword} confidence={confidence:.2f} text='{text}'",
-                flush=True,
-            )
-            if (
-                verifier is not None
-                and tagalog_keyword in TAGALOG_KEYWORDS
-                and final_confidence < verify_below_confidence
-            ):
-                verification_samples = (
-                    np.concatenate(tuple(recent_audio))
-                    if recent_audio
-                    else mono_samples
+            tagalog_keyword = detect_tagalog_keyword(text)
+            if tagalog_keyword is not None:
+                final_confidence = confidence
+                context = _event_context(data)
+                context["vosk_text"] = text
+                candidate = KeywordCandidate(
+                    keyword=tagalog_keyword,
+                    confidence=confidence,
+                    source="vosk",
+                    accepted=True,
+                    reason="fallback_accepted",
                 )
-                verified, verified_confidence = verifier.verify(
-                    audio_samples_to_float32(verification_samples),
+                print(
+                    "Vosk detection: "
+                    f"{tagalog_keyword} confidence={confidence:.2f} text='{text}'",
+                    flush=True,
+                )
+                if (
+                    verifier is not None
+                    and tagalog_keyword in TAGALOG_KEYWORDS
+                    and final_confidence < verify_below_confidence
+                ):
+                    verification_samples = (
+                        np.concatenate(tuple(recent_audio))
+                        if recent_audio
+                        else mono_samples
+                    )
+                    verified, verified_confidence = verifier.verify(
+                        audio_samples_to_float32(verification_samples),
+                        tagalog_keyword,
+                    )
+                    candidate.verifier_used = True
+                    candidate.verifier_result = verified
+                    if verified:
+                        # wav2vec2 confirmed: boost confidence
+                        print(
+                            "wav2vec2 verifier confirmed Vosk detection: "
+                            f"{tagalog_keyword} confidence={verified_confidence:.2f}",
+                            flush=True,
+                        )
+                        context["wav2vec2_verified"] = True
+                        context["wav2vec2_backend"] = verifier.backend
+                        context["vosk_original_confidence"] = final_confidence
+                        candidate.original_confidence = final_confidence
+                        final_confidence = verified_confidence
+                        candidate.confidence = verified_confidence
+                        candidate.reason = "verifier_boosted"
+                    else:
+                        # wav2vec2 did NOT confirm -- proceed at original confidence
+                        # (boost-only: rejection does NOT veto the detection)
+                        print(
+                            "wav2vec2 verifier did not confirm Vosk detection: "
+                            f"{tagalog_keyword} -- proceeding at original "
+                            f"confidence={final_confidence:.2f}",
+                            flush=True,
+                        )
+                        context["wav2vec2_verified"] = False
+                        context["wav2vec2_backend"] = verifier.backend
+
+                dispatcher.note_vosk_text(text)
+                dispatcher.submit(
                     tagalog_keyword,
+                    final_confidence,
+                    "vosk",
+                    context=context,
                 )
-                candidate.verifier_used = True
-                candidate.verifier_result = verified
-                if verified:
-                    # wav2vec2 confirmed: boost confidence
-                    print(
-                        "wav2vec2 verifier confirmed Vosk detection: "
-                        f"{tagalog_keyword} confidence={verified_confidence:.2f}",
-                        flush=True,
-                    )
-                    context["wav2vec2_verified"] = True
-                    context["wav2vec2_backend"] = verifier.backend
-                    context["vosk_original_confidence"] = final_confidence
-                    candidate.original_confidence = final_confidence
-                    final_confidence = verified_confidence
-                    candidate.confidence = verified_confidence
-                    candidate.reason = "verifier_boosted"
-                else:
-                    # wav2vec2 did NOT confirm -- proceed at original confidence
-                    # (boost-only: rejection does NOT veto the detection)
-                    print(
-                        "wav2vec2 verifier did not confirm Vosk detection: "
-                        f"{tagalog_keyword} -- proceeding at original "
-                        f"confidence={final_confidence:.2f}",
-                        flush=True,
-                    )
-                    context["wav2vec2_verified"] = False
-                    context["wav2vec2_backend"] = verifier.backend
-
-            dispatcher.note_vosk_text(text)
-            dispatcher.submit(
-                tagalog_keyword,
-                final_confidence,
-                "vosk",
-                context=context,
-            )
-            recognizer.Reset()
-            recent_audio.clear()
-            recent_audio_sample_count = 0
+                recognizer.Reset()
+                recent_audio.clear()
+                recent_audio_sample_count = 0
 
 
 def create_snowboy_detector(
@@ -1241,42 +1257,52 @@ def snowboy_worker(
         flush=True,
     )
 
+    worker_epoch = -1
     while RUNNING:
         try:
             data = audio_queue.get(timeout=0.2)
         except queue.Empty:
             continue
 
-        next_sensitivities = ",".join(
-            sensitivity_controller.sensitivity_list(len(config["model_paths"]))
-        )
-        if next_sensitivities != current_sensitivities:
-            detector.SetSensitivity(next_sensitivities.encode())
-            current_sensitivities = next_sensitivities
+        gate = getattr(dispatcher, "mute_gate", None)
+        with gate.lock if gate else nullcontext():
+            if gate:
+                if not gate.accepts(data):
+                    continue
+                if worker_epoch != gate.epoch:
+                    detector = create_snowboy_detector(config, sensitivity_controller)
+                    worker_epoch = gate.epoch
+            next_sensitivities = ",".join(
+                sensitivity_controller.sensitivity_list(len(config["model_paths"]))
+            )
+            if next_sensitivities != current_sensitivities:
+                detector.SetSensitivity(next_sensitivities.encode())
+                current_sensitivities = next_sensitivities
 
-        result = detector.RunDetection(data["mono_bytes"])
-        if result > 0:
-            index = result - 1
-            spoken_keyword = (
-                config["keywords"][index]
-                if index < len(config["keywords"])
-                else config["alert_keyword"]
-            )
-            context = _event_context(data)
-            context["snowboy_keyword"] = spoken_keyword
-            context["snowboy_sensitivity"] = sensitivity_controller.current_value
-            dispatcher.submit(
-                str(config["alert_keyword"]),
-                float(config["confidence"]),
-                "snowboy",
-                context=context,
-            )
-        elif result == -1:
-            print("Snowboy detection error", file=sys.stderr, flush=True)
+            result = detector.RunDetection(data["mono_bytes"])
+            if result > 0:
+                index = result - 1
+                spoken_keyword = (
+                    config["keywords"][index]
+                    if index < len(config["keywords"])
+                    else config["alert_keyword"]
+                )
+                context = _event_context(data)
+                context["snowboy_keyword"] = spoken_keyword
+                context["snowboy_sensitivity"] = sensitivity_controller.current_value
+                dispatcher.submit(
+                    str(config["alert_keyword"]),
+                    float(config["confidence"]),
+                    "snowboy",
+                    context=context,
+                )
+            elif result == -1:
+                print("Snowboy detection error", file=sys.stderr, flush=True)
 
 
 def _event_context(data: dict[str, object]) -> dict[str, object]:
     context = {
+        "recognition_epoch": data.get("recognition_epoch", 0),
         "direction": data.get("direction", "center"),
         "noise_level_db": data.get("noise_level_db", -90.0),
         "signal_level_db": data.get("signal_level_db", -90.0),
@@ -1458,8 +1484,9 @@ def main() -> None:
     poster = AlertPoster(backend_url, queue_path, legacy_queue_path=LEGACY_ALERT_QUEUE_PATH)
     poster.start_worker()
     cooldown = CooldownGate(cooldown_seconds)
+    mute_gate = KwsMuteGate()
     dispatcher = DetectionDispatcher(
-        poster=poster,
+        poster=RecognitionPoster(poster, mute_gate) if mute_gate.files else poster,
         cooldown=cooldown,
         help_confirm_seconds=float(os.getenv("SNOWBOY_HELP_CONFIRM_SECONDS", "0.8")),
         help_suppress_after_tulong_seconds=float(
@@ -1467,6 +1494,7 @@ def main() -> None:
         ),
     )
     vosk_queue: queue.Queue = queue.Queue(maxsize=32)
+    dispatcher.mute_gate = mute_gate if mute_gate.files else None
     snowboy_queue: queue.Queue = queue.Queue(maxsize=32)
     vosk_config = {
         "model_path": vosk_model_path,
@@ -1545,6 +1573,9 @@ def main() -> None:
         )
         while RUNNING and not noise_suppressor.profile_ready:
             data = stream.read(chunk_frames, exception_on_overflow=False)
+            if mute_gate.poll():
+                write_audio_status(audio_status_path, {"remote_microphone_muted": True})
+                continue
             packet = split_audio_chunk(data, channels)
             noise_suppressor.capture_noise_profile(packet["raw_mono_samples"])
 
@@ -1592,7 +1623,23 @@ def main() -> None:
                 next_config_poll_at = now + 1.0
 
             data = stream.read(chunk_frames, exception_on_overflow=False)
+            def cancel_unapproved_candidates():
+                with dispatcher.lock:
+                    if dispatcher.pending_help_timer is not None:
+                        dispatcher.pending_help_timer.cancel()
+                    dispatcher.pending_help_timer = None
+                    dispatcher.pending_help_payload = None
+
+            if mute_gate.capture_boundary(
+                (vosk_queue, snowboy_queue),
+                audio_preprocessor.reset_recognition if mute_gate.files else lambda: None,
+                cancel_unapproved_candidates,
+            ):
+                write_audio_status(audio_status_path, {"remote_microphone_muted": mute_gate.muted,
+                                                       "outbox": poster.outbox_status()})
+                continue
             packet = split_audio_chunk(data, channels)
+            packet["recognition_epoch"] = mute_gate.epoch
             raw_samples = packet["raw_mono_samples"]
             preprocessor_result = audio_preprocessor.process(raw_samples)
             if audio_preprocessor.available:
