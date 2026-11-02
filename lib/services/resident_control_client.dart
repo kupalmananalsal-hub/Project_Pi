@@ -11,6 +11,8 @@ import '../models/app_settings.dart';
 import 'mute_acknowledgement.dart';
 import 'device_pairing_service.dart';
 
+class ResidentBackendUpdateRequired implements Exception {}
+
 class ResidentPairing {
   static const _storage = FlutterSecureStorage();
   static String key(String host, int port) => 'resident:$host:$port';
@@ -141,6 +143,9 @@ class ResidentControlClient extends ChangeNotifier {
     if (value['test_mode'] != true || value['boot_id'] is! String) {
       throw StateError('incompatible_test_control_protocol');
     }
+    if (value['manual_alert_history_version'] != 1) {
+      throw ResidentBackendUpdateRequired();
+    }
     return value;
   }
 
@@ -195,15 +200,19 @@ class ResidentControlClient extends ChangeNotifier {
       _session = value['session_id'] as String;
       _sequence = 0;
       _accept(value);
-      message = 'Paired and connected • TEST mode';
+      message = 'Paired and connected';
     } catch (error) {
-      _connectionRetryAllowed = error is PairingRequired
+      _connectionRetryAllowed = error is ResidentBackendUpdateRequired
+          ? false
+          : error is PairingRequired
           ? error.retryable
           : !(error is DioException &&
                 (error.response?.statusCode == 401 ||
                     error.response?.statusCode == 403));
       if (!_connectionRetryAllowed) _timer?.cancel();
-      message = error is PairingRequired
+      message = error is ResidentBackendUpdateRequired
+          ? 'Pi backend update required for delivery to Main and saved History. Pairing is preserved.'
+          : error is PairingRequired
           ? error.message
           : error is DioException &&
                 (error.response?.statusCode == 401 ||

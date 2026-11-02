@@ -36,6 +36,7 @@ class _ResidentModeScreenState extends State<ResidentModeScreen>
   }
 
   void _tap() {
+    if (!_control.connected) return;
     final now = _tapClock.elapsedMilliseconds;
     final full = _firstTapAt != null && now - _firstTapAt! <= 300;
     _firstTapAt = full ? null : now;

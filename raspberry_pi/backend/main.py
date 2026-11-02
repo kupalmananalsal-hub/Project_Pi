@@ -370,6 +370,7 @@ async def resident_control(request: Request):
         if paired and not mute_authorized:
             result["remote_mute_available"] = False
             result["max_lease_seconds"] = None
+        result["manual_alert_history_version"] = 1
         return result
     except (ValueError, OSError):
         raise HTTPException(409, "Control rejected; reconnect or check capability")

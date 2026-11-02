@@ -36,27 +36,14 @@ class MonitorScreen extends ConsumerWidget {
           ? const VoiceDirection.unknown()
           : monitor.direction,
       keywordSpotted: alerts.keywordNotice != null,
+      onDismissKeyword: () =>
+          ref.read(alertsProvider.notifier).dismissKeywordNotice(),
       thermalSoftAlert: alerts.thermalSoftAlert,
       audioAvailable: audioAvailable,
     );
     final thermalCard = _ThermalCard(thermal: thermal);
     return AppPage(
       children: [
-        if (alerts.keywordNotice?.isResidentManual == true)
-          Card(
-            child: ListTile(
-              title: const Text(
-                'KEYWORD SPOTTED',
-                style: TextStyle(fontWeight: FontWeight.w900),
-              ),
-              trailing: IconButton(
-                icon: const Icon(Icons.close),
-                tooltip: 'Dismiss alert',
-                onPressed: () =>
-                    ref.read(alertsProvider.notifier).dismissKeywordNotice(),
-              ),
-            ),
-          ),
         Text(
           'Monitor',
           style: Theme.of(
@@ -147,11 +134,13 @@ class _DirectionCard extends StatelessWidget {
   const _DirectionCard({
     required this.direction,
     required this.keywordSpotted,
+    required this.onDismissKeyword,
     required this.thermalSoftAlert,
     required this.audioAvailable,
   });
   final VoiceDirection direction;
   final bool keywordSpotted;
+  final VoidCallback onDismissKeyword;
   final bool thermalSoftAlert;
   final bool audioAvailable;
 
@@ -194,9 +183,25 @@ class _DirectionCard extends StatelessWidget {
     return _Panel(
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final radar = RadarCompass(
-            direction: direction,
-            size: constraints.maxWidth < 400 ? 148 : 200,
+          final radar = Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (keywordSpotted)
+                TextButton(
+                  onPressed: onDismissKeyword,
+                  child: const Text(
+                    'KEYWORD SPOTTED!',
+                    style: TextStyle(
+                      color: Colors.amber,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+              RadarCompass(
+                direction: direction,
+                size: constraints.maxWidth < 400 ? 148 : 200,
+              ),
+            ],
           );
           if (constraints.maxWidth < 290 ||
               MediaQuery.textScalerOf(context).scale(1) > 1.3) {
