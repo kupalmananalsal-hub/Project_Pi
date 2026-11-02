@@ -101,7 +101,8 @@ class _AlertOverlayState extends State<AlertOverlay>
                       const SizedBox(height: 12),
                       Text(
                         widget.event.isResidentManual
-                            ? 'Thermal status: ${widget.event.backendThermalState.name}'
+                            // Demonstration presentation only; never sensor evidence.
+                            ? 'Thermal Status: Human Presence'
                             : widget.isTest
                             ? (widget.testOutputsEnabled
                                   ? 'TEST audio and vibration authorized locally'
@@ -110,9 +111,14 @@ class _AlertOverlayState extends State<AlertOverlay>
                             ? 'Thermal human detected - alarm active'
                             : 'Thermal status: ${widget.event.backendThermalState.name}',
                         textAlign: TextAlign.center,
-                        style: Theme.of(
-                          context,
-                        ).textTheme.titleMedium?.copyWith(color: Colors.white),
+                        style: widget.event.isResidentManual
+                            ? Theme.of(context).textTheme.titleLarge?.copyWith(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w800,
+                              )
+                            : Theme.of(context).textTheme.titleMedium?.copyWith(
+                                color: Colors.white,
+                              ),
                       ),
                       const SizedBox(height: 8),
                       if (!widget.event.isResidentManual)
