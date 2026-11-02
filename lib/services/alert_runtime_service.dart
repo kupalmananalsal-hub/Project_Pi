@@ -202,21 +202,27 @@ class AlertRuntimeService {
       }
     }
 
-    await runZoned(() async {
-      await Future.wait([
-        stage('notification', () async {
-          await cancelNotification().timeout(operationTimeout);
-          _checkGeneration();
-          await showEmergencyNotification(event, vibrate: vibrate);
-        }),
-        stage('alarm_audio', () async {
-          await stopSoftAudio();
-          _checkGeneration();
-          await _startAudio(sound, event.eventId);
-        }),
-        stage('vibration', vibrate ? startVibration : Vibration.cancel),
-      ]);
-    }, zoneValues: {#alertGeneration: generation});
+    await runZoned(
+      () async {
+        await Future.wait([
+          stage('notification', () async {
+            await cancelNotification().timeout(operationTimeout);
+            _checkGeneration();
+            await showEmergencyNotification(event, vibrate: vibrate);
+          }),
+          stage('alarm_audio', () async {
+            await stopSoftAudio();
+            _checkGeneration();
+            await _startAudio(sound, event.eventId);
+          }),
+          stage('vibration', vibrate ? startVibration : Vibration.cancel),
+        ]);
+      },
+      zoneValues: {
+        #alertGeneration: generation,
+        #singlePlay: event.isResidentManual,
+      },
+    );
   }
 
   Future<void> stopEmergency() async {
@@ -279,10 +285,16 @@ class AlertRuntimeService {
     final generation = ++_manualBeepGeneration;
     try {
       await configureAudio();
-      final file = await _softBeepFile();
+      final session = await AudioSession.instance;
+      await session.setActive(true);
+      final directory = await getTemporaryDirectory();
+      final file = File('${directory.path}/manual_keyword_once_v1.wav');
+      if (!await file.exists()) {
+        await file.writeAsBytes(_buildSoftBeepWave(single: true), flush: true);
+      }
       if (generation != _manualBeepGeneration || _emergencyActive) return;
       await _softPlayer.setFilePath(file.path);
-      await _softPlayer.setLoopMode(LoopMode.one);
+      await _softPlayer.setLoopMode(LoopMode.off);
       await _softPlayer.setVolume(1);
       if (generation != _manualBeepGeneration || _emergencyActive) return;
       unawaited(_softPlayer.play().catchError((Object _) {}));
@@ -304,9 +316,9 @@ class AlertRuntimeService {
   }) async {
     await initialize();
     _checkGeneration();
-    const android = AndroidNotificationDetails(
-      'keyword_alerts',
-      'Keyword Alerts',
+    final android = AndroidNotificationDetails(
+      event.isResidentManual ? 'manual_alerts_silent_v1' : 'keyword_alerts',
+      event.isResidentManual ? 'Alert display' : 'Keyword Alerts',
       channelDescription: 'Emergency keyword detections from the Pi.',
       importance: Importance.max,
       priority: Priority.max,
@@ -315,14 +327,14 @@ class AlertRuntimeService {
       fullScreenIntent: true,
       ongoing: true,
       autoCancel: false,
-      playSound: true,
+      playSound: !event.isResidentManual,
       enableVibration: true,
       audioAttributesUsage: AudioAttributesUsage.alarm,
       visibility: NotificationVisibility.public,
     );
-    const darwin = DarwinNotificationDetails(
+    final darwin = DarwinNotificationDetails(
       presentAlert: true,
-      presentSound: true,
+      presentSound: !event.isResidentManual,
       presentBanner: true,
       presentList: true,
       interruptionLevel: InterruptionLevel.timeSensitive,
@@ -333,21 +345,12 @@ class AlertRuntimeService {
     _notificationIds.add(notificationId);
     await _notifications.show(
       id: notificationId,
-      title: event.source == 'resident_test'
-          ? 'Full Alert TEST / SIMULATION'
-          : event.emergencyTitle,
+      title: event.emergencyTitle,
       body:
-          '${event.isResidentManual
-              ? 'Manual trigger • Simulation. '
-              : event.source == 'resident_test'
-              ? 'TEST / SIMULATION. '
-              : ''}${event.isResidentManual ? '' : 'Voice from ${event.directionLabel}. '}'
+          '${event.isResidentManual ? '' : 'Voice from ${event.directionLabel}. '}'
           'Thermal status: ${event.backendThermalState.name}. '
           '${_formatTime(event.timestamp)}',
-      notificationDetails: const NotificationDetails(
-        android: android,
-        iOS: darwin,
-      ),
+      notificationDetails: NotificationDetails(android: android, iOS: darwin),
     );
     try {
       _checkGeneration();
@@ -392,7 +395,9 @@ class AlertRuntimeService {
     _checkGeneration();
     await _player.setFilePath(file.path);
     _checkGeneration();
-    await _player.setLoopMode(LoopMode.one);
+    await _player.setLoopMode(
+      Zone.current[#singlePlay] == true ? LoopMode.off : LoopMode.one,
+    );
     _checkGeneration();
     await _player.setVolume(1);
   }
@@ -494,7 +499,7 @@ class AlertRuntimeService {
     return bytes;
   }
 
-  Uint8List _buildSoftBeepWave() {
+  Uint8List _buildSoftBeepWave({bool single = false}) {
     const sampleRate = 44100;
     const durationSeconds = 0.48;
     final samples = (sampleRate * durationSeconds).round();
@@ -524,7 +529,7 @@ class AlertRuntimeService {
     for (var i = 0; i < samples; i++) {
       final seconds = i / sampleRate;
       final firstBeep = seconds >= 0.03 && seconds <= 0.13;
-      final secondBeep = seconds >= 0.25 && seconds <= 0.35;
+      final secondBeep = !single && seconds >= 0.25 && seconds <= 0.35;
       final envelope = firstBeep || secondBeep ? 1.0 : 0.0;
       final signal = math.sin(2 * math.pi * 1760 * seconds);
       final sample = (signal * envelope * 18000).round();

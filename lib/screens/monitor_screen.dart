@@ -49,7 +49,6 @@ class MonitorScreen extends ConsumerWidget {
                 'KEYWORD SPOTTED',
                 style: TextStyle(fontWeight: FontWeight.w900),
               ),
-              subtitle: const Text('Manual trigger • Simulation'),
               trailing: IconButton(
                 icon: const Icon(Icons.close),
                 tooltip: 'Dismiss alert',

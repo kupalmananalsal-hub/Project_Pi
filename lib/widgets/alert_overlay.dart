@@ -96,11 +96,12 @@ class _AlertOverlayState extends State<AlertOverlay>
                             ),
                       ),
                       const SizedBox(height: 18),
-                      if (!widget.isTest) _AlertDirection(event: widget.event),
+                      if (!widget.isTest && !widget.event.isResidentManual)
+                        _AlertDirection(event: widget.event),
                       const SizedBox(height: 12),
                       Text(
                         widget.event.isResidentManual
-                            ? 'Manual trigger • Simulation'
+                            ? 'Thermal status: ${widget.event.backendThermalState.name}'
                             : widget.isTest
                             ? (widget.testOutputsEnabled
                                   ? 'TEST audio and vibration authorized locally'
@@ -114,28 +115,27 @@ class _AlertOverlayState extends State<AlertOverlay>
                         ).textTheme.titleMedium?.copyWith(color: Colors.white),
                       ),
                       const SizedBox(height: 8),
-                      Text(
-                        widget.event.isResidentManual
-                            ? 'Manually generated — no ML detection claimed'
-                            : widget.isTest
-                            ? 'No real detection or thermal evidence claimed'
-                            : 'Final confidence ${(widget.event.displayedConfidence * 100).round()}%',
-                        style: Theme.of(
-                          context,
-                        ).textTheme.titleMedium?.copyWith(color: Colors.white),
-                      ),
+                      if (!widget.event.isResidentManual)
+                        Text(
+                          widget.isTest
+                              ? 'No real detection or thermal evidence claimed'
+                              : 'Final confidence ${(widget.event.displayedConfidence * 100).round()}%',
+                          style: Theme.of(context).textTheme.titleMedium
+                              ?.copyWith(color: Colors.white),
+                        ),
                       const SizedBox(height: 10),
-                      Text(
-                        widget.isTest
-                            ? 'TEST event ${widget.event.eventId}'
-                            : '${widget.event.detectedPartLabel} - '
-                                  '${(widget.event.bodyCoverage * 100).toStringAsFixed(1)}% coverage - '
-                                  'boost +${(widget.event.thermalConfidenceBoost * 100).round()}%',
-                        textAlign: TextAlign.center,
-                        style: Theme.of(
-                          context,
-                        ).textTheme.bodyLarge?.copyWith(color: Colors.white),
-                      ),
+                      if (!widget.event.isResidentManual)
+                        Text(
+                          widget.isTest
+                              ? 'TEST event ${widget.event.eventId}'
+                              : '${widget.event.detectedPartLabel} - '
+                                    '${(widget.event.bodyCoverage * 100).toStringAsFixed(1)}% coverage - '
+                                    'boost +${(widget.event.thermalConfidenceBoost * 100).round()}%',
+                          textAlign: TextAlign.center,
+                          style: Theme.of(
+                            context,
+                          ).textTheme.bodyLarge?.copyWith(color: Colors.white),
+                        ),
                       if (widget.thermalFrame != null) ...[
                         const SizedBox(height: 14),
                         _ThermalCapture(

@@ -100,9 +100,11 @@ class HistoryScreen extends ConsumerWidget {
                       ),
                       title: Text(event.historyTitle),
                       subtitle: Text(
-                        '${_formatTimestamp(event.timestamp)} - '
-                        '${event.isResidentManual ? 'Manual trigger • Simulation • ${event.source}' : 'confidence ${(event.displayedConfidence * 100).round()}%'} - '
-                        'human ${event.humanDetected ? 'yes' : 'no'}',
+                        event.isResidentManual
+                            ? _formatTimestamp(event.timestamp)
+                            : '${_formatTimestamp(event.timestamp)} - '
+                                  'confidence ${(event.displayedConfidence * 100).round()}% - '
+                                  'human ${event.humanDetected ? 'yes' : 'no'}',
                       ),
                     ),
               ],
