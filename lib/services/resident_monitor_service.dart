@@ -13,6 +13,7 @@ class ResidentTestEvent {
   const ResidentTestEvent(this.id, this.full);
   final String id;
   final bool full;
+  String get presentationKey => '$id:${full ? 'full_test' : 'keyword_test'}';
   static ResidentTestEvent? parse(Map value) {
     final id = value['event_id'];
     if (value['is_test'] != true ||
@@ -93,12 +94,25 @@ class ResidentMonitorService extends ChangeNotifier {
       message = value['resident_connected'] == true
           ? 'Resident connected • TEST mode'
           : 'Resident disconnected • TEST mode';
+      pending.removeWhere(
+        (event) => !(value['events'] as List? ?? []).whereType<Map>().any(
+          (row) =>
+              row['event_id'] == event.id &&
+              row['active'] != false &&
+              row['kind'] == (event.full ? 'full_test' : 'keyword_test') &&
+              row['delivery'] == 'backend_accepted',
+        ),
+      );
+      if (value['resident_connected'] != true) pending.clear();
       for (final row in (value['events'] as List? ?? []).whereType<Map>()) {
         final event = ResidentTestEvent.parse(row);
-        if (event != null &&
+        if (value['resident_connected'] == true &&
+            row['active'] != false &&
+            event != null &&
             !_seen.contains(event.id) &&
+            !_seen.contains(event.presentationKey) &&
             row['delivery'] == 'backend_accepted' &&
-            !pending.any((e) => e.id == event.id)) {
+            !pending.any((e) => e.presentationKey == event.presentationKey)) {
           pending.add(event);
         }
       }
@@ -117,13 +131,17 @@ class ResidentMonitorService extends ChangeNotifier {
   }
 
   Future<bool> claim(ResidentTestEvent event) async {
-    if (_seen.contains(event.id) || !connected || _prefs == null) return false;
+    if (_seen.contains(event.id) ||
+        _seen.contains(event.presentationKey) ||
+        !connected ||
+        _prefs == null)
+      return false;
     if (_seen.length >= 4096) {
       message = 'TEST presentation blocked: deduplication capacity reached';
       _changed();
       return false;
     }
-    _seen.add(event.id);
+    _seen.add(event.presentationKey);
     final generation = _generation;
     try {
       // Persist BEFORE presentation: reconnect/restart cannot restart a test siren.
@@ -131,7 +149,7 @@ class ResidentMonitorService extends ChangeNotifier {
         throw StateError('dedup_storage_failed');
       }
       if (_disposed || generation != _generation || !connected) return false;
-      pending.removeWhere((e) => e.id == event.id);
+      pending.removeWhere((e) => e.presentationKey == event.presentationKey);
       return true;
     } catch (_) {
       message = 'TEST presentation blocked: durable deduplication unavailable';
@@ -141,7 +159,11 @@ class ResidentMonitorService extends ChangeNotifier {
   }
 
   Future<bool> acknowledge(ResidentTestEvent event, String disposition) =>
-      _post({'event_id': event.id, 'disposition': disposition});
+      _post({
+        'event_id': event.id,
+        'kind': event.full ? 'full_test' : 'keyword_test',
+        'disposition': disposition,
+      });
   Future<bool> disableMute() => _post({'action': 'disable_mute'});
   Future<bool> _post(Map<String, dynamic> body) async {
     final settings = _settings, generation = _generation;

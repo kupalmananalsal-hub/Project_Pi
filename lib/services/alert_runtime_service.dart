@@ -38,6 +38,41 @@ class AlertRuntimeService {
   final _notifications = FlutterLocalNotificationsPlugin();
   final _player = AudioPlayer();
   final _softPlayer = AudioPlayer();
+  Future<void> _foregroundTestAudio = Future.value();
+  int _foregroundTestGeneration = 0;
+
+  /// Foreground simulation only: reuse local synthesized sounds, without
+  /// notification initialization, permission requests, or network access.
+  Future<void> playForegroundTest({required bool full}) {
+    final generation = ++_foregroundTestGeneration;
+    _foregroundTestAudio = _foregroundTestAudio.catchError((Object _) {}).then((
+      _,
+    ) async {
+      await _player.stop();
+      if (generation != _foregroundTestGeneration) return;
+      await configureAudio();
+      final session = await AudioSession.instance;
+      await session.setActive(true);
+      final file = full
+          ? await _alarmFile(AlertSound.siren)
+          : await _softBeepFile();
+      if (generation != _foregroundTestGeneration) return;
+      await _player.setFilePath(file.path);
+      await _player.setLoopMode(LoopMode.one);
+      await _player.setVolume(1);
+      if (generation != _foregroundTestGeneration) return;
+      unawaited(_player.play().catchError((Object _) {}));
+    });
+    return _foregroundTestAudio;
+  }
+
+  Future<void> stopForegroundTest() {
+    ++_foregroundTestGeneration;
+    _foregroundTestAudio = _foregroundTestAudio
+        .catchError((Object _) {})
+        .then((_) => _player.stop());
+    return _foregroundTestAudio;
+  }
 
   Timer? _vibrationFallbackTimer;
   bool _initialized = false;
@@ -230,6 +265,7 @@ class AlertRuntimeService {
   }
 
   Future<void> dispose() async {
+    await stopForegroundTest();
     await stopEmergency();
     await _cleanup('soft_audio_stop', _softPlayer.stop);
     await _cleanup('audio_dispose', _player.dispose);

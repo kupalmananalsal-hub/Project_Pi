@@ -29,7 +29,7 @@ class _ResidentTestLayerState extends ConsumerState<ResidentTestLayer>
   late ResidentMonitorService _service;
   late AlertRuntimeService _runtime;
   ResidentTestEvent? _active;
-  bool _processing = false, _outputsAuthorized = false, _foreground = true;
+  bool _processing = false, _outputsAuthorized = true, _foreground = true;
   @override
   void initState() {
     super.initState();
@@ -50,7 +50,6 @@ class _ResidentTestLayerState extends ConsumerState<ResidentTestLayer>
       _service.stop();
       final event = _active;
       _active = null;
-      _outputsAuthorized = false;
       if (event != null) {
         unawaited(_runtime.stopTestEmergency(event.id));
       }
@@ -60,10 +59,19 @@ class _ResidentTestLayerState extends ConsumerState<ResidentTestLayer>
 
   void _update() {
     if (!mounted) return;
-    if (!_service.connected) {
+    final activeRow = (_service.state['events'] as List? ?? [])
+        .whereType<Map>()
+        .where((e) => e['event_id'] == _active?.id);
+    if (!_service.connected ||
+        _service.state['resident_connected'] != true ||
+        (_active != null &&
+            (activeRow.isEmpty ||
+                activeRow.first['active'] == false ||
+                activeRow.first['delivery'] == 'user_acknowledged')) ||
+        (_active?.full == false &&
+            _service.pending.any((e) => e.id == _active!.id && e.full))) {
       final event = _active;
       _active = null;
-      _outputsAuthorized = false;
       if (event != null) {
         unawaited(_runtime.stopTestEmergency(event.id));
       }
@@ -153,13 +161,11 @@ class _ResidentTestLayerState extends ConsumerState<ResidentTestLayer>
         unawaited(_service.start(ref.read(settingsProvider)));
       } else if (!connected) {
         _service.stop();
-        _outputsAuthorized = false;
         unawaited(_dismiss());
       }
     });
     ref.listen(settingsProvider, (old, next) {
       if (old?.host != next.host || old?.port != next.port) {
-        _outputsAuthorized = false;
         unawaited(_dismiss());
         unawaited(_service.start(next));
       }
@@ -176,82 +182,86 @@ class _ResidentTestLayerState extends ConsumerState<ResidentTestLayer>
       }
     });
     final realAlert = ref.watch(alertsProvider.select((s) => s.activeAlert));
-    final status = Material(
-      color: Theme.of(context).colorScheme.surfaceContainerLow,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _service.message,
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ),
-                if (_service.connected)
-                  PopupMenuButton<String>(
-                    tooltip: 'Resident TEST controls',
-                    onSelected: (action) {
-                      if (action == 'disable') {
-                        unawaited(_service.disableMute());
-                      } else if (_active == null) {
-                        setState(
-                          () => _outputsAuthorized = !_outputsAuthorized,
-                        );
-                      }
-                    },
-                    itemBuilder: (_) => [
-                      const PopupMenuItem(
-                        value: 'disable',
-                        child: Text('Disable remote recognition mute'),
-                      ),
-                      PopupMenuItem(
-                        value: 'outputs',
-                        enabled: _active == null,
+    final status = _active == null
+        ? const SizedBox.shrink()
+        : Material(
+            color: Theme.of(context).colorScheme.surfaceContainerLow,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
                         child: Text(
-                          _outputsAuthorized
-                              ? 'Disable TEST audio / vibration'
-                              : 'Authorize TEST audio / vibration this session',
+                          _service.message,
+                          style: Theme.of(context).textTheme.bodySmall,
                         ),
                       ),
+                      if (_service.connected)
+                        PopupMenuButton<String>(
+                          tooltip: 'Resident TEST controls',
+                          onSelected: (action) {
+                            if (action == 'disable') {
+                              unawaited(_service.disableMute());
+                            } else if (_active == null) {
+                              setState(
+                                () => _outputsAuthorized = !_outputsAuthorized,
+                              );
+                            }
+                          },
+                          itemBuilder: (_) => [
+                            const PopupMenuItem(
+                              value: 'disable',
+                              child: Text('Disable remote recognition mute'),
+                            ),
+                            PopupMenuItem(
+                              value: 'outputs',
+                              enabled: _active == null,
+                              child: Text(
+                                _outputsAuthorized
+                                    ? 'Disable TEST audio / vibration'
+                                    : 'Authorize TEST audio / vibration this session',
+                              ),
+                            ),
+                          ],
+                        ),
                     ],
                   ),
-              ],
-            ),
-            if (_service.connected)
-              Text(
-                _service.state['remote_microphone_muted'] == true
-                    ? 'REMOTE MICROPHONE MUTED — KWS acknowledged'
-                    : _service.state['mute_state'] == 'resuming'
-                    ? 'Recognition resuming — awaiting KWS acknowledgement'
-                    : _service.state['remote_mute_available'] == true
-                    ? 'Remote mute available • TEST mode'
-                    : 'Remote mute unavailable',
-                style: TextStyle(
-                  color: _service.state['remote_microphone_muted'] == true
-                      ? Colors.amber
-                      : null,
-                ),
-              ),
-            if (_active != null && !_active!.full)
-              Row(
-                children: [
-                  const Expanded(
-                    child: Text('KEYWORD SPOTTED TEST / SIMULATION'),
-                  ),
-                  TextButton(
-                    onPressed: _dismiss,
-                    child: const Text('Acknowledge TEST'),
-                  ),
+                  if (_service.connected &&
+                      (_service.state['remote_microphone_muted'] == true ||
+                          _service.state['mute_state'] == 'resuming'))
+                    Text(
+                      _service.state['remote_microphone_muted'] == true
+                          ? 'REMOTE MICROPHONE MUTED — KWS acknowledged'
+                          : _service.state['mute_state'] == 'resuming'
+                          ? 'Recognition resuming — awaiting KWS acknowledgement'
+                          : _service.state['remote_mute_available'] == true
+                          ? 'Remote mute available • TEST mode'
+                          : 'Remote mute unavailable',
+                      style: TextStyle(
+                        color: _service.state['remote_microphone_muted'] == true
+                            ? Colors.amber
+                            : null,
+                      ),
+                    ),
+                  if (_active != null && !_active!.full)
+                    Row(
+                      children: [
+                        const Expanded(
+                          child: Text('KEYWORD SPOTTED TEST / SIMULATION'),
+                        ),
+                        TextButton(
+                          onPressed: _dismiss,
+                          child: const Text('Acknowledge TEST'),
+                        ),
+                      ],
+                    ),
                 ],
               ),
-          ],
-        ),
-      ),
-    );
+            ),
+          );
     return Stack(
       children: [
         widget.builder(status),

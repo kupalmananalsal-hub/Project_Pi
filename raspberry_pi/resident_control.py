@@ -32,6 +32,7 @@ class Settings:
     max_seconds: float | None = None
     directory: Path | None = None
     credentials: Path | None = None
+    paired_mute_ids: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls, env=None):
@@ -46,7 +47,9 @@ class Settings:
         directory = env.get('PROJECT_PI_REMOTE_MUTE_DIR')
         enabled = test and env.get('PROJECT_PI_REMOTE_MUTE_ENABLED') == '1' and bound is not None and bool(directory)
         return cls(test, bool(enabled), bound, Path(directory) if directory else None,
-                   Path(env['PROJECT_PI_RESIDENT_CREDENTIALS']) if env.get('PROJECT_PI_RESIDENT_CREDENTIALS') else None)
+                   Path(env['PROJECT_PI_RESIDENT_CREDENTIALS']) if env.get('PROJECT_PI_RESIDENT_CREDENTIALS') else None,
+                   tuple(x.strip() for x in env.get('PROJECT_PI_REMOTE_MUTE_DEVICE_IDS', '').split(',')
+                         if x.strip()) if enabled else ())
 
 
 class MuteFiles:
@@ -302,7 +305,7 @@ class ControlPlane:
             self._expire()
             ack = self._worker_ack()
             fresh = bool(ack)
-            available = bool(self.files and self._credentials() and not self.files.disabled() and not self.locally_disabled and fresh)
+            available = bool(self.files and (self._credentials() or self.settings.paired_mute_ids) and not self.files.disabled() and not self.locally_disabled and fresh)
             active = bool(available and self.lease and ack.get('muted') is True
                           and ack.get('worker') == self.lease['worker']
                           and ack.get('lease_id') == self.lease['lease_id'] and ack.get('boot') == self.boot)
@@ -316,7 +319,10 @@ class ControlPlane:
                 max_lease_seconds=self.settings.max_seconds if available else None,
                 resident_connected=any(s['connected'] for s in self.sessions.values()),
                 main_connected=self.main_seen is not None and self.clock() - self.main_seen < 5,
-                events=[dict(e) for e in self.events])
+                events=[dict(e, active=bool(self.sessions.get(e['owner'], {}).get('connected')
+                    and self.sessions[e['owner']]['id'] == e['session_id']
+                    and e['delivery'] not in ('user_acknowledged', 'deferred_real_emergency')))
+                    for e in self.events])
 
     def main_snapshot(self):
         with self.lock:
@@ -330,7 +336,10 @@ class ControlPlane:
             cid, seq, action = body.get('command_id'), body.get('sequence'), body.get('action')
             if not isinstance(cid, str) or not 1 <= len(cid) <= 128 or type(seq) is not int:
                 raise ValueError('invalid_command_envelope')
-            fingerprint = (seq, action, body.get('lease_id'))
+            gesture = body.get('gesture_id')
+            if gesture is not None and (not isinstance(gesture, str) or not 1 <= len(gesture) <= 128):
+                raise ValueError('invalid_gesture_id')
+            fingerprint = (seq, action, body.get('lease_id'), gesture)
             if cid in session['commands']:
                 old, result = session['commands'][cid]
                 if old != fingerprint:
@@ -341,13 +350,21 @@ class ControlPlane:
             session['sequence'] = seq
             result = {}
             if action in ('keyword_test', 'full_test'):
-                if len(self.events) >= 300:
+                previous = next((e for e in self.events if gesture is not None
+                    and e.get('gesture_id') == gesture and e['owner'] == identity
+                    and e['session_id'] == session['id']), None)
+                if previous is not None:
+                    if action == 'full_test' and previous['kind'] == 'keyword_test' and previous['delivery'] != 'user_acknowledged':
+                        previous.update(kind='full_test', delivery='backend_accepted')
+                    result = previous.copy()
+                elif len(self.events) >= 300:
                     raise ValueError('test_event_capacity_restart_test_session')
-                result = dict(event_id='test-' + uuid.uuid4().hex, kind=action, is_test=True,
+                else:
+                    result = dict(event_id='test-' + uuid.uuid4().hex, kind=action, is_test=True,
                               delivery='backend_accepted', owner=identity, session_id=session['id'],
                               source='resident_test', command_id=cid, sequence=seq,
-                              created_epoch_seconds=time.time(), boot_id=self.boot)
-                self.events.append(result.copy())
+                              gesture_id=gesture, created_epoch_seconds=time.time(), boot_id=self.boot)
+                    self.events.append(result.copy())
             elif action == 'mute_start':
                 if not self.snapshot()['remote_mute_available'] or self.lease:
                     raise ValueError('remote_mute_unavailable_or_busy')
@@ -379,12 +396,14 @@ class ControlPlane:
             session['commands'][cid] = (fingerprint, result.copy())
             return dict(result, **self.snapshot())
 
-    def present(self, event_id, disposition):
+    def present(self, event_id, disposition, kind=None):
         if disposition not in ('presented', 'user_acknowledged', 'deferred_real_emergency'):
             raise ValueError('invalid_test_disposition')
         with self.lock:
             for event in self.events:
                 if event['event_id'] == event_id:
+                    if kind is not None and kind != event['kind']:
+                        return self.snapshot()  # Delayed keyword ACK cannot consume its full upgrade.
                     if event['delivery'] != 'user_acknowledged':
                         event['delivery'] = disposition
                     return self.snapshot()

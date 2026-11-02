@@ -50,7 +50,11 @@ class ResidentControlClient extends ChangeNotifier {
   String? lastEventId;
   bool get connected => _session != null;
   bool get muteAvailable =>
-      false; // Hold-to-mute remains unavailable in this release.
+      connected &&
+      state['remote_mute_available'] == true &&
+      state['max_lease_seconds'] is num &&
+      (state['max_lease_seconds'] as num).isFinite &&
+      (state['max_lease_seconds'] as num) > 0;
   bool get muted =>
       connected &&
       _holding &&
@@ -262,7 +266,11 @@ class ResidentControlClient extends ChangeNotifier {
     _changed();
   }
 
-  Future<Map<String, dynamic>> _command(String action, {String? lease}) {
+  Future<Map<String, dynamic>> _command(
+    String action, {
+    String? lease,
+    String? gestureId,
+  }) {
     final done = Completer<Map<String, dynamic>>();
     final session = _session, generation = _generation;
     _serial = _serial.then((_) async {
@@ -278,6 +286,7 @@ class ResidentControlClient extends ChangeNotifier {
           'sequence': ++_sequence,
           'command_id': _commandId(),
           'lease_id': ?lease,
+          'gesture_id': ?gestureId,
         });
         if (session != _session || generation != _generation || _disposed) {
           throw StateError('session_changed');
@@ -291,9 +300,15 @@ class ResidentControlClient extends ChangeNotifier {
     return done.future;
   }
 
+  String? _testGestureId;
   Future<void> sendTest({required bool full}) async {
+    if (!full || _testGestureId == null) _testGestureId = _commandId();
+    final gestureId = _testGestureId!;
     try {
-      final result = await _command(full ? 'full_test' : 'keyword_test');
+      final result = await _command(
+        full ? 'full_test' : 'keyword_test',
+        gestureId: gestureId,
+      );
       lastEventId = result['event_id'] as String;
       message = 'TEST backend accepted — waiting for Main presentation';
       _changed();
@@ -312,7 +327,13 @@ class ResidentControlClient extends ChangeNotifier {
       _schedule();
       final result = await _command('mute_start');
       _lease = result['lease_id'] as String;
-      if (!_holding || holdGeneration != _holdGeneration) await release();
+      if (!_holding || holdGeneration != _holdGeneration) {
+        await release();
+        return;
+      }
+      message = muted
+          ? 'Listening paused — KWS acknowledged'
+          : 'Awaiting KWS mute acknowledgement';
       _changed();
     } catch (_) {
       _lost();
@@ -327,6 +348,9 @@ class ResidentControlClient extends ChangeNotifier {
     if (lease != null) {
       try {
         await _command('mute_end', lease: lease);
+        message = state['mute_state'] == 'unmuted'
+            ? 'Listening resumed — KWS acknowledged'
+            : 'Resuming — awaiting KWS acknowledgement';
       } catch (_) {
         _lost();
       }

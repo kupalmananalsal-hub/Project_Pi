@@ -333,8 +333,10 @@ async def resident_control(request: Request):
                     or device_registry.authenticate(identity, token, "resident"))):
         raise HTTPException(401, "Resident test pairing unavailable or invalid")
     body = await resident_body(request)
-    if device_registry.authenticate(identity, token, "resident") and str(body.get("action", "")).startswith("mute_"):
-        raise HTTPException(403, "Remote hold-to-mute disabled for paired Residents")
+    paired = device_registry.authenticate(identity, token, "resident")
+    mute_authorized = paired and identity in resident_controls.settings.paired_mute_ids
+    if paired and not mute_authorized and str(body.get("action", "")).startswith("mute_"):
+        raise HTTPException(403, "Remote hold-to-mute not locally authorized for this Resident")
     try:
         if body.get("action") == "connect":
             result = resident_controls.connect(identity)
@@ -342,7 +344,7 @@ async def resident_control(request: Request):
             result = resident_controls.heartbeat(identity, body.get("session_id"))
         else:
             result = resident_controls.command(identity, body)
-        if device_registry.authenticate(identity, token, "resident"):
+        if paired and not mute_authorized:
             result["remote_mute_available"] = False
             result["max_lease_seconds"] = None
         return result
@@ -370,7 +372,7 @@ async def resident_main_ack(request: Request):
     try:
         if body.get("action") == "disable_mute":
             return resident_controls.disable_mute()
-        return resident_controls.present(body.get("event_id"), body.get("disposition"))
+        return resident_controls.present(body.get("event_id"), body.get("disposition"), body.get("kind"))
     except (ValueError, OSError):
         raise HTTPException(409, "TEST acknowledgement rejected")
 
