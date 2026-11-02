@@ -309,11 +309,13 @@ substitute for production durable alert delivery. Remote mute remains disabled.
 
 ## Requested status
 
-MAIN APP UPDATED: YES  
-RESIDENT APP UPDATED: YES  
+```text
+MAIN APP UPDATED: YES
+RESIDENT APP UPDATED: YES
 CONNECTION BUG FIXED IN SOURCE: YES — source protocol/package incompatibilities;
-physical connection root cause remains unverified.  
-FLUTTER TESTS PASSED: YES  
-THREE-DEVICE CONNECTION VERIFIED: NO  
-REMOTE MUTE VERIFIED ON REAL HARDWARE: NO  
+physical connection root cause remains unverified.
+FLUTTER TESTS PASSED: YES
+THREE-DEVICE CONNECTION VERIFIED: NO
+REMOTE MUTE VERIFIED ON REAL HARDWARE: NO
 PRODUCTION DEPLOYMENT AUTHORIZED: NO
+```
