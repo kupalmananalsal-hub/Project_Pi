@@ -12,6 +12,7 @@ class PairAdapter implements HttpClientAdapter {
       spoof = false,
       failRequestOnce = false,
       revoked = false;
+  bool enrollmentOpen = true;
   String? firstProof;
   final requests = <RequestOptions>[];
   final pi = 'b' * 32, secret = 'fixture-device-secret-${'x' * 32}';
@@ -53,7 +54,7 @@ class PairAdapter implements HttpClientAdapter {
         'service': 'project-pi',
         'pi_id': pi,
         'pairing_available': true,
-        'enrollment_open': true,
+        'enrollment_open': enrollmentOpen,
       },
       '/api/pairing/request' => {
         'request_id': 'request-1',

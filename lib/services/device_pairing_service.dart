@@ -2,13 +2,27 @@ import 'dart:convert';
 import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../models/app_settings.dart';
 import 'api_token.dart';
 
+enum PairingFailure {
+  pairingRequired,
+  waitingForApproval,
+  networkUnavailable,
+  authenticationRejected,
+}
+
 class PairingRequired implements Exception {
-  const PairingRequired(this.message);
+  const PairingRequired(
+    this.message, {
+    this.kind = PairingFailure.pairingRequired,
+    this.retryable = true,
+  });
   final String message;
+  final PairingFailure kind;
+  final bool retryable;
   @override
   String toString() => message;
 }
@@ -80,10 +94,42 @@ class DevicePairingService {
     String path,
     Map<String, dynamic>? data,
   ) async {
-    final response = data == null
-        ? await _dio.getUri(target.httpUri(path))
-        : await _dio.postUri(target.httpUri(path), data: data);
-    return Map<String, dynamic>.from(response.data as Map);
+    final method = data == null ? 'GET' : 'POST';
+    try {
+      final response = data == null
+          ? await _dio.getUri(target.httpUri(path))
+          : await _dio.postUri(target.httpUri(path), data: data);
+      final value = response.data;
+      if (value is! Map) {
+        throw PairingRequired(
+          'Pairing required: $method $path returned an invalid JSON object. Check the matching Pi backend.',
+          retryable: false,
+        );
+      }
+      return Map<String, dynamic>.from(value);
+    } on DioException catch (error) {
+      final status = error.response?.statusCode;
+      if (status == 401 || status == 403) {
+        throw PairingRequired(
+          'Authentication rejected: $method $path returned HTTP $status. Check local Pi pairing authorization; no API token entry is needed.',
+          kind: PairingFailure.authenticationRejected,
+          retryable: false,
+        );
+      }
+      if (status == 404 || status == 405) {
+        throw PairingRequired(
+          'Pairing required: $method $path is unavailable (HTTP $status). Use the matching Pi pairing backend.',
+          retryable: false,
+        );
+      }
+      if (error.response == null) {
+        throw PairingRequired(
+          'Network unavailable: $method $path at ${target.host}:${target.port} (${error.type.name}).',
+          kind: PairingFailure.networkUnavailable,
+        );
+      }
+      rethrow;
+    }
   }
 
   Future<DeviceCredential> ensure(String host, int port, String role) async {
@@ -157,7 +203,9 @@ class DevicePairingService {
           ).convert(utf8.encode('$pi:$id:$nonce')).toString();
           if (proof['pi_id'] != pi || proof['proof'] != expected) {
             throw const PairingRequired(
-              'Pi identity verification failed. No credential sent; check the address or local operator.',
+              'Authentication rejected: Pi identity verification failed. No credential sent; check the address or local operator.',
+              kind: PairingFailure.authenticationRejected,
+              retryable: false,
             );
           }
           checkCurrent();
@@ -182,6 +230,11 @@ class DevicePairingService {
         await storage.write(key: pendingKey, value: jsonEncode(pending));
       }
       if (pending['request_id'] == null) {
+        if (discovery['enrollment_open'] != true) {
+          throw const PairingRequired(
+            'Pairing required: the local Pi enrollment window is closed. Ask the operator to open enrollment; no protected status request was sent.',
+          );
+        }
         final response = await request(target, '/api/pairing/request', {
           'role': role,
           'device_id': id,
@@ -220,7 +273,8 @@ class DevicePairingService {
       }
       if (grant['state'] != 'approved') {
         throw PairingRequired(
-          'Awaiting local Pi approval. Compare code ${pending['code']} for $role. Request ${pending['request_id']}.',
+          'Waiting for operator approval. Compare code ${pending['code']} for $role. Request ${pending['request_id']}.',
+          kind: PairingFailure.waitingForApproval,
         );
       }
       if (grant['pi_id'] != pi ||
@@ -258,6 +312,18 @@ class DevicePairingService {
     } on PairingRequired {
       clearCredential();
       rethrow;
+    } on PlatformException catch (error) {
+      clearCredential();
+      throw PairingRequired(
+        'Pairing required: Android secure storage unavailable (${error.code}); saved credentials were not cleared. Check secure storage before retrying.',
+        retryable: false,
+      );
+    } on FormatException {
+      clearCredential();
+      throw const PairingRequired(
+        'Pairing required: saved pairing data is invalid; credentials were preserved. Ask the local operator.',
+        retryable: false,
+      );
     } on DioException catch (error) {
       clearCredential();
       if (error.response?.statusCode == 409) {

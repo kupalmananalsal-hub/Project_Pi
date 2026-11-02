@@ -73,7 +73,9 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
             ? error.message
             : 'Unable to connect. Check the IP and port.';
       });
-      _retry = Timer(const Duration(seconds: 2), _connect);
+      if (error is! PairingRequired || error.retryable) {
+        _retry = Timer(const Duration(seconds: 2), _connect);
+      }
     }
   }
 
@@ -97,6 +99,7 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
                   onChanged: (_) {
                     _retry?.cancel();
                     ++_generation;
+                    setState(() => _connecting = false);
                   },
                   validator: (value) =>
                       AppSettings.normalizeBackendHost(value) == null
@@ -112,6 +115,7 @@ class _ResidentSettingsScreenState extends State<ResidentSettingsScreen> {
                   onChanged: (_) {
                     _retry?.cancel();
                     ++_generation;
+                    setState(() => _connecting = false);
                   },
                   validator: (value) {
                     final port = int.tryParse(value ?? '');

@@ -44,6 +44,7 @@ class ResidentControlClient extends ChangeNotifier {
   int _holdGeneration = 0;
   int _pairingGeneration = 0;
   bool _managedPairing = false;
+  bool _connectionRetryAllowed = true;
   Map<String, dynamic> state = {};
   String message = 'Not connected — configure Resident pairing';
   String? lastEventId;
@@ -106,7 +107,9 @@ class ResidentControlClient extends ChangeNotifier {
           ? error.message
           : 'Unable to pair with Pi. Check IP and port.';
       _changed();
-      _timer = Timer(const Duration(seconds: 2), () => connectSaved());
+      if (error is! PairingRequired || error.retryable) {
+        _timer = Timer(const Duration(seconds: 2), () => connectSaved());
+      }
     }
   }
 
@@ -158,13 +161,14 @@ class ResidentControlClient extends ChangeNotifier {
     _id = id;
     _token = token;
     _paused = false;
+    _connectionRetryAllowed = true;
     if (_host.isEmpty || _id.isEmpty || token.length < 32) {
       message = 'Resident pairing required (separate from Main API token)';
       _changed();
       return;
     }
     await _connect(generation);
-    if (!_disposed && generation == _generation) {
+    if (!_disposed && generation == _generation && _connectionRetryAllowed) {
       _schedule();
     }
   }
@@ -186,16 +190,27 @@ class ResidentControlClient extends ChangeNotifier {
       _session = value['session_id'] as String;
       _sequence = 0;
       _accept(value);
-      message = 'Pi connected • TEST mode';
-    } catch (_) {
-      message =
-          'Pi unavailable or pairing rejected — check host, port and test mode';
+      message = 'Paired and connected • TEST mode';
+    } catch (error) {
+      _connectionRetryAllowed = error is PairingRequired
+          ? error.retryable
+          : !(error is DioException &&
+                (error.response?.statusCode == 401 ||
+                    error.response?.statusCode == 403));
+      if (!_connectionRetryAllowed) _timer?.cancel();
+      message = error is PairingRequired
+          ? error.message
+          : error is DioException &&
+                (error.response?.statusCode == 401 ||
+                    error.response?.statusCode == 403)
+          ? 'Authentication rejected by Resident control. Ask the local Pi operator.'
+          : 'Network unavailable or Resident TEST control unavailable. Check IP, port and test mode.';
     }
     _changed();
   }
 
   Future<void> poll() async {
-    if (_busy || _disposed || _paused) return;
+    if (_busy || _disposed || _paused || !_connectionRetryAllowed) return;
     _busy = true;
     final generation = _generation;
     try {

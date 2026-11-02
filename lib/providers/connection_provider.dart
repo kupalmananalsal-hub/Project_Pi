@@ -22,10 +22,19 @@ final connectionProvider =
 
 typedef PiStatusFetcher = Future<SystemStatus> Function(String host, int port);
 
+final piPairingServiceProvider = Provider<DevicePairingService>(
+  (ref) => DevicePairingService(),
+);
+final piApiFactoryProvider = Provider<PiApiService Function(String, int)>(
+  (ref) =>
+      (host, port) => PiApiService(host: host, port: port),
+);
 final piStatusFetcherProvider = Provider<PiStatusFetcher>((ref) {
+  final pairing = ref.watch(piPairingServiceProvider);
+  final apiFactory = ref.watch(piApiFactoryProvider);
   return (host, port) async {
-    await DevicePairingService().ensure(host, port, 'caregiver');
-    final api = PiApiService(host: host, port: port);
+    await pairing.ensure(host, port, 'caregiver');
+    final api = apiFactory(host, port);
     try {
       final status = await api.fetchStatus();
       final prefs = await SharedPreferences.getInstance();
@@ -66,7 +75,16 @@ final piConnectionChannelsProvider = Provider<PiConnectionChannels>((ref) {
 
 final piAutoConnectProvider = Provider<bool>((ref) => true);
 
-enum PiConnectionStatus { disconnected, connecting, connected, error }
+enum PiConnectionStatus {
+  disconnected,
+  connecting,
+  pairingRequired,
+  waitingForApproval,
+  connected,
+  networkUnavailable,
+  authenticationRejected,
+  error,
+}
 
 extension PiConnectionStatusLabel on PiConnectionStatus {
   String get label {
@@ -76,7 +94,15 @@ extension PiConnectionStatusLabel on PiConnectionStatus {
       case PiConnectionStatus.connecting:
         return 'Connecting...';
       case PiConnectionStatus.connected:
-        return 'Connected';
+        return 'Paired and connected';
+      case PiConnectionStatus.pairingRequired:
+        return 'Pairing required';
+      case PiConnectionStatus.waitingForApproval:
+        return 'Waiting for operator approval';
+      case PiConnectionStatus.networkUnavailable:
+        return 'Network unavailable';
+      case PiConnectionStatus.authenticationRejected:
+        return 'Authentication rejected';
       case PiConnectionStatus.error:
         return 'Error';
     }
@@ -135,12 +161,14 @@ class PiConnectionState {
       port: AppSettings.normalizeBackendPort(port ?? this.port),
       connectionStatus:
           connectionStatus ??
-          _statusFromLegacyFlags(
-            isConnected: isConnected,
-            isConnecting: isConnecting,
-            error: nextError,
-            fallback: this.connectionStatus,
-          ),
+          (isConnected == null && isConnecting == null && error == _unset
+              ? this.connectionStatus
+              : _statusFromLegacyFlags(
+                  isConnected: isConnected,
+                  isConnecting: isConnecting,
+                  error: nextError,
+                  fallback: this.connectionStatus,
+                )),
       userRequestedDisconnect:
           userRequestedDisconnect ?? this.userRequestedDisconnect,
       status: status == _unset ? this.status : status as SystemStatus?,
@@ -183,7 +211,9 @@ class ConnectionController extends Notifier<PiConnectionState> {
 
   @override
   PiConnectionState build() {
-    final settings = ref.watch(settingsProvider);
+    // React through the listener; watching rebuilds this notifier and cancels
+    // a pending enrollment/retry whenever any setting changes.
+    final settings = ref.read(settingsProvider);
     ref.listen(settingsProvider, (previous, next) {
       if (previous != null &&
           (previous.host != next.host || previous.port != next.port)) {
@@ -293,12 +323,14 @@ class ConnectionController extends Notifier<PiConnectionState> {
       state = state.copyWith(
         host: requestedHost,
         port: requestedPort,
-        connectionStatus: PiConnectionStatus.error,
+        connectionStatus: connectionFailureStatus(error),
         status: null,
         lastStatusAt: null,
-        error: '${_friendlyError(error)} Retrying...',
+        error:
+            '${_friendlyError(error)}${retryConnectionFailure(error) ? " Retrying..." : ""}',
         userRequestedDisconnect: false,
       );
+      if (!retryConnectionFailure(error)) return;
       // After a power cut the phone is usually up before the Pi; without a retry
       // the app would stay disconnected (and receive no alerts) until someone taps Connect.
       final delay = Duration(seconds: _retryAttempt++ == 0 ? 2 : 5);
@@ -349,7 +381,7 @@ class ConnectionController extends Notifier<PiConnectionState> {
       );
     } catch (error) {
       state = state.copyWith(
-        connectionStatus: PiConnectionStatus.error,
+        connectionStatus: connectionFailureStatus(error),
         error: _friendlyError(error),
       );
     }
@@ -377,9 +409,13 @@ class ConnectionController extends Notifier<PiConnectionState> {
               error: null,
             )
           : state.copyWith(
-              connectionStatus: PiConnectionStatus.error,
+              connectionStatus: connectionFailureStatus(failure),
               error: _friendlyError(failure),
             );
+      if (failure != null && !retryConnectionFailure(failure)) {
+        _closeConnectionChannels();
+        return;
+      }
       _startPolling(host, port);
     });
     _statusTimer = timer;
@@ -411,7 +447,7 @@ class ConnectionController extends Notifier<PiConnectionState> {
           usedFallback: candidate != host,
         );
       } catch (error) {
-        if (error is PairingRequired) rethrow;
+        if (error is PairingRequired || !retryConnectionFailure(error)) rethrow;
         lastError = error;
       }
     }
@@ -421,10 +457,39 @@ class ConnectionController extends Notifier<PiConnectionState> {
   String _friendlyError(Object error) => piConnectionErrorMessage(error);
 }
 
+bool retryConnectionFailure(Object error) {
+  if (error is PairingRequired) return error.retryable;
+  return !(error is DioException &&
+      (error.response?.statusCode == 401 || error.response?.statusCode == 403));
+}
+
+PiConnectionStatus connectionFailureStatus(Object error) {
+  if (error is PairingRequired) {
+    return switch (error.kind) {
+      PairingFailure.pairingRequired => PiConnectionStatus.pairingRequired,
+      PairingFailure.waitingForApproval =>
+        PiConnectionStatus.waitingForApproval,
+      PairingFailure.networkUnavailable =>
+        PiConnectionStatus.networkUnavailable,
+      PairingFailure.authenticationRejected =>
+        PiConnectionStatus.authenticationRejected,
+    };
+  }
+  if (!retryConnectionFailure(error)) {
+    return PiConnectionStatus.authenticationRejected;
+  }
+  if (error is DioException && error.response == null) {
+    return PiConnectionStatus.networkUnavailable;
+  }
+  return PiConnectionStatus.error;
+}
+
 String piConnectionErrorMessage(Object error) {
   if (error is PairingRequired) return error.message;
-  if (error is DioException && error.response?.statusCode == 401) {
-    return 'Pi authorization rejected. Ask the local operator to check device approval and backend configuration.';
+  if (error is DioException &&
+      (error.response?.statusCode == 401 ||
+          error.response?.statusCode == 403)) {
+    return 'Authentication rejected by ${error.requestOptions.uri.path} (HTTP ${error.response?.statusCode}). Ask the local Pi operator to check device approval and backend configuration.';
   }
   if (error is DioException) {
     switch (error.type) {

@@ -18,6 +18,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   late final TextEditingController _portController;
   late final FocusNode _hostFocusNode;
   bool _portEdited = false;
+  bool _hostEdited = false;
 
   @override
   void initState() {
@@ -41,7 +42,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
     final connection = ref.watch(connectionProvider);
-    if (!_hostFocusNode.hasFocus && _hostController.text != settings.host) {
+    if (!_hostEdited &&
+        !_hostFocusNode.hasFocus &&
+        _hostController.text != settings.host) {
       _hostController.text = settings.host;
     }
     final portText = settings.port.toString();
@@ -62,6 +65,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           TextField(
             key: const ValueKey('pi-host-field'),
             controller: _hostController,
+            onChanged: (_) => _hostEdited = true,
             focusNode: _hostFocusNode,
             keyboardType: TextInputType.url,
             decoration: const InputDecoration(
@@ -214,7 +218,11 @@ class _ConnectionStatusRow extends StatelessWidget {
     final statusColor = switch (connection.connectionStatus) {
       PiConnectionStatus.connected => Colors.greenAccent,
       PiConnectionStatus.connecting => colorScheme.primary,
-      PiConnectionStatus.error => colorScheme.error,
+      PiConnectionStatus.error ||
+      PiConnectionStatus.networkUnavailable ||
+      PiConnectionStatus.authenticationRejected => colorScheme.error,
+      PiConnectionStatus.pairingRequired ||
+      PiConnectionStatus.waitingForApproval => Colors.amber,
       PiConnectionStatus.disconnected => colorScheme.onSurfaceVariant,
     };
 
@@ -227,7 +235,7 @@ class _ConnectionStatusRow extends StatelessWidget {
         const SizedBox(width: 8),
         Icon(Icons.circle, size: 10, color: statusColor),
         const SizedBox(width: 8),
-        Text(connection.connectionStatusLabel),
+        Expanded(child: Text(connection.connectionStatusLabel)),
       ],
     );
   }
