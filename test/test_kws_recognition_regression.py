@@ -1,26 +1,27 @@
-"""Regression targets for Milestone 3 recognition work (no behavior change yet).
+"""C1.45 offline matcher/fusion regression guards.
 
-Recall guards must keep passing through any fix. Tests marked expectedFailure pin
-defects confirmed by a deterministic probe of the current code (PLAN.md, Milestone 3
-item 4); a fix is only accepted together with replay evidence (replay_eval.py) that
-recall holds, and it turns them into ordinary passing tests.
+The four original expected failures were reproduced before correction. Their
+markers were removed only after the text/dispatcher assertions passed. masakit
+was moved from the contradictory negative list to the positive alias fixtures.
+Synthetic results are not acoustic recall evidence; deployment remains blocked.
 """
 import time
 import unittest
 
 from test.test_kws_event_id import load_kws_module, restore_modules
 
-# Ordinary words the current Vosk matcher turns into distress keywords.
+# Non-alias negative fixtures; legitimate configured masakit stays positive.
 ORDINARY_WORDS = {
     "tulog": "sleep", "tuloy": "continue", "tulo": "drip",
     "araw": "day", "aral": "study", "aga": "early", "agad": "immediately",
-    "sunod": "next", "sundo": "pick up", "masakit": "painful (no distress phrase)",
+    "sunod": "next", "sundo": "pick up",
 }
 REQUESTED_NEGATIVES = ("hi", "hello", "kamusta", "kumusta")
 DISTRESS_PHRASES = {
     "tulong": "tulong", "tulungan mo ako": "tulong", "kailangan ko ng tulong": "tulong",
     "saklolo": "saklolo", "aray": "aray", "aray ko": "aray", "agai": "agai",
     "sunog": "sunog", "may sunog": "sunog", "ang sakit": "ang sakit",
+    "masakit": "ang sakit",
 }
 
 
@@ -54,25 +55,22 @@ class RecognitionRegressionTest(unittest.TestCase):
         for word in REQUESTED_NEGATIVES:
             self.assertIsNone(self.kws.detect_tagalog_keyword(word), word)
 
-    def test_genuine_tulong_still_suppresses_snowboy_help(self):
+    def test_genuine_tulong_preserves_independent_snowboy_help(self):
         dispatcher, poster = self.dispatcher()
         dispatcher.submit("tulong", 0.8, "openwakeword")
         dispatcher.submit("help", 0.75, "snowboy")
         time.sleep(0.15)
-        self.assertEqual(poster.published, [("tulong", "openwakeword")])
+        self.assertEqual(poster.published, [("tulong", "openwakeword"), ("help", "snowboy")])
 
-    # --- confirmed defects (expected to fail until a measured fix lands) --------
+    # --- corrected text/dispatcher defects; acoustic validation is separate ---
 
-    @unittest.expectedFailure
     def test_ordinary_words_are_not_distress_keywords(self):
         matched = {w: self.kws.detect_tagalog_keyword(w) for w in ORDINARY_WORDS}
         self.assertEqual({w: k for w, k in matched.items() if k}, {})
 
-    @unittest.expectedFailure
     def test_partial_prefix_does_not_match_while_word_is_spoken(self):
         self.assertIsNone(self.kws.detect_tagalog_keyword("tul"))
 
-    @unittest.expectedFailure
     def test_non_tulong_vosk_hint_does_not_cancel_snowboy_help(self):
         dispatcher, poster = self.dispatcher()
         dispatcher.submit("help", 0.75, "snowboy")
@@ -80,7 +78,6 @@ class RecognitionRegressionTest(unittest.TestCase):
         time.sleep(0.15)
         self.assertEqual(poster.published, [("help", "snowboy")])
 
-    @unittest.expectedFailure
     def test_vosk_hint_does_not_suppress_openwakeword_help(self):
         dispatcher, poster = self.dispatcher()
         dispatcher.note_vosk_text("tulog")

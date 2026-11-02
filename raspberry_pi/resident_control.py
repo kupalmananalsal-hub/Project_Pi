@@ -18,6 +18,13 @@ import uuid
 from dataclasses import dataclass
 
 
+def finite_number(value):
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 @dataclass(frozen=True)
 class Settings:
     test_mode: bool = False
@@ -34,7 +41,7 @@ class Settings:
             bound = float(env.get('PROJECT_PI_REMOTE_MUTE_MAX_SECONDS', ''))
             if not math.isfinite(bound) or bound <= 0:
                 bound = None
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             bound = None
         directory = env.get('PROJECT_PI_REMOTE_MUTE_DIR')
         enabled = test and env.get('PROJECT_PI_REMOTE_MUTE_ENABLED') == '1' and bound is not None and bool(directory)
@@ -63,14 +70,15 @@ class MuteFiles:
             return {}
         path = self.root / name
         try:
-            fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+            fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0)
+                         | getattr(os, 'O_NOFOLLOW', 0))
             with os.fdopen(fd, 'rb') as stream:
                 info = os.fstat(stream.fileno())
                 if not stat.S_ISREG(info.st_mode) or path.is_symlink() or info.st_size > 8192:
                     return {}
                 result = json.loads(stream.read(8193))
                 return result if isinstance(result, dict) else {}
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return {}
 
     def write(self, name, value):
@@ -107,6 +115,7 @@ class KwsMuteGate:
         self.epoch = 0
         self.muted = False
         self.request = {}
+        self.failed_lease = None
         self.lock = threading.RLock()
         if self.files:
             self.acknowledge()
@@ -116,20 +125,23 @@ class KwsMuteGate:
             request = self.files.read('request.json') if self.files else {}
             muted = False
             try:
+                if not finite_number(request.get('expires_at')):
+                    raise ValueError('invalid_expiry')
                 remaining = float(request['expires_at']) - self.clock()
                 muted = bool(self.files and not self.files.disabled()
                              and request['worker'] == self.worker
+                             and (request.get('worker'), request.get('boot'), request.get('lease_id')) != self.failed_lease
                              and request['active'] is True
                              and 0 < remaining <= self.settings.max_seconds
                              and request.get('lease_id') and request.get('boot'))
-            except (KeyError, ValueError, TypeError):
+            except (KeyError, ValueError, TypeError, OverflowError):
                 pass
             if muted != self.muted:
                 self.epoch += 1
             self.muted, self.request = muted, request
             if acknowledge:
                 self.acknowledge()
-            return muted
+            return self.muted
 
     def acknowledge(self):
         if self.files:
@@ -138,8 +150,13 @@ class KwsMuteGate:
                     muted=self.muted, lease_id=self.request.get('lease_id'),
                     boot=self.request.get('boot'), observed_at=self.clock()))
             except (OSError, ValueError):
-                # IPC failure must never leave recognition disabled.
-                self.muted = False
+                # Fail open once. The same failed hold must not mute/reset/drop
+                # every subsequent frame, even if its request remains on disk.
+                if self.muted:
+                    self.failed_lease = (self.request.get('worker'), self.request.get('boot'),
+                                         self.request.get('lease_id'))
+                    self.muted = False
+                    self.epoch += 1
 
     def accepts(self, packet):
         epoch = packet.get('recognition_epoch')
@@ -225,7 +242,7 @@ class ControlPlane:
             return {key: value for key, value in credentials.items()
                     if isinstance(key, str) and 1 <= len(key) <= 128 and isinstance(value, str)
                     and len(value) == 64 and all(c in '0123456789abcdef' for c in value)}
-        except (OSError, ValueError, AttributeError):
+        except (OSError, ValueError, AttributeError, RecursionError):
             return {}
 
     def _release(self):
@@ -265,14 +282,26 @@ class ControlPlane:
             session['seen'] = self.clock()
             return self.snapshot()
 
+    def _worker_ack(self):
+        ack = self.files.read('ack.json') if self.files else {}
+        worker, epoch, observed = ack.get('worker'), ack.get('epoch'), ack.get('observed_at')
+        if (not isinstance(worker, str) or len(worker) != 32
+                or any(c not in '0123456789abcdef' for c in worker)
+                or type(epoch) is not int or epoch < 0
+                or type(ack.get('muted')) is not bool
+                or not finite_number(observed)
+                or not 0 <= self.clock() - observed < 2):
+            return {}
+        if ack['muted'] and any(not isinstance(ack.get(key), str) or not ack[key]
+                                for key in ('lease_id', 'boot')):
+            return {}
+        return ack
+
     def snapshot(self):
         with self.lock:
             self._expire()
-            ack = self.files.read('ack.json') if self.files else {}
-            try:
-                fresh = 0 <= self.clock() - float(ack['observed_at']) < 2
-            except (KeyError, ValueError, TypeError):
-                fresh = False
+            ack = self._worker_ack()
+            fresh = bool(ack)
             available = bool(self.files and self._credentials() and not self.files.disabled() and not self.locally_disabled and fresh)
             active = bool(available and self.lease and ack.get('muted') is True
                           and ack.get('worker') == self.lease['worker']
@@ -322,7 +351,9 @@ class ControlPlane:
             elif action == 'mute_start':
                 if not self.snapshot()['remote_mute_available'] or self.lease:
                     raise ValueError('remote_mute_unavailable_or_busy')
-                ack = self.files.read('ack.json')
+                ack = self._worker_ack()
+                if not ack:
+                    raise ValueError('remote_mute_worker_unavailable')
                 self.lease = dict(lease_id=uuid.uuid4().hex, owner=identity, session_id=session['id'],
                     worker=ack['worker'], boot=self.boot, active=True,
                     expires_at=self.clock() + self.settings.max_seconds)

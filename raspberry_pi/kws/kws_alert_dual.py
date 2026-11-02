@@ -13,7 +13,6 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
-from difflib import SequenceMatcher
 from pathlib import Path
 
 RASPBERRY_PI_ROOT = Path(__file__).resolve().parents[1]
@@ -740,6 +739,7 @@ class DetectionDispatcher:
         self.pending_help_timer: threading.Timer | None = None
         self.pending_help_payload: tuple[float, str, dict[str, object]] | None = None
         self.last_tulong_at = 0.0
+        self.last_tulong_by_source: dict[str, float] = {}
         self.last_tulong_hint_at = 0.0
 
     def submit(
@@ -748,6 +748,21 @@ class DetectionDispatcher:
         confidence: float,
         source: str,
         context: dict[str, object] | None = None,
+    ) -> None:
+        gate = getattr(self, "mute_gate", None)
+        # Capture, workers and delayed timers share gate -> dispatcher order.
+        # Reject stale evidence before consuming cooldown or correlation state.
+        with gate.lock if gate else nullcontext():
+            if gate and not gate.accepts(context or {}):
+                return
+            self._submit_current(keyword, confidence, source, context)
+
+    def _submit_current(
+        self,
+        keyword: str,
+        confidence: float,
+        source: str,
+        context: dict[str, object] | None,
     ) -> None:
         context = context or {}
         if keyword == "tulong":
@@ -762,64 +777,73 @@ class DetectionDispatcher:
         self._publish_generic(keyword, confidence, source, context)
 
     def note_vosk_text(self, text: str) -> None:
-        if detect_tagalog_keyword(text) is None:
-            return
-        with self.lock:
-            self.last_tulong_hint_at = time.monotonic()
-            if self.pending_help_timer is not None:
-                self.pending_help_timer.cancel()
-                self.pending_help_timer = None
-                self.pending_help_payload = None
-                print(
-                    "Pending Snowboy help cancelled by Vosk tulong hint",
-                    flush=True,
-                )
+        # Compatibility hook only: provisional text has no publication receipt
+        # and cannot veto independent detector evidence.
+        return
 
     def _publish_tulong(self, confidence: float, source: str, context: dict[str, object]) -> None:
         with self.lock:
-            now = time.monotonic()
-            self.last_tulong_at = now
-            self.last_tulong_hint_at = now
-            if self.pending_help_timer is not None:
+            # A rejected submission must leave all correlation state untouched.
+            if not self.cooldown.allow("tulong"):
+                return
+            self.last_tulong_at = time.monotonic()
+            self.last_tulong_by_source[source] = self.last_tulong_at
+            # Preserve existing same-engine correlation, never cancel another
+            # engine's independently retained help detection.
+            if (self.pending_help_payload is not None
+                    and self.pending_help_payload[1] == source
+                    and self.pending_help_timer is not None):
                 self.pending_help_timer.cancel()
                 self.pending_help_timer = None
                 self.pending_help_payload = None
 
-        if self.cooldown.allow("tulong"):
-            self.poster.publish(
-                "tulong",
-                confidence,
-                source,
-                direction=str(context.get("direction", "center")),
-                extra={k: v for k, v in context.items() if k != "direction"},
-            )
+        self.poster.publish(
+            "tulong",
+            confidence,
+            source,
+            direction=str(context.get("direction", "center")),
+            extra={k: v for k, v in context.items() if k != "direction"},
+        )
 
     def _schedule_help(self, confidence: float, source: str, context: dict[str, object]) -> None:
         now = time.monotonic()
         with self.lock:
-            tulong_recent = max(self.last_tulong_at, self.last_tulong_hint_at)
-            if now - tulong_recent < self.help_suppress_after_tulong_seconds:
+            tulong_at = self.last_tulong_by_source.get(source)
+            if (tulong_at is not None
+                    and now - tulong_at < self.help_suppress_after_tulong_seconds):
                 print("Snowboy help ignored near recent tulong detection", flush=True)
                 return
             if self.pending_help_timer is not None:
                 return
 
-            self.pending_help_payload = (confidence, source, context)
+            payload = (confidence, source, context)
+            self.pending_help_payload = payload
             self.pending_help_timer = threading.Timer(
                 self.help_confirm_seconds,
-                self._publish_help,
+                lambda: self._publish_help(payload),
             )
             self.pending_help_timer.daemon = True
             self.pending_help_timer.start()
 
-    def _publish_help(self) -> None:
+    def _publish_help(self, expected_payload=None) -> None:
+        gate = getattr(self, "mute_gate", None)
+        with gate.lock if gate else nullcontext():
+            self._publish_pending_help(gate, expected_payload)
+
+    def _publish_pending_help(self, gate, expected_payload) -> None:
         with self.lock:
+            # cancel() cannot stop a callback already waiting on the gate.
+            # Such a callback must never consume a replacement timer's payload.
+            if expected_payload is not None and self.pending_help_payload is not expected_payload:
+                return
             payload = self.pending_help_payload
             self.pending_help_payload = None
             self.pending_help_timer = None
-            tulong_recent = max(self.last_tulong_at, self.last_tulong_hint_at)
+            tulong_at = (self.last_tulong_by_source.get(payload[1])
+                         if payload is not None else None)
             if (
-                time.monotonic() - tulong_recent
+                tulong_at is not None
+                and time.monotonic() - tulong_at
                 < self.help_suppress_after_tulong_seconds
             ):
                 print("Pending Snowboy help cancelled by tulong", flush=True)
@@ -828,6 +852,8 @@ class DetectionDispatcher:
         if payload is None:
             return
         confidence, source, context = payload
+        if gate and not gate.accepts(context):
+            return
         if self.cooldown.allow("help"):
             self.poster.publish(
                 "help",
@@ -844,9 +870,11 @@ class DetectionDispatcher:
         context: dict[str, object],
     ) -> None:
         with self.lock:
-            tulong_recent = max(self.last_tulong_at, self.last_tulong_hint_at)
+            # Retain the existing same-engine window only for accepted submissions.
+            tulong_at = self.last_tulong_by_source.get(source)
             if (
-                time.monotonic() - tulong_recent
+                tulong_at is not None
+                and time.monotonic() - tulong_at
                 < self.help_suppress_after_tulong_seconds
             ):
                 print(f"{source} help ignored near recent tulong detection", flush=True)
@@ -914,30 +942,20 @@ def _normalize_vosk_text(text: str) -> str:
 
 
 def detect_tagalog_keyword(text: str) -> str | None:
-    normalized = _normalize_vosk_text(text)
-    if not normalized:
-        return None
+    """Match configured aliases on whole tokens, without guessing missing letters.
 
-    tokens = [token for token in normalized.split() if token]
+    This is a text matcher, not proof that a partial ASR hypothesis is final.
+    Keep existing alias vocabulary and keyword precedence, including masakit.
+    """
+    tokens = _normalize_vosk_text(text).split()
     if not tokens:
-        tokens = [normalized]
+        return None
 
     for keyword, aliases in TAGALOG_KEYWORD_ALIASES.items():
         for alias in aliases:
-            if " " in alias and alias in normalized:
-                return keyword
-            if alias in tokens:
-                return keyword
-
-    for token in tokens:
-        for keyword in ("tulong", "saklolo", "sunog", "aray", "agai"):
-            minimum_length = 3 if keyword in {"tulong", "aray", "agai"} else 4
-            if len(token) >= minimum_length and keyword.startswith(token):
-                return keyword
-            if (
-                len(token) >= minimum_length
-                and SequenceMatcher(None, token, keyword).ratio() >= 0.72
-            ):
+            alias_tokens = alias.split()
+            if any(tokens[start:start + len(alias_tokens)] == alias_tokens
+                   for start in range(len(tokens) - len(alias_tokens) + 1)):
                 return keyword
     return None
 

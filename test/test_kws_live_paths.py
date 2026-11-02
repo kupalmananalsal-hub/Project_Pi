@@ -1,13 +1,8 @@
-"""Characterization of the live keyword paths on main (Milestone 3 Phase B preparation).
+"""C1.45 scripted-worker and dispatcher regression guards.
 
-These tests record what the current code DOES, through the calls the live loop really
-makes: vosk_worker() on Vosk partial and final text (its recognizer.Reset() included), and
-note_vosk_text() always followed by submit() of the same keyword. They pass on main. Some
-pin defective behaviour on purpose (marked CURRENT DEFECT); such a test changes only
-together with an approved Phase B correction and its replay evidence. The defects' target
-behaviour stays in test_kws_recognition_regression.py as expected failures.
-
-Deterministic dispatcher/string logic only: no audio, no recognition rate.
+C1.44 characterized defective prefix/fusion behavior. C1.45 replaces those
+assertions with corrected expectations after reproducing the original failures.
+All recognizers, packets and transcripts here are synthetic; no audio or model.
 """
 import json
 import queue
@@ -124,30 +119,24 @@ class LiveVoskLoopTest(LivePathTestCase):
             self.assertEqual(published, [], word)
             self.assertEqual(recognizer.resets, 0, word)
 
-    def test_current_defect_ordinary_word_publishes_at_its_first_letters(self):
-        # CURRENT DEFECT (partials + prefix rule): "tulog" (sleep) publishes "tulong" at
-        # the partial "tul", and Reset() discards the rest of the word.
-        # "magandang umaga" (good morning) never matches as a whole, but its partial "maga"
-        # does (fuzzy 0.75 against "agai"); "tara" (let's go) matches "aray" (fuzzy).
-        for word, keyword in (("tulog", "tulong"), ("tuloy", "tulong"), ("araw", "aray"),
-                              ("agad", "agai"), ("sunod", "sunog"),
-                              ("magandang umaga", "agai"), ("tara", "aray")):
+    def test_ordinary_word_prefixes_do_not_publish(self):
+        for word in ("tulog", "tuloy", "araw", "agad", "sunod", "magandang umaga", "tara"):
             published, recognizer = self.run_vosk_worker(partials(word))
-            self.assertEqual(published, [(keyword, "vosk")], word)
-            self.assertGreaterEqual(recognizer.resets, 1, word)
+            self.assertEqual(published, [], word)
+            self.assertEqual(recognizer.resets, 0, word)
 
 
 class DispatcherLiveWiringTest(LivePathTestCase):
     def settle(self):
         time.sleep(self.CONFIRM + 0.1)
 
-    def test_genuine_tulong_pair_then_snowboy_help_publishes_tulong_only(self):
-        # Recall guard on the live wiring; the Snowboy help misfire is suppressed by design.
+    def test_genuine_tulong_pair_preserves_independent_snowboy_help(self):
+        # Independent sources retain their detections; acoustic correlation is not inferred.
         dispatcher, poster = self.dispatcher()
         self.vosk_pair(dispatcher, "tulong")
         dispatcher.submit("help", 0.75, "snowboy")
         self.settle()
-        self.assertEqual(poster.published, [("tulong", "vosk")])
+        self.assertEqual(poster.published, [("tulong", "vosk"), ("help", "snowboy")])
 
     def test_unrelated_speech_does_not_touch_a_pending_snowboy_help(self):
         dispatcher, poster = self.dispatcher()
@@ -156,26 +145,25 @@ class DispatcherLiveWiringTest(LivePathTestCase):
         self.settle()
         self.assertEqual(poster.published, [("help", "snowboy")])
 
-    def test_current_defect_ordinary_word_replaces_pending_snowboy_help(self):
-        # CURRENT DEFECT: "araw" (day) cancels the pending help and is published as "aray".
-        # An alert still goes out, under the wrong keyword: not a silent miss on this path.
+    def test_ordinary_word_does_not_replace_pending_snowboy_help(self):
         dispatcher, poster = self.dispatcher()
         dispatcher.submit("help", 0.75, "snowboy")
-        self.vosk_pair(dispatcher, "araw")
+        self.assertIsNone(self.vosk_pair(dispatcher, "araw"))
         self.settle()
-        self.assertEqual(poster.published, [("aray", "vosk")])
+        self.assertEqual(poster.published, [("help", "snowboy")])
 
-    def test_current_defect_ordinary_word_suppresses_openwakeword_help(self):
-        # CURRENT DEFECT: "tulog" publishes "tulong", and that suppresses a genuine
-        # openWakeWord help inside the window, with or without note_vosk_text().
-        for with_note in (True, False):
-            dispatcher, poster = self.dispatcher()
-            if with_note:
-                self.vosk_pair(dispatcher, "tulog")
-            else:
-                dispatcher.submit("tulong", 0.75, "vosk")
-            dispatcher.submit("help", 0.6, "openwakeword")
-            self.assertEqual(poster.published, [("tulong", "vosk")], with_note)
+    def test_ordinary_word_does_not_suppress_openwakeword_help(self):
+        dispatcher, poster = self.dispatcher()
+        self.assertIsNone(self.vosk_pair(dispatcher, "tulog"))
+        dispatcher.submit("help", 0.6, "openwakeword")
+        self.assertEqual(poster.published, [("help", "openwakeword")])
+
+    def test_vosk_tulong_submission_preserves_independent_openwakeword_help(self):
+        # A Vosk submission cannot establish that independent help is a misfire.
+        dispatcher, poster = self.dispatcher()
+        dispatcher.submit("tulong", 0.75, "vosk")
+        dispatcher.submit("help", 0.6, "openwakeword")
+        self.assertEqual(poster.published, [("tulong", "vosk"), ("help", "openwakeword")])
 
     def test_openwakeword_and_snowboy_help_together_publish_one_help(self):
         # Same-keyword overlap is merged by the per-keyword cooldown, not by correlation.
@@ -185,12 +173,12 @@ class DispatcherLiveWiringTest(LivePathTestCase):
         self.settle()
         self.assertEqual(poster.published, [("help", "openwakeword")])
 
-    def test_openwakeword_tulong_suppresses_snowboy_help(self):
+    def test_openwakeword_tulong_preserves_independent_snowboy_help(self):
         dispatcher, poster = self.dispatcher()
         dispatcher.submit("tulong", 0.8, "openwakeword")
         dispatcher.submit("help", 0.75, "snowboy")
         self.settle()
-        self.assertEqual(poster.published, [("tulong", "openwakeword")])
+        self.assertEqual(poster.published, [("tulong", "openwakeword"), ("help", "snowboy")])
 
     def test_different_keywords_from_one_moment_are_separate_events(self):
         # No cross-engine correlation exists: a Vosk keyword other than tulong and an

@@ -267,7 +267,7 @@ async def resident_body(request: Request) -> dict:
         if not isinstance(body, dict):
             raise ValueError()
         return body
-    except ValueError:
+    except (ValueError, RecursionError):
         raise HTTPException(400, "Invalid control message")
 
 
@@ -726,7 +726,10 @@ class AlertIdempotencyRegistry:
                 return
             future = in_flight["future"]
             if not future.done():
-                future.set_exception(exc)
+                if isinstance(exc, asyncio.CancelledError):
+                    future.cancel()
+                else:
+                    future.set_exception(exc)
 
     def snapshot_size(self) -> int:
         return len(self._completed)
@@ -2816,7 +2819,8 @@ async def api_alerts(event: AlertIn):
         trace_alert("http_receive", event_id, "duplicate")
         return duplicate_response(claim["response"])
     if claim["status"] == "in_flight":
-        cached_event = await claim["future"]
+        # A disconnected retry owns only its wait, not the shared result.
+        cached_event = await asyncio.shield(claim["future"])
         return duplicate_response(cached_event)
 
     try:
@@ -2851,7 +2855,7 @@ async def api_alerts(event: AlertIn):
         await alerts.publish(broadcast_payload)
         await alert_idempotency.complete(event_id, stored_payload)
         return {"ok": True, "duplicate_event": False, "event": stored_payload}
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
         trace_alert("backend_processing", event_id, "failed",
                     error_type=type(exc).__name__)
         await alert_idempotency.fail(event_id, exc)
